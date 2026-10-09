@@ -1,0 +1,17 @@
+[package]
+name = "circuiter-scene"
+description = "Turns Circuiter schematics into display lists for on-screen rendering and export"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+circuiter-model.workspace = true
+
+[dev-dependencies]
+circuiter-stdlib.workspace = true
+
+[lints]
+workspace = true

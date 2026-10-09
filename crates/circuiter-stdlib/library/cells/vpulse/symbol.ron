@@ -1,0 +1,21 @@
+(
+    graphics: [
+        Circle(center: (0.0, 0.0), radius: 2.54),
+        Polyline(
+            points: [
+                (-1.524, 0.762),
+                (-0.762, 0.762),
+                (-0.762, -0.762),
+                (0.762, -0.762),
+                (0.762, 0.762),
+                (1.524, 0.762),
+            ],
+        ),
+        Text(at: (3.302, -0.508), text: "${name}"),
+        Text(at: (3.302, 1.27), text: "${param.low}/${param.high}"),
+    ],
+    pins: [
+        (port: "p", at: (0.0, -5.08), direction: Down),
+        (port: "n", at: (0.0, 5.08), direction: Up),
+    ],
+)

@@ -1,0 +1,3 @@
+(
+    template: "I${inst} ${node.p} ${node.n} DC ${param.I}",
+)

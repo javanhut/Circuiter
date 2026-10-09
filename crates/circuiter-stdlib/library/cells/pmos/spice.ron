@@ -1,0 +1,6 @@
+(
+    template: "M${inst} ${node.d} ${node.g} ${node.s} ${node.b} ${model} W=${param.w} L=${param.l}",
+    models: [
+        ".model ${model} PMOS(LEVEL=1 VTO=${param.vto} KP=${param.kp} LAMBDA=${param.lambda} GAMMA=${param.gamma} PHI=${param.phi})",
+    ],
+)

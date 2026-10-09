@@ -1,0 +1,14 @@
+(
+    graphics: [
+        Arc(center: (-1.905, 0.0), radius: 0.635, start: 0.0, end: 180.0),
+        Arc(center: (-0.635, 0.0), radius: 0.635, start: 0.0, end: 180.0),
+        Arc(center: (0.635, 0.0), radius: 0.635, start: 0.0, end: 180.0),
+        Arc(center: (1.905, 0.0), radius: 0.635, start: 0.0, end: 180.0),
+        Text(at: (0.0, -1.778), text: "${name}", anchor: Center),
+        Text(at: (0.0, 2.032), text: "${param.L}", anchor: Center),
+    ],
+    pins: [
+        (port: "a", at: (-5.08, 0.0), direction: Right),
+        (port: "b", at: (5.08, 0.0), direction: Left),
+    ],
+)

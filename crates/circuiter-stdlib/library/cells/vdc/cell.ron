@@ -1,0 +1,9 @@
+(
+    description: "DC voltage source",
+    prefix: "V",
+    ports: [
+        (name: "p", kind: PowerOut, description: "Positive terminal"),
+        (name: "n", kind: PowerOut, description: "Negative terminal"),
+    ],
+    params: [(name: "V", kind: Real(unit: "V"), default: "5", description: "Voltage from p to n")],
+)

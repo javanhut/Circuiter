@@ -1,0 +1,3 @@
+(
+    template: "C${inst} ${node.a} ${node.b} ${param.C}",
+)

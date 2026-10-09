@@ -1,0 +1,6 @@
+(
+    description: "Resistor",
+    prefix: "R",
+    ports: [(name: "a"), (name: "b")],
+    params: [(name: "R", kind: Real(unit: "Ω"), default: "1k", description: "Resistance")],
+)

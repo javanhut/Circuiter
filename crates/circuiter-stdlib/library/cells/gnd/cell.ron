@@ -1,0 +1,6 @@
+(
+    description: "Ground: the 0 V reference node",
+    prefix: "GND",
+    ports: [(name: "gnd")],
+    global_net: "GND",
+)

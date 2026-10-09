@@ -1,0 +1,10 @@
+(
+    description: "CMOS inverter, transistor level",
+    prefix: "U",
+    ports: [
+        (name: "in", kind: Input),
+        (name: "out", kind: Output),
+        (name: "vdd", kind: PowerIn),
+        (name: "vss", kind: PowerIn),
+    ],
+)

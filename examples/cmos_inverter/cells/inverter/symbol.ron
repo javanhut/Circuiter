@@ -1,0 +1,13 @@
+(
+    graphics: [
+        Polyline(points: [(-2.54, -2.54), (-2.54, 2.54), (1.778, 0.0), (-2.54, -2.54)]),
+        Circle(center: (2.286, 0.0), radius: 0.508),
+        Text(at: (2.54, -2.54), text: "${name}"),
+    ],
+    pins: [
+        (port: "in", at: (-5.08, 0.0), direction: Right),
+        (port: "out", at: (5.08, 0.0), direction: Left, length: 2.286),
+        (port: "vdd", at: (0.0, -5.08), direction: Down, length: 4.064),
+        (port: "vss", at: (0.0, 5.08), direction: Up, length: 4.064),
+    ],
+)

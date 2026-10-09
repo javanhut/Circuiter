@@ -1,0 +1,4 @@
+[project]
+name = "cmos_inverter"
+top = "testbench"
+description = "A CMOS inverter built from two MOSFETs, wrapped as a reusable cell and driven by a clock"

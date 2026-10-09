@@ -1,0 +1,14 @@
+(
+    graphics: [
+        Circle(center: (0.0, 0.0), radius: 2.54),
+        Polyline(points: [(-0.508, -1.27), (0.508, -1.27)]),
+        Polyline(points: [(0.0, -1.778), (0.0, -0.762)]),
+        Polyline(points: [(-0.508, 1.27), (0.508, 1.27)]),
+        Text(at: (3.302, -0.508), text: "${name}"),
+        Text(at: (3.302, 1.27), text: "${param.V}"),
+    ],
+    pins: [
+        (port: "p", at: (0.0, -5.08), direction: Down),
+        (port: "n", at: (0.0, 5.08), direction: Up),
+    ],
+)

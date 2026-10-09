@@ -1,0 +1,5 @@
+(
+    description: "Testbench: 1.8 V supply, 100 MHz clock into the inverter, 10 fF load",
+    prefix: "X",
+    ports: [],
+)

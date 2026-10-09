@@ -1,0 +1,6 @@
+(
+    description: "DC current source. Current flows from p through the source to n, so it leaves the source at n",
+    prefix: "I",
+    ports: [(name: "p", kind: PowerOut), (name: "n", kind: PowerOut)],
+    params: [(name: "I", kind: Real(unit: "A"), default: "1m", description: "Current")],
+)

@@ -1,0 +1,3 @@
+(
+    template: "V${inst} ${node.p} ${node.n} PULSE(${param.low} ${param.high} 0 ${param.edge} ${param.edge} {${param.duty}/${param.frequency}-${param.edge}} {1/${param.frequency}})",
+)

@@ -1,0 +1,27 @@
+(
+    description: "Pulse voltage source",
+    prefix: "V",
+    ports: [
+        (name: "p", kind: PowerOut, description: "Positive terminal"),
+        (name: "n", kind: PowerOut, description: "Negative terminal"),
+    ],
+    params: [
+        (name: "low", kind: Real(unit: "V"), default: "0", description: "Initial (low) level"),
+        (name: "high", kind: Real(unit: "V"), default: "5", description: "Pulsed (high) level"),
+        (
+            name: "delay",
+            kind: Real(unit: "s"),
+            default: "0",
+            description: "Delay before the first edge",
+        ),
+        (name: "rise", kind: Real(unit: "s"), default: "1n", description: "Rise time"),
+        (name: "fall", kind: Real(unit: "s"), default: "1n", description: "Fall time"),
+        (
+            name: "width",
+            kind: Real(unit: "s"),
+            default: "500n",
+            description: "Time spent at the high level",
+        ),
+        (name: "period", kind: Real(unit: "s"), default: "1u", description: "Repetition period"),
+    ],
+)

@@ -1,0 +1,6 @@
+(
+    description: "Capacitor",
+    prefix: "C",
+    ports: [(name: "a"), (name: "b")],
+    params: [(name: "C", kind: Real(unit: "F"), default: "1u", description: "Capacitance")],
+)

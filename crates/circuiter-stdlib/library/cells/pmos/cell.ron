@@ -1,0 +1,39 @@
+(
+    description: "P-channel enhancement MOSFET (SPICE Level 1)",
+    prefix: "M",
+    ports: [
+        (name: "d", description: "Drain"),
+        (name: "g", kind: Input, description: "Gate"),
+        (name: "s", description: "Source"),
+        (name: "b", description: "Body (bulk)"),
+    ],
+    params: [
+        (name: "w", kind: Real(unit: "m"), default: "1u", description: "Channel width"),
+        (name: "l", kind: Real(unit: "m"), default: "180n", description: "Channel length"),
+        (
+            name: "vto",
+            kind: Real(unit: "V"),
+            default: "-0.7",
+            description: "Zero-bias threshold voltage",
+        ),
+        (
+            name: "kp",
+            kind: Real(unit: "A/V²"),
+            default: "50u",
+            description: "Transconductance parameter",
+        ),
+        (
+            name: "lambda",
+            kind: Real(unit: "1/V"),
+            default: "0.04",
+            description: "Channel-length modulation",
+        ),
+        (
+            name: "gamma",
+            kind: Real(unit: "√V"),
+            default: "0.4",
+            description: "Body-effect coefficient",
+        ),
+        (name: "phi", kind: Real(unit: "V"), default: "0.65", description: "Surface potential"),
+    ],
+)

@@ -1,0 +1,6 @@
+(
+    description: "Inductor",
+    prefix: "L",
+    ports: [(name: "a"), (name: "b")],
+    params: [(name: "L", kind: Real(unit: "H"), default: "1u", description: "Inductance")],
+)

@@ -1,0 +1,20 @@
+(
+    description: "Clock source: a square wave set by frequency and duty cycle",
+    prefix: "V",
+    ports: [
+        (name: "p", kind: PowerOut, description: "Clock output"),
+        (name: "n", kind: PowerOut, description: "Reference"),
+    ],
+    params: [
+        (name: "frequency", kind: Real(unit: "Hz"), default: "1M", description: "Clock frequency"),
+        (
+            name: "duty",
+            kind: Real(unit: ""),
+            default: "0.5",
+            description: "Duty cycle, 0 to 1, measured at the 50% points",
+        ),
+        (name: "low", kind: Real(unit: "V"), default: "0", description: "Low level"),
+        (name: "high", kind: Real(unit: "V"), default: "5", description: "High level"),
+        (name: "edge", kind: Real(unit: "s"), default: "1n", description: "Rise and fall time"),
+    ],
+)

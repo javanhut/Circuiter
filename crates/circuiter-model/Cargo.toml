@@ -1,0 +1,20 @@
+[package]
+name = "circuiter-model"
+description = "Unified design data model for Circuiter: libraries, cells, views and project format"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ron.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

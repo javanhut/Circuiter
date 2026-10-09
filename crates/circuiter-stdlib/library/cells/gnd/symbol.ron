@@ -1,0 +1,8 @@
+(
+    graphics: [
+        Polyline(points: [(-1.27, 1.27), (1.27, 1.27)]),
+        Polyline(points: [(-0.762, 1.778), (0.762, 1.778)]),
+        Polyline(points: [(-0.254, 2.286), (0.254, 2.286)]),
+    ],
+    pins: [(port: "gnd", at: (0.0, 0.0), direction: Down, length: 1.27)],
+)

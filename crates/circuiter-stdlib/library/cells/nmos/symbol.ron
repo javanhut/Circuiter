@@ -1,0 +1,23 @@
+(
+    graphics: [
+        Polyline(points: [(-2.54, -1.524), (-2.54, 1.524)]),
+        Polyline(points: [(-1.778, -1.778), (-1.778, -1.016)]),
+        Polyline(points: [(-1.778, -0.381), (-1.778, 0.381)]),
+        Polyline(points: [(-1.778, 1.016), (-1.778, 1.778)]),
+        Polyline(points: [(-1.778, -1.397), (0.0, -1.397), (0.0, -2.54)]),
+        Polyline(points: [(-1.778, 1.397), (0.0, 1.397), (0.0, 2.54)]),
+        Polyline(points: [(-1.778, 0.0), (0.0, 0.0)]),
+        Text(at: (3.302, -1.27), text: "${name}"),
+        Text(at: (3.302, 1.27), text: "${param.w}/${param.l}"),
+        Polyline(
+            points: [(-1.778, 0.0), (-1.016, -0.508), (-1.016, 0.508), (-1.778, 0.0)],
+            fill: true,
+        ),
+    ],
+    pins: [
+        (port: "g", at: (-5.08, 0.0), direction: Right),
+        (port: "d", at: (0.0, -5.08), direction: Down),
+        (port: "s", at: (0.0, 5.08), direction: Up),
+        (port: "b", at: (2.54, 0.0), direction: Left),
+    ],
+)

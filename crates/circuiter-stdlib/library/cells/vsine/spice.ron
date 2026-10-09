@@ -1,0 +1,3 @@
+(
+    template: "V${inst} ${node.p} ${node.n} DC ${param.offset} AC ${param.ac} SIN(${param.offset} ${param.amplitude} ${param.frequency} 0 0 ${param.phase})",
+)

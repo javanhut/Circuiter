@@ -1,0 +1,31 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+authors = ["The Circuiter Authors"]
+rust-version = "1.85"
+
+[workspace.dependencies]
+circuiter-model = { path = "crates/circuiter-model" }
+circuiter-stdlib = { path = "crates/circuiter-stdlib" }
+circuiter-scene = { path = "crates/circuiter-scene" }
+
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+include_dir = "0.7"
+ron = "0.8"
+serde = { version = "1", features = ["derive"] }
+tempfile = "3"
+thiserror = "2"
+toml = "0.8"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }

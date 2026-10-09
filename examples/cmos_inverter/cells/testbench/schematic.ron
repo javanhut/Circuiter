@@ -1,0 +1,40 @@
+(
+    instances: [
+        (name: "VDD", cell: "std:vdc", placement: (position: (0.0, 0.0)), params: {"V": "1.8"}),
+        (name: "GND1", cell: "std:gnd", placement: (position: (0.0, 7.62))),
+        (
+            name: "VCLK",
+            cell: "std:clock",
+            placement: (position: (15.24, 0.0)),
+            params: {"edge": "50p", "frequency": "100M", "high": "1.8"},
+        ),
+        (name: "GND2", cell: "std:gnd", placement: (position: (15.24, 7.62))),
+        (name: "U1", cell: "inverter", placement: (position: (35.56, 0.0))),
+        (name: "GND3", cell: "std:gnd", placement: (position: (35.56, 7.62))),
+        (
+            name: "CL",
+            cell: "std:capacitor",
+            placement: (position: (48.26, 2.54), rotation: R270),
+            params: {"C": "10f"},
+        ),
+        (name: "GND4", cell: "std:gnd", placement: (position: (48.26, 7.62))),
+    ],
+    wires: [
+        (points: [(0.0, -5.08), (0.0, -7.62)]),
+        (points: [(0.0, 5.08), (0.0, 7.62)]),
+        (points: [(15.24, -5.08), (15.24, -7.62)]),
+        (points: [(15.24, 5.08), (15.24, 7.62)]),
+        (points: [(27.94, 0.0), (30.48, 0.0)]),
+        (points: [(35.56, -5.08), (35.56, -7.62)]),
+        (points: [(35.56, 5.08), (35.56, 7.62)]),
+        (points: [(40.64, 0.0), (48.26, 0.0)]),
+        (points: [(48.26, 5.08), (48.26, 7.62)]),
+    ],
+    labels: [
+        (net: "VDD", at: (0.0, -7.62)),
+        (net: "IN", at: (15.24, -7.62)),
+        (net: "IN", at: (27.94, 0.0)),
+        (net: "VDD", at: (35.56, -7.62)),
+        (net: "OUT", at: (44.45, 0.0)),
+    ],
+)

@@ -1,0 +1,20 @@
+(
+    description: "Sine voltage source (AC)",
+    prefix: "V",
+    ports: [
+        (name: "p", kind: PowerOut, description: "Positive terminal"),
+        (name: "n", kind: PowerOut, description: "Negative terminal"),
+    ],
+    params: [
+        (name: "offset", kind: Real(unit: "V"), default: "0", description: "DC offset"),
+        (name: "amplitude", kind: Real(unit: "V"), default: "1", description: "Peak amplitude"),
+        (name: "frequency", kind: Real(unit: "Hz"), default: "1k", description: "Frequency"),
+        (name: "phase", kind: Real(unit: "°"), default: "0", description: "Phase at t = 0"),
+        (
+            name: "ac",
+            kind: Real(unit: "V"),
+            default: "1",
+            description: "Magnitude for AC (small-signal) analysis",
+        ),
+    ],
+)
