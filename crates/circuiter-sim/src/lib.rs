@@ -14,6 +14,7 @@
 //! ```
 
 mod analysis;
+pub mod behave;
 mod circuit;
 pub mod device;
 pub mod number;

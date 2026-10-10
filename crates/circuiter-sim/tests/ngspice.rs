@@ -568,3 +568,58 @@ fn op_and_tran_switches() {
         0.02,
     );
 }
+
+#[test]
+fn op_behavioral_sources() {
+    compare_op(
+        "V1 in 0 DC 0.3\nB1 out 0 V={10*tanh(5*V(in))}\nR1 out 0 1k\n\
+         B2 0 x I=1m*V(in,0)^2+V(out)*1u\nR2 x 0 1k\n\
+         VS out s DC 0\nR3 s 0 2k\nB3 y 0 V=I(VS)*1k + (V(in) > 0.2 ? 1 : 0)\nR4 y 0 1k",
+    );
+}
+
+#[test]
+fn tran_behavioral_source_in_a_subcircuit() {
+    // A cube-law amplifier driving an RC, inside a sub-circuit with a parameter.
+    compare_tran(
+        "V1 in 0 SIN(0 1 1k)\nX1 in o cube k=2\nR1 o o2 1k\nC1 o2 0 100n\n\
+         .subckt cube a y k=1\nB1 y 0 V={k*V(a)^3}\n.ends",
+        2e-3,
+        2e-6,
+        "o2",
+        0.01,
+    );
+}
+
+const JFETS: &str = "\
+.model jn NJF(VTO=-3 BETA=1.304m LAMBDA=2.25m RD=1 RS=1 IS=33.57f CGS=2.414p CGD=1.6p PB=1)
+.model jp PJF(VTO=-2.5 BETA=0.5m LAMBDA=5m IS=10f CGS=4p CGD=2p)";
+
+/// A self-biased common-source stage and a p-channel follower, in all their regions.
+const JFET_AMP: &str = "\
+VDD vdd 0 DC 15
+RD vdd d 2.2k
+J1 d g s jn
+RS s 0 1k
+RG g 0 1meg
+CI in g 1u
+CS s 0 100u
+J2 0 d s2 jp
+RS2 vdd s2 4.7k";
+
+#[test]
+fn op_jfets() {
+    compare_op(&format!("V1 in 0 DC 0\n{JFET_AMP}\n{JFETS}"));
+    // Forward-biased gate, and the reverse (drain below source) region.
+    compare_op(&format!("V1 g 0 DC 0.8\nRG g g2 1k\nVD d 0 DC -0.5\nJ1 d g2 0 jn\n{JFETS}"));
+}
+
+#[test]
+fn tran_jfet_amplifier() {
+    compare_tran(&format!("V1 in 0 SIN(0 0.2 10k)\n{JFET_AMP}\n{JFETS}"), 3e-4, 2e-7, "d", 0.01);
+}
+
+#[test]
+fn ac_jfet_amplifier() {
+    compare_ac(&format!("V1 in 0 DC 0 AC 1\n{JFET_AMP}\n{JFETS}"), "d", 10.0, 100e6);
+}

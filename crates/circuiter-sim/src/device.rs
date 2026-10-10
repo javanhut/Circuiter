@@ -882,3 +882,97 @@ mod tests {
         assert_eq!(sine.dc(), 1.0, "time-zero value when there is no DC value");
     }
 }
+
+/// JFET model parameters (SPICE level 1, Shichman-Hodges).
+#[derive(Debug, Clone, PartialEq)]
+pub struct JfetModel {
+    /// 1 for n-channel (`NJF`), -1 for p-channel (`PJF`).
+    pub polarity: f64,
+    /// Pinch-off voltage: negative for an n-channel part.
+    pub vto: f64,
+    pub beta: f64,
+    pub lambda: f64,
+    pub rd: f64,
+    pub rs: f64,
+    pub cgs: f64,
+    pub cgd: f64,
+    pub pb: f64,
+    pub is: f64,
+    pub n: f64,
+    pub fc: f64,
+}
+
+impl JfetModel {
+    pub fn from_card(m: &ModelCard) -> Result<Self, String> {
+        let polarity = match m.kind.as_str() {
+            "njf" => 1.0,
+            "pjf" => -1.0,
+            other => return Err(format!("`{other}` is not a JFET model (NJF or PJF)")),
+        };
+        Ok(JfetModel {
+            polarity,
+            vto: param(m, "vto", -2.0),
+            beta: param(m, "beta", 1e-4),
+            lambda: param(m, "lambda", 0.0),
+            rd: param(m, "rd", 0.0),
+            rs: param(m, "rs", 0.0),
+            cgs: param(m, "cgs", 0.0),
+            cgd: param(m, "cgd", 0.0),
+            pb: param(m, "pb", 1.0),
+            is: param(m, "is", 1e-14),
+            n: param(m, "n", 1.0),
+            fc: param(m, "fc", 0.5),
+        })
+    }
+}
+
+/// A junction FET, with its drain and source resistances on internal nodes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Jfet {
+    pub d: usize,
+    pub g: usize,
+    pub s: usize,
+    /// The channel's ends: `d` and `s` unless there is series resistance.
+    pub di: usize,
+    pub si: usize,
+    pub area: f64,
+    pub model: JfetModel,
+}
+
+impl Jfet {
+    pub fn vcrit(&self) -> f64 {
+        let nvt = self.model.n * VT;
+        nvt * (nvt / (std::f64::consts::SQRT_2 * self.model.is * self.area)).ln()
+    }
+
+    /// A gate junction's current and conductance.
+    pub fn gate(&self, v: f64, gmin: f64) -> (f64, f64) {
+        let nvt = self.model.n * VT;
+        let is = self.model.is * self.area;
+        if v > -3.0 * nvt {
+            let e = (v / nvt).min(80.0).exp();
+            (is * (e - 1.0) + gmin * v, is * e / nvt + gmin)
+        } else {
+            (-is + gmin * v, gmin)
+        }
+    }
+
+    /// Channel current and its derivatives `(id, gm, gds)` for `vds >= 0`, in
+    /// normalised (n-channel) form.
+    pub fn channel(&self, vgs: f64, vds: f64) -> (f64, f64, f64) {
+        let m = &self.model;
+        let beta = m.beta * self.area;
+        let vgst = vgs - m.vto;
+        if vgst <= 0.0 {
+            return (0.0, 0.0, 0.0);
+        }
+        let betap = beta * (1.0 + m.lambda * vds);
+        if vgst >= vds {
+            // Linear region.
+            let cpart = vds * (2.0 * vgst - vds);
+            (betap * cpart, 2.0 * betap * vds, 2.0 * betap * (vgst - vds) + beta * m.lambda * cpart)
+        } else {
+            (betap * vgst * vgst, 2.0 * betap * vgst, m.lambda * beta * vgst * vgst)
+        }
+    }
+}

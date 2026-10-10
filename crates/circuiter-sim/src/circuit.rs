@@ -1,6 +1,8 @@
 //! A parsed deck turned into devices on numbered nodes, ready to simulate.
 
-use crate::device::{Bjt, BjtModel, Diode, DiodeModel, MosModel, Mosfet, Source};
+use crate::device::{
+    Bjt, BjtModel, Diode, DiodeModel, Jfet, JfetModel, MosModel, Mosfet, Source,
+};
 use crate::parse::{Deck, parse};
 use std::collections::HashMap;
 
@@ -38,6 +40,7 @@ pub enum Element {
     Diode(Diode),
     Mosfet(Mosfet),
     Bjt(Bjt),
+    Jfet(Jfet),
     /// `E`: a voltage between `p` and `n` of `gain` times the voltage from `cp` to `cn`.
     Vcvs {
         p: usize,
@@ -97,8 +100,27 @@ pub enum Element {
         n: usize,
         branch: Option<usize>,
         inputs: Vec<PolyInput>,
-        poly: Polynomial,
+        poly: Law,
     },
+}
+
+/// What a controlled source computes from its inputs.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Law {
+    /// SPICE2 `POLY`.
+    Poly(Polynomial),
+    /// A `B` source's expression, which may also depend on time.
+    Expr(std::sync::Arc<crate::behave::Expr>),
+}
+
+impl Law {
+    /// The value and its partial derivatives at inputs `x` and time `t`.
+    pub fn eval(&self, x: &[f64], t: f64) -> (f64, Vec<f64>) {
+        match self {
+            Law::Poly(p) => p.eval(x),
+            Law::Expr(e) => e.eval(x, t),
+        }
+    }
 }
 
 /// What a switch watches.
@@ -204,6 +226,7 @@ impl Device {
             Element::Diode(d) => vec![d.anode, d.cathode],
             Element::Mosfet(m) => vec![m.d, m.g, m.s, m.b],
             Element::Bjt(q) => vec![q.c, q.b, q.e],
+            Element::Jfet(j) => vec![j.d, j.g, j.s],
             Element::Vcvs { p, n, cp, cn, .. } | Element::Vccs { p, n, cp, cn, .. } => {
                 vec![*p, *n, *cp, *cn]
             }
@@ -232,7 +255,7 @@ impl Device {
             | Element::Diode(_)
             | Element::Switch { .. } => 1,
             Element::Mosfet(_) => 5,
-            Element::Bjt(_) => 2,
+            Element::Bjt(_) | Element::Jfet(_) => 2,
             _ => 0,
         }
     }
@@ -371,7 +394,24 @@ impl Circuit {
                         n: nodes[1],
                         branch,
                         inputs,
-                        poly: Polynomial::new(dims, card.values.clone()),
+                        poly: Law::Poly(Polynomial::new(dims, card.values.clone())),
+                    }
+                }
+                'B' => {
+                    let b = card.behavior.as_ref().ok_or_else(|| at("needs an expression".into()))?;
+                    let mut inputs: Vec<PolyInput> = b
+                        .voltages
+                        .iter()
+                        .map(|(p, n)| PolyInput::Voltage(c.node_or_insert(p), c.node_or_insert(n)))
+                        .collect();
+                    inputs.extend(b.currents.iter().map(|_| PolyInput::Current(usize::MAX)));
+                    let branch = (!b.current).then(|| c.branch(&card.name));
+                    Element::Poly {
+                        p: nodes[0],
+                        n: nodes[1],
+                        branch,
+                        inputs,
+                        poly: Law::Expr(std::sync::Arc::new(b.expr.clone())),
                     }
                 }
                 'E' => Element::Vcvs {
@@ -431,6 +471,25 @@ impl Circuit {
                     let area = first(0).unwrap_or(1.0);
                     Element::Diode(Diode::new(nodes[0], nodes[1], junction, area, model))
                 }
+                'J' => {
+                    let name = card.model.as_deref().unwrap_or_default();
+                    let m = models.get(name).ok_or_else(|| at(format!("no model `{name}`")))?;
+                    let model = JfetModel::from_card(m).map_err(at)?;
+                    let mut internal = |r: f64, node: usize, tag: &str| {
+                        if r > 0.0 { c.internal(&format!("{}#{tag}", card.name)) } else { node }
+                    };
+                    let di = internal(model.rd, nodes[0], "d");
+                    let si = internal(model.rs, nodes[2], "s");
+                    Element::Jfet(Jfet {
+                        d: nodes[0],
+                        g: nodes[1],
+                        s: nodes[2],
+                        di,
+                        si,
+                        area: first(0).unwrap_or(1.0),
+                        model,
+                    })
+                }
                 'M' => {
                     let name = card.model.as_deref().unwrap_or_default();
                     let m = models.get(name).ok_or_else(|| at(format!("no model `{name}`")))?;
@@ -457,7 +516,7 @@ impl Circuit {
             c.slots += Device::slot_count(&element);
             c.devices.push(Device { name: card.name.clone(), element, slot });
         }
-        for card in deck.cards.iter().filter(|c| matches!(c.kind(), 'F' | 'H' | 'W')) {
+        for card in deck.cards.iter().filter(|c| matches!(c.kind(), 'F' | 'H' | 'W' | 'B')) {
             let at = |e: String| format!("line {}: {}: {e}", card.line, card.name);
             let mut controls = Vec::new();
             for r in &card.refs {
@@ -472,7 +531,9 @@ impl Circuit {
                     *k = controls[0]
                 }
                 Element::Poly { inputs, .. } => {
-                    for (input, b) in inputs.iter_mut().zip(controls) {
+                    let unresolved =
+                        inputs.iter_mut().filter(|i| **i == PolyInput::Current(usize::MAX));
+                    for (input, b) in unresolved.zip(controls) {
                         *input = PolyInput::Current(b);
                     }
                 }
@@ -580,6 +641,11 @@ impl Circuit {
                     // Channel and bulk junctions conduct; the gate is insulated.
                     dc.union(m.d, m.s);
                     dc.union(m.d, m.b);
+                }
+                Element::Jfet(j) => {
+                    for (a, b) in [(j.d, j.di), (j.s, j.si), (j.di, j.si), (j.g, j.si)] {
+                        dc.union(a, b);
+                    }
                 }
                 Element::Bjt(q) => {
                     for (a, b) in

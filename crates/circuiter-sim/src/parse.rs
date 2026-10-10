@@ -53,6 +53,8 @@ pub struct Card {
     /// (E, G) or source names (F, H) follow the output nodes; `values` holds the
     /// polynomial coefficients.
     pub poly: Option<usize>,
+    /// For `B` sources, the expression and what it reads.
+    pub behavior: Option<crate::behave::Behavior>,
     pub line: usize,
 }
 
@@ -354,6 +356,11 @@ fn expand(
             continue;
         }
         let at = |e: String| format!("line {line}: {e}");
+        if text.starts_with(['b', 'B']) {
+            // A behavioural source's braces hold its expression, not a parameter.
+            deck.cards.push(behavioral_card(text, *line, &scope).map_err(at)?);
+            continue;
+        }
         let substituted = scope.substitute(text).map_err(at)?;
         let tokens = tokenize(&substituted);
         let Some(Token::Word(first)) = tokens.first() else { continue };
@@ -386,6 +393,34 @@ fn expand(
         deck.cards.push(card);
     }
     Ok(())
+}
+
+/// `Bname n+ n- V=expr` or `I=expr`.
+fn behavioral_card(text: &str, line: usize, scope: &Scope) -> Result<Card, String> {
+    let mut words = text.splitn(4, char::is_whitespace).filter(|w| !w.is_empty());
+    let name = words.next().unwrap_or_default().to_owned();
+    let (Some(p), Some(n), Some(rest)) = (words.next(), words.next(), words.next()) else {
+        return Err(format!("{name} needs two nodes and V= or I= an expression"));
+    };
+    let behavior = crate::behave::Behavior::parse(
+        rest,
+        &|k| scope.params.get(k).copied(),
+        &|node| scope.node(node),
+        &|e| scope.element(e),
+    )
+    .map_err(|e| format!("{name}: {e}"))?;
+    Ok(Card {
+        name: scope.element(&name),
+        nodes: vec![scope.node(p), scope.node(n)],
+        values: Vec::new(),
+        model: None,
+        refs: behavior.currents.clone(),
+        params: BTreeMap::new(),
+        source: None,
+        poly: None,
+        behavior: Some(behavior),
+        line,
+    })
 }
 
 /// Splits `nodes... [params:] key=value...` into the names and the parameter
@@ -500,7 +535,7 @@ fn element_card(tokens: &[Token], line: usize) -> Result<Card, String> {
     let n_nodes = match kind {
         'R' | 'C' | 'L' | 'V' | 'I' | 'D' => 2,
         'M' => 4,
-        'Q' => 3,
+        'Q' | 'J' => 3,
         'E' | 'G' => 4,
         'F' | 'H' => 2,
         'S' => 4,
@@ -517,6 +552,7 @@ fn element_card(tokens: &[Token], line: usize) -> Result<Card, String> {
         params: BTreeMap::new(),
         source: None,
         poly: None,
+        behavior: None,
         line,
     };
     if matches!(kind, 'E' | 'G' | 'F' | 'H')
@@ -571,7 +607,7 @@ fn element_card(tokens: &[Token], line: usize) -> Result<Card, String> {
             card.refs = words;
             card.params = params;
         }
-        'D' | 'M' => {
+        'D' | 'M' | 'J' => {
             let model = rest.first().and_then(word).ok_or(format!("{name} needs a model name"))?;
             card.model = Some(model.to_ascii_lowercase());
             let (values, params) = values_and_params(&rest[1..])?;

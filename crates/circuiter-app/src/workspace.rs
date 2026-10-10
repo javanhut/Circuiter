@@ -122,7 +122,8 @@ impl Tool {
 #[derive(Debug)]
 enum Drag {
     /// Moving objects on `grid`; `base` is the cell before the move started.
-    Move { base: Box<CellDef>, from: Point, grid: Length, targets: BTreeSet<Owner> },
+    /// `grab` is where the pointer took hold, unsnapped: which segment of a wire.
+    Move { base: Box<CellDef>, from: Point, grab: Point, grid: Length, targets: BTreeSet<Owner> },
     /// Rubber-band selection.
     Band { from: Pt },
     /// Drawing a wire by dragging it out of a pin: let go to end it.
@@ -1478,21 +1479,30 @@ impl Workspace {
                     let fine = self.mode == Mode::Symbol
                         && !targets.iter().any(|t| matches!(t, Owner::Pin(_)));
                     let grid = if fine { FINE_GRID } else { GRID };
-                    let from = edit::snap(to_point(from), grid);
-                    self.drag = Some(Drag::Move { base, from, grid, targets });
+                    let grab = to_point(from);
+                    let from = edit::snap(grab, grid);
+                    self.drag = Some(Drag::Move { base, from, grab, grid, targets });
                 }
                 _ => self.drag = Some(Drag::Band { from }),
             },
             (Tool::Select, Gesture::Drag { to, .. }) => {
-                if let Some(Drag::Move { base, from, grid, targets }) = &self.drag {
+                if let Some(Drag::Move { base, from, grab, grid, targets }) = &self.drag {
                     let delta = edit::snap(to_point(to), *grid) - *from;
                     let mut def = (**base).clone();
                     let id = self.current().cell.clone();
-                    match self.mode {
-                        Mode::Schematic => {
+                    let lone_wire = match targets.iter().collect::<Vec<_>>()[..] {
+                        [Owner::Wire(w)] => Some(*w),
+                        _ => None,
+                    };
+                    match (self.mode, lone_wire) {
+                        // One wire: drag the segment under the pointer, as EDA tools do.
+                        (Mode::Schematic, Some(w)) => {
+                            edit::drag_segment(&self.design, &id.library, &mut def, w, *grab, delta)
+                        }
+                        (Mode::Schematic, None) => {
                             edit::translate(&self.design, &id.library, &mut def, targets, delta)
                         }
-                        Mode::Symbol => symbol_edit::translate(&mut def, targets, delta),
+                        (Mode::Symbol, _) => symbol_edit::translate(&mut def, targets, delta),
                     }
                     builder::sync(base, &mut def);
                     *self.design.cell_mut(&id).expect("exists") = def;

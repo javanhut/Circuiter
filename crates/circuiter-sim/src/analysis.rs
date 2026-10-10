@@ -577,7 +577,7 @@ impl<'c> Engine<'c> {
                         _ => 0.0,
                     })
                     .collect();
-                let (y, grad) = poly.eval(&xs);
+                let (y, grad) = poly.eval(&xs, ctx.time.unwrap_or(0.0));
                 let y0 = y - grad.iter().zip(&xs).map(|(g, x)| g * x).sum::<f64>();
                 match branch {
                     Some(b) => {
@@ -705,6 +705,47 @@ impl<'c> Engine<'c> {
                     now[slot] = Slot { q: qa, i, ..Slot::default() };
                     if ctx.ag0 > 0.0 && c != 0.0 {
                         current(s, l, bi, other, i, &[(bi, other, geq, vj)]);
+                    }
+                }
+            }
+            Element::Jfet(j) => {
+                let p = j.model.polarity;
+                let (mut vgs, mut vgd) = (p * (v(j.g) - v(j.si)), p * (v(j.g) - v(j.di)));
+                if ctx.init {
+                    (vgs, vgd) = (-1.0, -1.0);
+                } else {
+                    let vcrit = j.vcrit();
+                    let nvt = j.model.n * VT;
+                    let (a, ca) = pnjlim(vgs, lim[0], nvt, vcrit);
+                    let (b, cb) = pnjlim(vgd, lim[1], nvt, vcrit);
+                    (vgs, vgd) = (a, b);
+                    limited |= ca || cb;
+                }
+                *lim = [vgs, vgd, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+                let vds = vgs - vgd;
+                let (cg, ggs) = j.gate(vgs, ctx.gmin);
+                let (cd, ggd) = j.gate(vgd, ctx.gmin);
+                current(s, l, j.g, j.si, p * cg, &[(j.g, j.si, ggs, p * vgs)]);
+                current(s, l, j.g, j.di, p * cd, &[(j.g, j.di, ggd, p * vgd)]);
+                // In reverse the drain and source swap roles.
+                let (de, se, vgse, vdse) =
+                    if vds >= 0.0 { (j.di, j.si, vgs, vds) } else { (j.si, j.di, vgd, -vds) };
+                let (id, gm, gds) = j.channel(vgse, vdse);
+                current(s, l, de, se, p * id, &[(j.g, se, gm, p * vgse), (de, se, gds, p * vdse)]);
+                for (r, a, b) in [(j.model.rd, j.d, j.di), (j.model.rs, j.s, j.si)] {
+                    if r > 0.0 {
+                        conductance(s, l, a, b, j.area / r);
+                    }
+                }
+                let caps = [(j.model.cgs, j.si, vgs), (j.model.cgd, j.di, vgd)];
+                for (k, (cj, other, vj)) in caps.into_iter().enumerate() {
+                    let (qn, c) = depletion(cj * j.area, j.model.pb, 0.5, j.model.fc, vj);
+                    let slot = dev.slot + k;
+                    let q = p * qn;
+                    let (i, geq) = Self::integrate(ctx, slot, q, c);
+                    now[slot] = Slot { q, i, ..Slot::default() };
+                    if ctx.ag0 > 0.0 && c != 0.0 {
+                        current(s, l, j.g, other, i, &[(j.g, other, geq, p * vj)]);
                     }
                 }
             }
@@ -1148,6 +1189,13 @@ impl<'c> Engine<'c> {
                     let (cbd, gbd) = bulk_junction(is, vbs - vds, self.o.gmin);
                     let mode = if forward { 1.0 } else { -1.0 };
                     [vgs, vds, vbs, von, id, gm, gds, gmbs, gbd, gbs, cbs + cbd, mode]
+                }
+                Element::Jfet(j) => {
+                    let p = j.model.polarity;
+                    let mut l = [0.0; 12];
+                    l[0] = p * (v(j.g) - v(j.si));
+                    l[1] = p * (v(j.g) - v(j.di));
+                    l
                 }
                 Element::Bjt(q) => {
                     let p = q.model.polarity;

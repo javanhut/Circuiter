@@ -271,6 +271,148 @@ pub fn translate(
     }
 }
 
+/// Drags one segment of wire `w`: the segment nearest `grab`, sideways only (a
+/// horizontal segment up or down, a vertical one left or right), as an EDA tool does.
+/// The segments either side stretch to stay attached, so the wire keeps its shape
+/// relative to the parts. Where the dragged segment ends on a pin, another wire or a
+/// label, a new jog joins it back. Wires ending on the dragged segment, and labels on
+/// it, come along.
+pub fn drag_segment(
+    design: &Design,
+    library: &str,
+    def: &mut CellDef,
+    w: usize,
+    grab: Point,
+    delta: Point,
+) {
+    let Some(s) = def.schematic.as_mut() else { return };
+    let Some(wire) = s.wires.get(w) else { return };
+    let old = wire.points.clone();
+    if old.len() < 2 {
+        return;
+    }
+    // The segment under the pointer.
+    let dist = |a: Point, b: Point| {
+        let (x0, x1) = (a.x.min(b.x), a.x.max(b.x));
+        let (y0, y1) = (a.y.min(b.y), a.y.max(b.y));
+        let cx = grab.x.max(x0).min(x1);
+        let cy = grab.y.max(y0).min(y1);
+        distance(grab, Point::new(cx, cy))
+    };
+    let k = (0..old.len() - 1).min_by_key(|&k| dist(old[k], old[k + 1])).expect("a segment");
+    let (a, b) = (old[k], old[k + 1]);
+    let d = if a.y == b.y {
+        Point::new(Length(0), delta.y)
+    } else if a.x == b.x {
+        Point::new(delta.x, Length(0))
+    } else {
+        delta
+    };
+    if d == Point::ORIGIN {
+        return;
+    }
+    let pins = all_pins(design, library, s);
+    let on = |wire: &[Point], p: Point| {
+        wire.contains(&p) || wire.windows(2).any(|seg| inside(p, seg[0], seg[1]))
+    };
+    // A wire end held by something else stays where it is.
+    let held = |p: Point| {
+        pins.contains(&p)
+            || s.labels.iter().any(|l| l.at == p)
+            || s.ports.iter().any(|q| q.at == p)
+            || s.wires.iter().enumerate().any(|(j, o)| j != w && on(&o.points, p))
+    };
+    let g = GRID;
+    // Leaves a held end in the segment's own direction for a grid step, when there is
+    // room, before the jog: a pin's lead keeps pointing the way it did.
+    let stub = |from: Point, towards: Point| -> Option<Point> {
+        let span = distance(from, towards);
+        if span < 2 * g.nm() {
+            return None;
+        }
+        let step = |v: Length, t: Length| {
+            if t > v {
+                v + g
+            } else if t < v {
+                v - g
+            } else {
+                v
+            }
+        };
+        Some(Point::new(step(from.x, towards.x), step(from.y, towards.y)))
+    };
+    let (a2, b2) = (a + d, b + d);
+    let mut points: Vec<Point> = Vec::new();
+    if k == 0 {
+        if held(a) {
+            points.push(a);
+            if let Some(st) = stub(a, b) {
+                points.push(st);
+                points.push(st + d);
+            }
+        }
+        points.push(a2);
+    } else {
+        points.extend_from_slice(&old[..k]);
+        let prev = old[k - 1];
+        if prev.x != a2.x && prev.y != a2.y {
+            // The neighbour ran along the segment: turn a corner to meet it.
+            points.push(if a.y == b.y { Point::new(a2.x, prev.y) } else { Point::new(prev.x, a2.y) });
+        }
+        points.push(a2);
+    }
+    points.push(b2);
+    if k + 2 == old.len() {
+        if held(b) {
+            if let Some(st) = stub(b, a) {
+                points.push(st + d);
+                points.push(st);
+            }
+            points.push(b);
+        }
+    } else {
+        let next = old[k + 2];
+        if next.x != b2.x && next.y != b2.y {
+            points.push(if a.y == b.y { Point::new(b2.x, next.y) } else { Point::new(next.x, b2.y) });
+        }
+        points.extend_from_slice(&old[k + 2..]);
+    }
+    let keep: BTreeSet<Point> = pins
+        .iter()
+        .copied()
+        .chain(s.labels.iter().map(|l| l.at))
+        .chain(s.ports.iter().map(|q| q.at))
+        .collect();
+    remove_spurs(&mut points, &keep);
+    simplify(&mut points);
+    // What sat on the dragged segment moves with it; what sat elsewhere on the wire
+    // and is no longer on it (a shortened neighbour) is pulled along too.
+    let segment = [a, b];
+    let mut riders: BTreeMap<Point, Moved> = BTreeMap::new();
+    for (j, other) in s.wires.iter().enumerate() {
+        if j == w || other.points.len() < 2 {
+            continue;
+        }
+        for p in [other.points[0], *other.points.last().expect("two points")] {
+            if pins.contains(&p) || !on(&old, p) {
+                continue;
+            }
+            let ends_held = (p == a && k == 0) || (p == b && k + 2 == old.len());
+            if (on(&segment, p) && !ends_held) || !on(&points, p) {
+                riders.insert(p, Moved { to: p + d, body: None });
+            }
+        }
+    }
+    for label in &mut s.labels {
+        let ends_held = (label.at == a && k == 0) || (label.at == b && k + 2 == old.len());
+        if on(&segment, label.at) && !ends_held {
+            label.at = label.at + d;
+        }
+    }
+    s.wires[w].points = points;
+    follow(s, &riders, &BTreeSet::from([w]), &pins);
+}
+
 /// Rotates instances 90° counter-clockwise about their origins.
 pub fn rotate(design: &Design, library: &str, def: &mut CellDef, instances: &[usize]) {
     transform_instances(design, library, def, instances, &BTreeSet::new(), true, |t| {
@@ -1113,6 +1255,66 @@ mod tests {
             .collect();
         translate(&d, "std", &mut def, &all, Point::mils(200, -100));
         assert_eq!(partition(&d, &def), nets);
+    }
+
+    /// Two resistors joined by a wire with a step in it: R1.b at (5.08, 0), R2.a at
+    /// (25.4, 10.16).
+    fn stepped(d: &Design) -> CellDef {
+        let mm = Point::mm;
+        let mut def = CellDef {
+            name: "top".into(),
+            schematic: Some(Schematic::default()),
+            ..CellDef::default()
+        };
+        place(d, "std", &mut def, "std:resistor".parse().unwrap(), Transform::at(mm(0.0, 0.0)));
+        place(d, "std", &mut def, "std:resistor".parse().unwrap(), Transform::at(mm(30.48, 10.16)));
+        add_wire(&mut def, vec![mm(5.08, 0.0), mm(15.24, 0.0), mm(15.24, 10.16), mm(25.4, 10.16)]);
+        def
+    }
+
+    #[test]
+    fn dragging_a_segment_moves_it_sideways_and_stretches_its_neighbours() {
+        let d = design();
+        let mm = Point::mm;
+        let mut def = stepped(&d);
+        // The vertical step, dragged right and down: it only moves right.
+        drag_segment(&d, "std", &mut def, 0, mm(15.0, 5.0), mm(5.08, 2.54));
+        assert_eq!(
+            def.schematic.as_ref().unwrap().wires[0].points,
+            [mm(5.08, 0.0), mm(20.32, 0.0), mm(20.32, 10.16), mm(25.4, 10.16)]
+        );
+        // The first run, on R1's pin, dragged down: a jog keeps it on the pin, leaving
+        // the pin the way it did.
+        let mut def = stepped(&d);
+        drag_segment(&d, "std", &mut def, 0, mm(10.0, 0.0), mm(0.0, 5.08));
+        assert_eq!(
+            def.schematic.as_ref().unwrap().wires[0].points,
+            [mm(5.08, 0.0), mm(7.62, 0.0), mm(7.62, 5.08), mm(15.24, 5.08), mm(15.24, 10.16), mm(25.4, 10.16)]
+        );
+        assert_eq!(partition(&d, &def), partition(&d, &stepped(&d)));
+    }
+
+    #[test]
+    fn dragging_any_segment_keeps_connections() {
+        let d = design();
+        let base = busy_sheet(&d);
+        let nets = partition(&d, &base);
+        let s = base.schematic.as_ref().unwrap();
+        for (w, wire) in s.wires.iter().enumerate() {
+            for seg in wire.points.windows(2) {
+                let grab = Point::new(
+                    Length((seg[0].x.nm() + seg[1].x.nm()) / 2),
+                    Length((seg[0].y.nm() + seg[1].y.nm()) / 2),
+                );
+                for (dx, dy) in [(0, 2), (0, -1), (1, 0), (-2, 3)] {
+                    let mut def = base.clone();
+                    let delta = Point::mils(100 * dx, 100 * dy);
+                    drag_segment(&d, "std", &mut def, w, grab, delta);
+                    assert_eq!(partition(&d, &def), nets, "wire {w} at {grab:?} by ({dx}, {dy})");
+                    assert!(orthogonal(&def), "wire {w} at {grab:?} by ({dx}, {dy})");
+                }
+            }
+        }
     }
 
     #[test]
