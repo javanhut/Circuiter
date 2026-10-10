@@ -235,6 +235,8 @@ pub struct Shared {
     /// How much history the traces keep, in simulated seconds.
     pub window: f64,
     pub readings: BTreeMap<String, Reading>,
+    /// How brightly each LED and lamp shines (0 dark, 1 fully lit) and its colour.
+    pub glow: BTreeMap<String, (f32, [u8; 3])>,
     /// Each operated part's state, by instance path.
     pub states: BTreeMap<String, String>,
     /// Parts destroyed so far.
@@ -281,6 +283,19 @@ fn instance(
         cell = child;
     }
     found
+}
+
+/// Every parameter of the instance at `path`: its own values, then its cell's defaults.
+pub(crate) fn instance_params(
+    design: &Design,
+    top: &CellId,
+    path: &str,
+) -> BTreeMap<String, String> {
+    let Some((params, def)) = instance(design, top, path) else { return BTreeMap::new() };
+    let mut out: BTreeMap<String, String> =
+        def.cell.params.iter().filter_map(|p| Some((p.name.clone(), p.default.clone()?))).collect();
+    out.extend(params);
+    out
 }
 
 fn param_of(params: &BTreeMap<String, String>, def: &CellDef, name: &str) -> String {
@@ -442,6 +457,10 @@ impl Session {
             (Engine::Analog { run, monitor }, inputs, Some(circuit))
         };
         let meters = Meter::all(&netlist);
+        let emitters = circuit
+            .as_ref()
+            .map(|c| crate::glow::Emitter::all(design, top, &netlist, c))
+            .unwrap_or_default();
         let scopes = Scope::all(&netlist);
         let shared = Arc::new(Mutex::new(Shared {
             speed,
@@ -461,6 +480,7 @@ impl Session {
             controls: controls.clone(),
             digital_handles,
             meters: meters.clone(),
+            emitters,
             scopes: scopes.clone(),
             watch: Vec::new(),
             speed,
@@ -499,6 +519,7 @@ struct Worker {
     controls: Vec<Control>,
     digital_handles: Vec<digital::InputHandle>,
     meters: Vec<Meter>,
+    emitters: Vec<crate::glow::Emitter>,
     scopes: Vec<Scope>,
     watch: Vec<usize>,
     speed: f64,
@@ -630,6 +651,7 @@ impl Worker {
         let mut voltages = vec![None; n];
         let mut logic = vec![None; n];
         let mut readings = BTreeMap::new();
+        let mut glow = BTreeMap::new();
         let mut events = Vec::new();
         let time;
         // Analog side: new points, latest voltages, meter readings.
@@ -647,6 +669,20 @@ impl Worker {
         if let (Some(run), Some(circuit)) = (analog, &self.circuit) {
             time = run.time();
             let points = run.take_points();
+            // Lights: averaged over the points since the last frame, or the latest.
+            for e in &self.emitters {
+                let level = if points.values.is_empty() {
+                    e.level(&|k| run.voltage(k))
+                } else {
+                    let sum: f32 = points
+                        .values
+                        .iter()
+                        .map(|x| e.level(&|k| if k == 0 { 0.0 } else { x[k - 1] }))
+                        .sum();
+                    sum / points.values.len() as f32
+                };
+                glow.insert(e.path.clone(), (level, e.color));
+            }
             let node = |net: usize| circuit.node(&self.node_of[net]);
             for &net in &nets {
                 let Some(k) = node(net) else { continue };
@@ -713,6 +749,7 @@ impl Worker {
             sh.traces = traces.clone();
             sh.window = window;
             sh.readings = readings;
+            sh.glow = glow;
             sh.events = events;
             sh.frame += 1;
             if let Some(e) = error {
@@ -798,6 +835,21 @@ mod tests {
             sh.voltages[sb].is_some_and(|v| v > 4.9) && sh.voltages[sa].is_some_and(|v| v < 0.01)
         });
         until(&s, "80 °C", |sh| sh.voltages[t].is_some_and(|v| (v - 0.8).abs() < 0.002));
+    }
+
+    #[test]
+    fn an_led_glows_while_its_switch_is_closed() {
+        let (d, top) = design(&[
+            ("V1", "std:vdc", &[], &[("p", "in"), ("n", "GND")]),
+            ("SW1", "std:switch", &[], &[("a", "in"), ("b", "sw")]),
+            ("R1", "std:resistor", &[("R", "150")], &[("a", "sw"), ("b", "a")]),
+            ("D1", "std:led", &[("color", "green")], &[("a", "a"), ("k", "GND")]),
+        ]);
+        let s = Session::start(&d, &top, Path::new("."), 1e-3).unwrap();
+        until(&s, "dark", |sh| sh.time > 1e-4 && sh.glow.get("D1").is_some_and(|g| g.0 < 0.01));
+        s.send(Command::Set("SW1".into(), "true".into()));
+        until(&s, "lit", |sh| sh.glow.get("D1").is_some_and(|g| g.0 > 0.8));
+        assert_eq!(s.shared.lock().unwrap().glow["D1"].1, crate::glow::color("green"));
     }
 
     #[test]

@@ -159,6 +159,8 @@ pub fn icon_button(
     let size = Vec2::new(30.0, 28.0);
     let sense = if enabled { Sense::click() } else { Sense::hover() };
     let (rect, r) = ui.allocate_exact_size(size, sense);
+    // Named by its tooltip, for screen readers (and tests).
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, tip));
     if ui.is_rect_visible(rect) {
         let fill = if selected {
             p.accent_soft

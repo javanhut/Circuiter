@@ -56,6 +56,13 @@ fn unique(features: &[Feature], base: &str) -> String {
         .expect("a free name")
 }
 
+/// What a new 3D part starts as: a box to shape.
+pub fn starting_body() -> Model3d {
+    let mut body = new_feature("Box", &[], None);
+    body.name = "Body".into();
+    Model3d { features: vec![body], ..Model3d::default() }
+}
+
 /// The features the Add menu makes.
 fn new_feature(kind: &str, features: &[Feature], selected: Option<&Feature>) -> Feature {
     let of = selected.map_or_else(

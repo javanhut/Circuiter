@@ -1518,6 +1518,13 @@ impl Transient {
     }
 
     /// The current through voltage source or inductor `branch` (its branch row) now.
+    /// Devices `ds`' static terminal currents and dissipated power at the latest point:
+    /// what a running display reads (an LED's current, a lamp's power).
+    pub fn devices(&self, ds: &[usize]) -> Vec<DeviceOp> {
+        let e = Engine::new(&self.circuit, &self.o);
+        ds.iter().map(|&d| e.device_op(d, &self.x, &self.lim[d], Some(self.t))).collect()
+    }
+
     pub fn solution(&self) -> &[f64] {
         &self.x
     }

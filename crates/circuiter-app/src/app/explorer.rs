@@ -42,6 +42,17 @@ impl CircuiterApp {
                         }
                         if style::icon_button(
                             ui,
+                            icon::CUBE,
+                            "New 3D part: a body to model, as in a CAD program",
+                            true,
+                            false,
+                        )
+                        .clicked()
+                        {
+                            self.prompt = Some(new_cell_prompt(ws, true));
+                        }
+                        if style::icon_button(
+                            ui,
                             icon::FILE_PLUS,
                             "New cell  (Ctrl+N)",
                             true,
@@ -49,7 +60,7 @@ impl CircuiterApp {
                         )
                         .clicked()
                         {
-                            self.prompt = Some(new_cell_prompt(ws));
+                            self.prompt = Some(new_cell_prompt(ws, false));
                         }
                     });
                 }
@@ -412,6 +423,15 @@ impl Browse<'_> {
                     name: String::new(),
                     folder: path.to_owned(),
                     error: None,
+                    part3d: false,
+                }));
+            }
+            if self.project && ui.button("New 3D Part Here…").clicked() {
+                self.action = Some(BrowserAction::Prompt(Prompt::NewCell {
+                    name: String::new(),
+                    folder: path.to_owned(),
+                    error: None,
+                    part3d: true,
                 }));
             }
             if !path.is_empty() {

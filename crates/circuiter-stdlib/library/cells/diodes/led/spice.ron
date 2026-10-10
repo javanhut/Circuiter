@@ -1,6 +1,22 @@
 (
-    template: "D${inst} ${node.a} ${node.k} ${model}",
+    template: "",
     models: [
-        ".model ${model} D(IS=${param.is} N=${param.n} RS=${param.rs} BV=${param.bv} IBV=10u CJO=${param.cjo})",
+        ".model ${model}red D(IS={0.02/exp((2.0-0.02*${param.rs})/(${param.n}*0.02585))} N=${param.n} RS=${param.rs} BV=${param.bv} IBV=10u CJO=${param.cjo})",
+        ".model ${model}orange D(IS={0.02/exp((2.05-0.02*${param.rs})/(${param.n}*0.02585))} N=${param.n} RS=${param.rs} BV=${param.bv} IBV=10u CJO=${param.cjo})",
+        ".model ${model}yellow D(IS={0.02/exp((2.1-0.02*${param.rs})/(${param.n}*0.02585))} N=${param.n} RS=${param.rs} BV=${param.bv} IBV=10u CJO=${param.cjo})",
+        ".model ${model}green D(IS={0.02/exp((2.2-0.02*${param.rs})/(${param.n}*0.02585))} N=${param.n} RS=${param.rs} BV=${param.bv} IBV=10u CJO=${param.cjo})",
+        ".model ${model}blue D(IS={0.02/exp((3.1-0.02*${param.rs})/(${param.n}*0.02585))} N=${param.n} RS=${param.rs} BV=${param.bv} IBV=10u CJO=${param.cjo})",
+        ".model ${model}white D(IS={0.02/exp((3.1-0.02*${param.rs})/(${param.n}*0.02585))} N=${param.n} RS=${param.rs} BV=${param.bv} IBV=10u CJO=${param.cjo})",
     ],
+    choose: (
+        param: "color",
+        templates: {
+            "blue": "D${inst} ${node.a} ${node.k} ${model}blue",
+            "green": "D${inst} ${node.a} ${node.k} ${model}green",
+            "orange": "D${inst} ${node.a} ${node.k} ${model}orange",
+            "red": "D${inst} ${node.a} ${node.k} ${model}red",
+            "white": "D${inst} ${node.a} ${node.k} ${model}white",
+            "yellow": "D${inst} ${node.a} ${node.k} ${model}yellow",
+        },
+    ),
 )

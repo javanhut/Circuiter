@@ -5,6 +5,7 @@ mod canvas;
 mod cosim;
 mod digital;
 mod edit;
+mod glow;
 #[cfg(test)]
 mod gui_tests;
 mod import;

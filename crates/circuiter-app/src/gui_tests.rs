@@ -578,3 +578,43 @@ fn modelling_a_body_adds_undoes_and_hides_features() {
     h.run_steps(3);
     assert!(features(&h)[0].hidden, "the plate is left out");
 }
+
+/// The cube beside New Cell makes a 3D part and opens it in the 3D view to model.
+#[test]
+fn a_new_3d_part_opens_in_the_modeller() {
+    let tmp = example_copy("cmos_inverter");
+    let mut h = open(tmp.path().to_path_buf());
+    h.get_by_label("New 3D part: a body to model, as in a CAD program").click();
+    h.run_steps(2);
+    h.event(egui::Event::Text("bracket".into()));
+    h.run_steps(2);
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+    let ws = h.state().workspace().unwrap();
+    assert_eq!(ws.current().cell.cell, "bracket");
+    let body = ws.current_def().and_then(|d| d.model3d.clone()).expect("a body to shape");
+    assert_eq!(body.features.len(), 1);
+    assert!(h.state().showing_3d(), "it opens in the 3D view");
+    // Its Body panel is there to add to.
+    h.get_by_label(&format!("{}  Add feature", crate::style::icon::PLUS));
+}
+
+/// With the hand (H), a left drag moves the view, not the parts.
+#[test]
+fn the_hand_tool_drags_the_view() {
+    let tmp = example_copy("cmos_inverter");
+    let mut h = open(tmp.path().to_path_buf());
+    let before = h.state().workspace().unwrap().current_def().unwrap().clone();
+    let center = h.state().workspace().unwrap().current().camera.expect("fitted").center;
+    h.get_by_label(
+        "Hand  (H): drag to move the view. Middle or right drag, or Space+drag, also do",
+    )
+    .click();
+    h.run_steps(2);
+    let (from, _) = on_sheet(&h, 200.0, 200.0);
+    drag(&mut h, from, from + Vec2::new(120.0, 40.0));
+    let ws = h.state().workspace().unwrap();
+    let after = ws.current().camera.expect("fitted").center;
+    assert!(after.x < center.x - 1.0 && after.y < center.y - 0.3, "{center:?} → {after:?}");
+    assert_eq!(ws.current_def().unwrap(), &before, "nothing on the sheet moved");
+}

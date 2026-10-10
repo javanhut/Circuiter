@@ -45,23 +45,52 @@ pub struct Level {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Tool {
     Select,
-    Place { cell: CellRef, rotation: Rotation, mirror: bool },
-    Wire { points: Vec<Point>, horizontal_first: bool },
-    Label { net: String },
-    Port { name: String, kind: PortKind },
+    /// The hand: dragging moves the view.
+    Pan,
+    Place {
+        cell: CellRef,
+        rotation: Rotation,
+        mirror: bool,
+    },
+    Wire {
+        points: Vec<Point>,
+        horizontal_first: bool,
+    },
+    Label {
+        net: String,
+    },
+    Port {
+        name: String,
+        kind: PortKind,
+    },
     // Symbol drawing.
-    Line { points: Vec<Point> },
-    Rect { from: Option<Point> },
-    Circle { center: Option<Point> },
-    Arc { center: Option<Point>, start: Option<Point> },
-    Text { text: String },
-    Pin { port: String, direction: PinDirection },
+    Line {
+        points: Vec<Point>,
+    },
+    Rect {
+        from: Option<Point>,
+    },
+    Circle {
+        center: Option<Point>,
+    },
+    Arc {
+        center: Option<Point>,
+        start: Option<Point>,
+    },
+    Text {
+        text: String,
+    },
+    Pin {
+        port: String,
+        direction: PinDirection,
+    },
 }
 
 impl Tool {
     pub fn name(&self) -> &'static str {
         match self {
             Tool::Select => "Select",
+            Tool::Pan => "Pan",
             Tool::Place { .. } => "Place",
             Tool::Wire { .. } => "Wire",
             Tool::Label { .. } => "Label",
@@ -78,8 +107,9 @@ impl Tool {
     pub fn hint(&self) -> &'static str {
         match self {
             Tool::Select => {
-                "Click to select · drag to move · drag from a pin's end to wire it · drag empty space to box-select · double-click to open"
+                "Click to select · drag to move · drag from a pin's or wire's end to wire it · double-click a wire to branch off it · drag empty space to box-select · H hand to move the view"
             }
+            Tool::Pan => "Drag to move the view · wheel to zoom · Esc back to selecting",
             Tool::Place { .. } => {
                 "Click to place (Shift+click to place another) · R rotate · X mirror · Esc cancel"
             }
@@ -1386,6 +1416,53 @@ impl Workspace {
             .map(|(_, p)| p)
     }
 
+    /// The end of a wire near `at`: a wire can be continued, or another joined, from
+    /// there.
+    pub fn wire_end_at(&self, at: Pt, tolerance: f64) -> Option<Point> {
+        if self.mode != Mode::Schematic || !self.editable() {
+            return None;
+        }
+        self.schematic()?
+            .wires
+            .iter()
+            .filter_map(|w| Some([*w.points.first()?, *w.points.last()?]))
+            .flatten()
+            .map(|p| {
+                let q = Pt::from(p);
+                ((q.x - at.x).hypot(q.y - at.y), p)
+            })
+            .filter(|(d, _)| *d <= tolerance)
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, p)| p)
+    }
+
+    /// Where a wire can start near `at`: a pin's end or a wire's end.
+    pub fn start_at(&self, at: Pt, tolerance: f64) -> Option<Point> {
+        self.pin_end_at(at, tolerance).or_else(|| self.wire_end_at(at, tolerance))
+    }
+
+    /// The grid point on wire `w` nearest `at`, to branch a new wire from.
+    fn point_on_wire(&self, w: usize, at: Pt) -> Option<Point> {
+        let wire = self.schematic()?.wires.get(w)?;
+        let target = snapped(at);
+        let mut best: Option<(i64, Point)> = None;
+        for seg in wire.points.windows(2) {
+            let (a, b) = (seg[0], seg[1]);
+            let clamp = |v: Length, lo: Length, hi: Length| v.max(lo.min(hi)).min(lo.max(hi));
+            let p = Point::new(clamp(target.x, a.x, b.x), clamp(target.y, a.y, b.y));
+            // Only points actually on the segment (it is horizontal or vertical).
+            let on = (a.x == b.x && p.x == a.x) || (a.y == b.y && p.y == a.y);
+            if !on {
+                continue;
+            }
+            let d = (p.x - target.x).nm().abs() + (p.y - target.y).nm().abs();
+            if best.is_none_or(|(bd, _)| d < bd) {
+                best = Some((d, p));
+            }
+        }
+        best.map(|(_, p)| p)
+    }
+
     /// Starts a wire at pin end `p` from Select; it returns to Select when done.
     fn wire_from(&mut self, p: Point) {
         self.selection.clear();
@@ -1400,6 +1477,10 @@ impl Workspace {
         // A new action replaces the last edit's notice.
         if matches!(gesture, Gesture::Click { .. } | Gesture::DragStart { .. }) {
             self.notice = None;
+        }
+        // The hand only moves the view, which the canvas does.
+        if self.tool == Tool::Pan {
+            return None;
         }
         // Dragging something on the sheet moves it, whatever tool is in hand: a drag
         // never silently does nothing.
@@ -1420,13 +1501,13 @@ impl Workspace {
         if self.tool == Tool::Select {
             match gesture {
                 Gesture::Click { at, shift: false } => {
-                    if let Some(p) = self.pin_end_at(at, tolerance) {
+                    if let Some(p) = self.start_at(at, tolerance) {
                         self.wire_from(p);
                         return None;
                     }
                 }
                 Gesture::DragStart { from } => {
-                    if let Some(p) = self.pin_end_at(from, tolerance) {
+                    if let Some(p) = self.start_at(from, tolerance) {
                         self.wire_from(p);
                         self.drag = Some(Drag::Wire);
                         return None;
@@ -1461,13 +1542,20 @@ impl Workspace {
                     self.select_only(h);
                 }
             }
-            (Tool::Select, Gesture::DoubleClick { at }) => {
-                if let Some(Owner::Instance(i)) = hit(self, at) {
+            (Tool::Select, Gesture::DoubleClick { at }) => match hit(self, at) {
+                Some(Owner::Instance(i)) => {
                     if self.scene.descendable.get(i) == Some(&true) {
                         self.descend(i);
                     }
                 }
-            }
+                // Double-click a wire to branch a new one off it there.
+                Some(Owner::Wire(w)) if self.editable() => {
+                    if let Some(p) = self.point_on_wire(w, at) {
+                        self.wire_from(p);
+                    }
+                }
+                _ => {}
+            },
             (Tool::Select, Gesture::DragStart { from }) => match hit(self, from) {
                 Some(o) if self.editable() => {
                     if !self.selection.contains(&o) {
@@ -1806,10 +1894,59 @@ impl Workspace {
         (heat, damage)
     }
 
+    /// The LEDs and lamps on the sheet being viewed that are giving light: in the live
+    /// run, or at the end of the last one.
+    fn glow_marks(&self) -> Vec<(circuiter_scene::Rect, f32, [u8; 3])> {
+        let Some(schematic) = self.schematic() else { return Vec::new() };
+        let levels: BTreeMap<String, (f32, [u8; 3])> = if let Some(live) = &self.live {
+            live.shared.lock().map(|sh| sh.glow.clone()).unwrap_or_default()
+        } else if let Some(sim) = self.fresh_sim() {
+            let last: Option<Vec<f64>> = match &sim.results {
+                Some(Results::Op(r)) => Some(r.voltages.get(1..).unwrap_or_default().to_vec()),
+                Some(Results::Tran { result, .. } | Results::Mixed { result, .. }) => {
+                    result.values.last().cloned()
+                }
+                _ => None,
+            };
+            match last {
+                Some(x) => {
+                    crate::glow::Emitter::all(&self.design, &sim.top, &sim.netlist, &sim.circuit)
+                        .into_iter()
+                        .map(|e| {
+                            let level = e.level(&|k| {
+                                if k == 0 { 0.0 } else { x.get(k - 1).copied().unwrap_or(0.0) }
+                            });
+                            (e.path, (level, e.color))
+                        })
+                        .collect()
+                }
+                None => BTreeMap::new(),
+            }
+        } else {
+            BTreeMap::new()
+        };
+        let mut out = Vec::new();
+        for i in 0..schematic.instances.len() {
+            let Some(path) = self.instance_path(i) else { continue };
+            let Some(&(level, color)) = levels.get(&path) else { continue };
+            if level > 0.02 {
+                if let Some(body) = self.scene.instance_bodies.get(i) {
+                    out.push((*body, level, color));
+                }
+            }
+        }
+        out
+    }
+
     pub fn overlay(&self, cursor: Option<Pt>) -> Overlay {
         let (heat, damage) = self.physics_marks();
-        let mut overlay =
-            Overlay { notes: self.voltage_notes(), heat, damage, ..Overlay::default() };
+        let mut overlay = Overlay {
+            notes: self.voltage_notes(),
+            heat,
+            damage,
+            glow: self.glow_marks(),
+            ..Overlay::default()
+        };
         let lib = &self.current().cell.library;
         if let (Some(Drag::Band { from }), Some(c)) = (&self.drag, cursor) {
             overlay.band = Some((*from, c));
@@ -1821,7 +1958,7 @@ impl Workspace {
             overlay.snap = Some(at.into());
         } else if self.drag.is_none() {
             // Over a pin's end: mark it, as that's where a click or drag starts a wire.
-            overlay.snap = self.pin_end_at(cursor, self.pick_tolerance).map(Pt::from);
+            overlay.snap = self.start_at(cursor, self.pick_tolerance).map(Pt::from);
         }
         if self.tool.for_symbols() {
             overlay.ghost = self.symbol_ghost(at);
@@ -2724,6 +2861,69 @@ mod tests {
 
     fn scratch() -> CellId {
         CellId::new("cmos_inverter", "scratch")
+    }
+
+    #[test]
+    fn wires_continue_from_their_ends_and_branch_off_their_middles() {
+        let (_tmp, mut ws) = blank_sheet();
+        let r = CellId::new("std", "resistor");
+        for x in [0.0, 20.32] {
+            ws.start_placing(&r);
+            click(&mut ws, x, 0.0);
+        }
+        // A wire from R1.b that stops short, its end hanging.
+        ws.tool = Tool::Wire { points: Vec::new(), horizontal_first: true };
+        click(&mut ws, 5.08, 0.0);
+        // A double-click comes after a click at the same place, as from a mouse.
+        click(&mut ws, 10.16, 0.0);
+        ws.gesture(Gesture::DoubleClick { at: Pt::new(10.16, 0.0) }, 0.5);
+        ws.tool = Tool::Select;
+        assert_eq!(ws.wire_end_at(Pt::new(10.2, 0.1), 0.5), Some(Point::mm(10.16, 0.0)));
+        assert!(ws.overlay(Some(Pt::new(10.2, 0.1))).snap.is_some(), "the end is marked");
+        // Click its end and click R2's pin: they're joined.
+        click(&mut ws, 10.16, 0.0);
+        assert!(
+            matches!(&ws.tool, Tool::Wire { points, .. } if points == &[Point::mm(10.16, 0.0)])
+        );
+        click(&mut ws, 15.24, 0.0);
+        assert_eq!(ws.notice.as_deref(), Some("Connected R1.b–R2.a"));
+        assert_eq!(ws.tool, Tool::Select);
+        // Double-click the middle of the first wire: a new one starts there.
+        let wires = ws.schematic().unwrap().wires.len();
+        ws.gesture(Gesture::DoubleClick { at: Pt::new(7.5, 0.2) }, 0.5);
+        assert!(matches!(&ws.tool, Tool::Wire { points, .. } if points == &[Point::mm(7.62, 0.0)]));
+        click(&mut ws, 7.62, 10.16);
+        click(&mut ws, 7.62, 10.16);
+        ws.gesture(Gesture::DoubleClick { at: Pt::new(7.62, 10.16) }, 0.5);
+        let s = ws.schematic().unwrap();
+        assert_eq!(s.wires.len(), wires + 1);
+        assert_eq!(s.wires.last().unwrap().points[0], Point::mm(7.62, 0.0));
+        // It joined the net it started from.
+        let c = &ws.scene.connectivity;
+        let net = |item| c.net_of(item);
+        let pin = c
+            .pins
+            .iter()
+            .position(|p| {
+                p.port == "b" && ws.schematic().unwrap().instances[p.instance].name == "R1"
+            })
+            .unwrap();
+        assert_eq!(net(Item::Wire(wires)), net(Item::Pin(pin)));
+    }
+
+    #[test]
+    fn the_hand_moves_the_view_and_nothing_else() {
+        let (_tmp, mut ws) = example_copy();
+        let before = ws.current_def().unwrap().clone();
+        ws.tool = Tool::Pan;
+        let from = Pt::new(35.56, 0.0);
+        ws.gesture(Gesture::DragStart { from }, 0.5);
+        ws.gesture(Gesture::Drag { from, to: Pt::new(50.0, 10.0) }, 0.5);
+        ws.gesture(Gesture::DragEnd { from, to: Pt::new(50.0, 10.0), shift: false }, 0.5);
+        click(&mut ws, 35.56, 0.0);
+        assert_eq!(ws.current_def().unwrap(), &before, "nothing moved");
+        assert!(ws.selection.is_empty(), "nothing selected");
+        assert_eq!(ws.tool, Tool::Pan);
     }
 
     #[test]

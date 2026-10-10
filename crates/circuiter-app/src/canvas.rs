@@ -94,6 +94,9 @@ pub struct Overlay {
     pub heat: Vec<(Rect, f32)>,
     /// Destroyed parts: where to mark them and what happened.
     pub damage: Vec<(Pt, String)>,
+    /// Parts giving light (LEDs, lamps): their body, how brightly (0 to 1, more when
+    /// overdriven) and in what colour.
+    pub glow: Vec<(Rect, f32, [u8; 3])>,
 }
 
 /// Pointer gestures on the sheet, in sheet coordinates. Navigation (zoom, pan) is
@@ -110,6 +113,8 @@ pub enum Gesture {
 /// State the canvas keeps between frames.
 #[derive(Debug, Default)]
 pub struct CanvasState {
+    /// The hand tool is in use: left drag pans the view.
+    pub hand: bool,
     drag_from: Option<Pt>,
     /// Where the canvas was drawn last frame, on screen.
     pub view: Option<egui::Rect>,
@@ -156,6 +161,9 @@ pub fn show(
 
     // Navigation: wheel zooms about the cursor (as in most EDA tools), horizontal
     // scroll pans, middle/right drag pans, as does left drag with Space held.
+    // With the hand tool, a plain left drag pans too.
+    let hand = state.hand;
+    let space = space || hand;
     let panning = response.dragged_by(PointerButton::Middle)
         || response.dragged_by(PointerButton::Secondary)
         || (space && response.dragged_by(PointerButton::Primary));
@@ -171,6 +179,8 @@ pub fn show(
         }
         ui.ctx().set_cursor_icon(if panning {
             CursorIcon::Grabbing
+        } else if hand {
+            CursorIcon::Grab
         } else {
             CursorIcon::Crosshair
         });
@@ -286,6 +296,24 @@ fn draw_overlay(
         let l = level.clamp(0.0, 1.0);
         let c = Color32::from_rgb(255, (220.0 - 180.0 * l) as u8, (60.0 - 40.0 * l) as u8);
         painter.rect_filled(rect, 6.0, c.gamma_multiply(0.12 + 0.3 * l));
+    }
+    for (r, level, [cr, cg, cb]) in &overlay.glow {
+        let body = egui::Rect::from_two_pos(cam.to_screen(view, r.min), cam.to_screen(view, r.max));
+        let c = Color32::from_rgb(*cr, *cg, *cb);
+        let l = level.clamp(0.0, 1.5);
+        let center = body.center();
+        // At least this big on screen, so a light is seen even zoomed far out.
+        let size = body.width().max(body.height()).max(18.0);
+        // A soft halo: rings fading outwards, wider the brighter it is.
+        let reach = size * (0.9 + 0.9 * l.min(1.0));
+        for k in (0..8).rev() {
+            let t = k as f32 / 7.0;
+            let radius = size * 0.35 + (reach - size * 0.35) * t;
+            painter.circle_filled(center, radius, c.gamma_multiply(0.16 * (1.0 - t) * l.min(1.0)));
+        }
+        // The bright core, whiter when overdriven.
+        let core = if l > 1.0 { Color32::WHITE } else { c };
+        painter.circle_filled(center, size * 0.28, core.gamma_multiply(0.75 * l.min(1.0)));
     }
     for (at, text) in &overlay.damage {
         let p = cam.to_screen(view, *at);

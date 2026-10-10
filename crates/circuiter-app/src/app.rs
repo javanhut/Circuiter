@@ -113,6 +113,7 @@ const PALETTE: &[(&str, &str)] = &[
 /// Every keyboard shortcut, for Help.
 const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+R", "Run the simulation"),
+    ("H", "Hand: drag to move the view (or middle/right drag, Space+drag)"),
     ("F9 / F10", "Operating point / transient"),
     ("Ctrl+K, A", "Search for a part to place"),
     ("G, Shift+V", "Place ground / VDD"),
@@ -181,6 +182,8 @@ enum Prompt {
         name: String,
         folder: String,
         error: Option<String>,
+        /// A 3D part (a body to model) rather than a circuit.
+        part3d: bool,
     },
     /// A new folder in `parent`, or renaming folder `renaming`.
     Folder {
@@ -774,6 +777,7 @@ impl CircuiterApp {
                 rotate: !cmd && i.key_pressed(Key::R),
                 mirror: !cmd && i.key_pressed(Key::X),
                 wire: !cmd && i.key_pressed(Key::W),
+                hand: !cmd && i.key_pressed(Key::H),
                 label: !cmd && i.key_pressed(Key::L),
                 port: !cmd && i.key_pressed(Key::P),
                 add: !cmd && i.key_pressed(Key::A),
@@ -814,7 +818,7 @@ impl CircuiterApp {
             self.prompt = Some(Prompt::AddPart { query: String::new() });
         }
         if keys.new_cell {
-            self.prompt = Some(new_cell_prompt(ws));
+            self.prompt = Some(new_cell_prompt(ws, false));
         }
         if keys.fit {
             ws.levels.last_mut().expect("level").camera = None;
@@ -886,6 +890,9 @@ impl CircuiterApp {
         }
         if keys.wire {
             ws.tool = Tool::Wire { points: Vec::new(), horizontal_first: true };
+        }
+        if keys.hand {
+            ws.tool = if ws.tool == Tool::Pan { Tool::Select } else { Tool::Pan };
         }
         if keys.label {
             self.prompt = Some(Prompt::Label { net: String::new() });
@@ -975,7 +982,13 @@ impl CircuiterApp {
                     self.guarded(&ctx, Pending::OpenDialog);
                 }
                 if ui.add_enabled(has_ws, egui::Button::new("New Cell…   Ctrl+N")).clicked() {
-                    self.prompt = self.workspace.as_ref().map(new_cell_prompt);
+                    self.prompt = self.workspace.as_ref().map(|ws| new_cell_prompt(ws, false));
+                }
+                if ui.add_enabled(has_ws, egui::Button::new("New 3D Part…")).clicked() {
+                    if let Some(ws) = &self.workspace {
+                        self.prompt = Some(new_cell_prompt(ws, true));
+                    }
+                    ui.close();
                 }
                 if ui.add_enabled(self.dirty(), egui::Button::new("Save   Ctrl+S")).clicked() {
                     self.save();
@@ -1168,6 +1181,7 @@ impl CircuiterApp {
         ui.add_space(4.0);
         let field = &mut self.field;
         let mut prompt = None;
+        let mut open_3d = false;
         egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
             let mut sel = ws.selection.iter();
             match (sel.next().copied(), sel.next()) {
@@ -1212,12 +1226,28 @@ impl CircuiterApp {
                         ws.delete_selection();
                     }
                 }
-                _ => cell_panel(ui, ws, field, &mut prompt),
+                _ => cell_panel(ui, ws, field, &mut prompt, &mut open_3d),
             }
         });
         if prompt.is_some() {
             self.prompt = prompt;
         }
+        if open_3d {
+            self.open_body_3d();
+        }
+    }
+
+    /// Whether the 3D view is showing.
+    #[cfg(test)]
+    pub fn showing_3d(&self) -> bool {
+        self.show_3d
+    }
+
+    /// Shows the cell being edited in the 3D view with its Body panel, to model it.
+    fn open_body_3d(&mut self) {
+        self.show_3d = true;
+        self.show_netlist = false;
+        self.viewer3d.body_mode = true;
     }
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
@@ -1522,6 +1552,7 @@ impl CircuiterApp {
         let mut then: Option<Pending> = None;
         let mut save_first = false;
         let mut program: Option<String> = None;
+        let mut open_3d = false;
         let ws = &mut self.workspace;
 
         egui::Modal::new(egui::Id::new("prompt")).show(ctx, |ui| {
@@ -1874,11 +1905,19 @@ impl CircuiterApp {
                         }
                     }
                 }
-                Prompt::NewCell { name, folder, error } => {
-                    ui.heading("New Cell");
-                    ui.label(
-                        "An empty schematic in this project, ready to become a reusable part.",
-                    );
+                Prompt::NewCell { name, folder, error, part3d } => {
+                    if *part3d {
+                        ui.heading("New 3D Part");
+                        ui.label(
+                            "A part to model in 3D, as in a CAD program: an enclosure, a \
+                             bracket, a knob, or a component's body. It opens in the 3D view.",
+                        );
+                    } else {
+                        ui.heading("New Cell");
+                        ui.label(
+                            "An empty schematic in this project, ready to become a reusable part.",
+                        );
+                    }
                     let r =
                         ui.add(egui::TextEdit::singleline(name).hint_text("nand2, dff, opamp…"));
                     if !ui.memory(|m| m.focused().is_some()) {
@@ -1906,6 +1945,15 @@ impl CircuiterApp {
                     if enter {
                         if let Some(ws) = ws {
                             match ws.new_cell(name.trim(), folder) {
+                                Ok(()) if *part3d => {
+                                    // Start from a box to shape, in the 3D view.
+                                    let _ = ws.edit(|_, _, d| {
+                                        d.model3d = Some(body_editor::starting_body());
+                                        Ok(())
+                                    });
+                                    open_3d = true;
+                                    close = true;
+                                }
                                 Ok(()) => close = true,
                                 Err(e) => *error = Some(e),
                             }
@@ -2084,6 +2132,9 @@ impl CircuiterApp {
         if close || then.is_some() {
             self.prompt = None;
         }
+        if open_3d {
+            self.open_body_3d();
+        }
         if let Some(name) = program {
             match self.new_program(&name) {
                 Ok(()) => self.prompt = None,
@@ -2110,6 +2161,7 @@ impl CircuiterApp {
 }
 
 struct Keys {
+    hand: bool,
     open: bool,
     save: bool,
     new_cell: bool,
@@ -2196,18 +2248,19 @@ fn empty_sheet_guide(ui: &egui::Ui, sheet: egui::Rect, theme: &Theme) {
 
 /// The Make Component dialog, starting in the folder of the sheet the parts are on.
 fn make_component_prompt(ws: &Workspace) -> Prompt {
-    let Prompt::NewCell { folder, .. } = new_cell_prompt(ws) else { unreachable!() };
+    let Prompt::NewCell { folder, .. } = new_cell_prompt(ws, false) else { unreachable!() };
     Prompt::MakeComponent { name: String::new(), folder, error: None }
 }
 
-/// The New Cell dialog, starting in the folder of the project cell being edited.
-fn new_cell_prompt(ws: &Workspace) -> Prompt {
+/// The New Cell (or New 3D Part) dialog, starting in the folder of the project cell
+/// being edited.
+fn new_cell_prompt(ws: &Workspace, part3d: bool) -> Prompt {
     let folder = ws
         .current_def()
         .filter(|_| ws.current().cell.library == ws.project.name())
         .map(|d| d.folder.clone())
         .unwrap_or_default();
-    Prompt::NewCell { name: String::new(), folder, error: None }
+    Prompt::NewCell { name: String::new(), folder, error: None, part3d }
 }
 
 /// A menu of a library's folders; returns the one picked (empty for the top level).
@@ -2646,6 +2699,7 @@ fn cell_panel(
     ws: &mut Workspace,
     field: &mut Field,
     prompt: &mut Option<Prompt>,
+    open_3d: &mut bool,
 ) {
     let Some(def) = ws.current_def().cloned() else { return };
     let id = ws.current().cell.clone();
@@ -2861,6 +2915,23 @@ fn cell_panel(
                 }
             }
         });
+    }
+
+    // Its physical body.
+    section(ui, "3D body");
+    let status = match &def.model3d {
+        Some(m) if !m.features.is_empty() => format!("Modelled: {} feature(s).", m.features.len()),
+        Some(m) if !m.package.is_empty() => format!("Made by the `{}` package.", m.package),
+        _ => "None yet.".to_owned(),
+    };
+    ui.label(RichText::new(status).weak());
+    let label = if def.model3d.is_some() { "Open in 3D" } else { "Model a 3D Body" };
+    if ui
+        .button(format!("{}  {label}", style::icon::CUBE))
+        .on_hover_text("Shape its body in the 3D view, as in a CAD program")
+        .clicked()
+    {
+        *open_3d = true;
     }
 
     if let Some(schematic) = ws.schematic() {
@@ -3299,6 +3370,7 @@ impl eframe::App for CircuiterApp {
                     let selection = ws.selection.clone();
                     let highlight = Highlight { selection: Some(&selection), net: ws.net };
                     let level = ws.levels.last_mut().expect("level");
+                    self.canvas.hand = ws.tool == Tool::Pan;
                     let out = canvas::show(
                         ui,
                         &ws.scene,

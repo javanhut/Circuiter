@@ -1,4 +1,4 @@
 (
     package: "led",
-    params: {"color": "red"},
+    params: {"color": "${param.color}"},
 )

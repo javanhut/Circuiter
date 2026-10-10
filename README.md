@@ -75,7 +75,7 @@ and the project is named after it.
 | Action | How |
 |---|---|
 | Zoom | Mouse wheel (about the cursor), or pinch |
-| Pan | Middle or right drag, or Space + left drag |
+| Pan | The hand tool (`H`, or the hand in the toolbar), then drag; or middle or right drag, or Space + left drag, with any tool |
 | Fit to window | `F` or `Home` |
 | Open a sub-circuit | Double-click it, or use the inspector's "Open schematic" |
 | Go up a level | `Alt+↑`, or click the path above the sheet |
@@ -89,7 +89,7 @@ and the project is named after it.
 | Action | How |
 |---|---|
 | Add a part | Drag it from Components or the parts column onto the sheet; or click it there, then click the sheet; or `A` / `Ctrl+K` and search (by name, folder or description). After one click you're back to selecting; Shift+click places several. `G` places a ground, `Shift+V` a VDD symbol. `R` rotates, `X` mirrors, `Esc` cancels |
-| Draw a wire | Drag out of a pin's end (it's marked when the pointer is over it) and let go on another pin, or click the pin's end and click onwards. Or `W`, then click. Wires route at right angles (`/` flips the corner) and finish when they reach a pin or wire, or on double-click. A wire connects to a pin only at the wire's end or a corner: running past a pin doesn't connect it (Problems points it out). The status bar says what each edit connected or disconnected |
+| Draw a wire | Drag out of a pin's end or a wire's end (it's marked when the pointer is over it) and let go on another pin or wire, or click the end and click onwards: that's how a loose wire is joined up. Double-click a wire to start a branch off it there. Or `W`, then click. Wires route at right angles (`/` flips the corner) and finish when they reach a pin or wire, or on double-click. A wire connects to a pin only at the wire's end or a corner: running past a pin doesn't connect it (Problems points it out). The status bar says what each edit connected or disconnected |
 | Net label | `L`, type a name, click on a wire. Same-named labels are connected |
 | Port | `P`, name and direction, then click. Ports are how a cell connects to the sheets that use it |
 | Select | Click; Shift+click adds; drag across empty space to box-select. Selecting a wire highlights its whole net |
@@ -189,6 +189,14 @@ the circuit except what a real one would.
 | `multimeter` | Mode V, A or Ω in Properties. **V**: red lead and COM across a part (10 MΩ input). **A**: in series, in place of a wire (0 Ω): break the wire and put the leads on its ends. **Ω**: across an unpowered part (1 mA test current). The reading shows on the meter on the sheet and in Properties, live or after a run |
 | `oscilloscope` | Four channels, each the voltage at its probe against COM (or ground when COM is left open). The Oscilloscope tab shows the traces with a front panel: channels on and off, volts per division for each, time per division, trigger (channel, level, rising or falling, auto), Run/Stop, Autoscale, and measurements per channel (peak-to-peak, mean, frequency). Live it sweeps continuously; after a Run it shows the recorded run |
 
+**Lights**
+
+LEDs and lamps glow on the sheet in their colour, brighter with more current: live as
+the circuit runs (averaged over each frame, so a dimmed or fast-blinking LED looks dim
+rather than flickering), and after a Run, as they were at its end. An LED's `color`
+(red, orange, yellow, green, blue, white) sets its forward voltage too: about 2 V for
+red, 3.1 V for blue and white at 20 mA.
+
 **Parts for analog circuits**
 
 Besides resistors, capacitors, inductors, transformers, diodes, LEDs, bipolar and MOS
@@ -228,8 +236,10 @@ logic blocks have none.
 **Modelling parts and enclosures**
 
 Your own cells can have bodies too, modelled in the 3D view's **Body** panel as in a
-CAD program: a history of features, each adding to, cutting from or intersecting the
-body made so far.
+CAD program. Start a new one with the cube button beside New Cell in the Project tree
+(or File → New 3D Part…, or New 3D Part Here… on a folder); for an existing cell,
+Properties has a **3D body** section with Model a 3D Body. A body is a history of
+features, each adding to, cutting from or intersecting the body made so far.
 
 | Feature | What it makes |
 |---|---|

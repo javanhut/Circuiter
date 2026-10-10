@@ -82,7 +82,7 @@ impl CircuiterApp {
             ui.add_space(8.0);
             let has_ws = self.workspace.is_some();
             if icon_button(ui, icon::FILE_PLUS, "New cell  (Ctrl+N)", has_ws, false).clicked() {
-                prompt = self.workspace.as_ref().map(new_cell_prompt);
+                prompt = self.workspace.as_ref().map(|ws| new_cell_prompt(ws, false));
             }
             if icon_button(ui, icon::FOLDER_OPEN, "Open project  (Ctrl+O)", true, false).clicked() {
                 self.guarded(&ctx, Pending::OpenDialog);
@@ -584,6 +584,18 @@ impl CircuiterApp {
                     {
                         ws.tool = Tool::Wire { points: Vec::new(), horizontal_first: true };
                     }
+                }
+                if icon_button(
+                    ui,
+                    icon::HAND,
+                    "Hand  (H): drag to move the view. Middle or right drag, or Space+drag, \
+                     also do",
+                    true,
+                    current == "Pan",
+                )
+                .clicked()
+                {
+                    ws.tool = if ws.tool == Tool::Pan { Tool::Select } else { Tool::Pan };
                 }
                 if tool(ui, icon::CURSOR, "Select", "Select  (Esc)") {
                     ws.tool = Tool::Select;
