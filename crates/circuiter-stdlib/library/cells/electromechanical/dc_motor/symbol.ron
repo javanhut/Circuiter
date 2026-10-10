@@ -1,0 +1,12 @@
+(
+    graphics: [
+        Circle(center: (0.0, 0.0), radius: 2.54),
+        Text(at: (0.0, 0.0), text: "M", anchor: Center),
+        Text(at: (3.302, -0.508), text: "${name}"),
+        Text(at: (-1.27, -3.302), text: "+"),
+    ],
+    pins: [
+        (port: "a", at: (0.0, -5.08), direction: Down),
+        (port: "b", at: (0.0, 5.08), direction: Up),
+    ],
+)

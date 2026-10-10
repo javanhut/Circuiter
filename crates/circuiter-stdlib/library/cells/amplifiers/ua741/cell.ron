@@ -1,0 +1,30 @@
+(
+    description: "µA741 op amp: the classic Boyle macromodel, as manufacturers publish it (input transistors, slew limiting, output current limit and clamps). ±18 V at most",
+    prefix: "U",
+    ports: [
+        (name: "inp", kind: Input, description: "Non-inverting input (+)"),
+        (name: "inn", kind: Input, description: "Inverting input (−)"),
+        (name: "out", kind: Output, description: "Output"),
+        (name: "vp", kind: PowerIn, description: "Positive supply (V+)"),
+        (
+            name: "vn",
+            kind: PowerIn,
+            description: "Negative supply (V−), or ground for a single supply",
+        ),
+    ],
+    params: [
+        (
+            name: "vmax",
+            kind: Real(unit: "V"),
+            default: "36",
+            description: "Supply voltage rating, V+ to V−",
+        ),
+    ],
+    physics: (
+        thermal_resistance: "150",
+        heat_capacity: "100m",
+        max_temperature: "150",
+        limits: [Voltage(ports: ("vp", "vn"), max: "${param.vmax}")],
+        failure: (mode: Short("vp", "vn"), effect: Smoke),
+    ),
+)

@@ -1,0 +1,12 @@
+(
+    description: "Battery: a voltage with an internal resistance, so its voltage sags under load and a short circuit only draws V / r",
+    prefix: "BT",
+    ports: [
+        (name: "p", kind: PowerOut, description: "Positive (+)"),
+        (name: "n", kind: PowerOut, description: "Negative (−)"),
+    ],
+    params: [
+        (name: "V", kind: Real(unit: "V"), default: "9", description: "Voltage"),
+        (name: "r", kind: Real(unit: "Ω"), default: "1", description: "Internal resistance"),
+    ],
+)

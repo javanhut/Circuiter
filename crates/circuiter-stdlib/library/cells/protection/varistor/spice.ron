@@ -1,0 +1,3 @@
+(
+    template: "B${inst} ${node.a} ${node.b} I=1m*pwrs(V(${node.a},${node.b})/${param.vnom},${param.alpha})\nC${inst} ${node.a} ${node.b} ${param.c}",
+)

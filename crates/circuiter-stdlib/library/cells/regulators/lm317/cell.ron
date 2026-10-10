@@ -1,0 +1,36 @@
+(
+    description: "LM317 adjustable regulator: keeps out 1.25 V above adj. With R1 from out to adj and R2 from adj to ground, out = 1.25 V × (1 + R2/R1)",
+    prefix: "U",
+    ports: [
+        (name: "in", kind: PowerIn, description: "Input"),
+        (name: "adj", kind: Input, description: "Adjust: out sits 1.25 V above it"),
+        (name: "out", kind: PowerOut, description: "Output"),
+    ],
+    params: [
+        (
+            name: "dropout",
+            kind: Real(unit: "V"),
+            default: "1.7",
+            description: "How far above the output the input must stay",
+        ),
+        (
+            name: "ilimit",
+            kind: Real(unit: "A"),
+            default: "1.5",
+            description: "Output current limit",
+        ),
+        (
+            name: "vmax",
+            kind: Real(unit: "V"),
+            default: "40",
+            description: "Input-to-output voltage rating",
+        ),
+    ],
+    physics: (
+        thermal_resistance: "65",
+        heat_capacity: "1",
+        max_temperature: "175",
+        limits: [Voltage(ports: ("in", "out"), max: "${param.vmax}")],
+        failure: (mode: Open, effect: Smoke),
+    ),
+)

@@ -214,7 +214,7 @@ schematic hierarchy ──► netlister ──► flat netlist ──┬─► c
 | `circuiter-scene` | Schematic → display list (shared by screen, SVG and print), themes, SVG export | done |
 | `circuiter-app` | The one binary, `circuiter`. Desktop GUI (egui on wgpu): headless operations (`edit` for schematics, `symbol_edit`, `interface`), `workspace` (session, tools, undo), `canvas`, `style` (colours, icons, shared widgets), `app` with `chrome` (title bar, toolbar, tabs), `explorer` (trees, components) and `panels` (properties, simulation, physics, results) | schematic and symbol editors done |
 | `circuiter-netlist` | Hierarchy flattening, net naming, SPICE emission with merged model cards, whole-circuit ERC (sheet connectivity is in the model) | done |
-| `circuiter-sim` | Pure-Rust SPICE-compatible simulator: deck parser (R, C, L, K, V, I, E, F, G, H incl. `POLY`, S, W switches, D, MOSFET Level 1 with Meyer capacitance, Gummel-Poon BJT; `.subckt` with parameters, `.param`, `{}` expressions with functions; DC, AC, PULSE, SIN, PWL sources), sparse LU (KLU-style: minimum-degree ordering, threshold pivoting, refactorisation), operating point (Newton, dynamic gmin and source stepping), DC sweep, transient (switch event location), AC; progress and cancellation; model-library scanning for import; later the co-simulation scheduler | done for Milestone 1's analyses |
+| `circuiter-sim` | Pure-Rust SPICE-compatible simulator: deck parser (R, C, L, K, V, I, E, F, G, H incl. `POLY`, S, W switches, D, MOSFET Level 1 with Meyer capacitance, Gummel-Poon BJT; `.subckt` with parameters, `.param`, `{}` expressions with functions; DC, AC, PULSE, SIN, PWL sources; JFETs (Shichman-Hodges); behavioural `B` sources whose expressions of node voltages, branch currents and time are differentiated exactly for Newton), sparse LU (KLU-style: minimum-degree ordering, threshold pivoting, refactorisation), operating point (Newton, dynamic gmin and source stepping), DC sweep, transient (switch event location), AC; progress and cancellation; model-library scanning for import; later the co-simulation scheduler | done for Milestone 1's analyses |
 | `circuiter-physics` | Per-part thermal model (exact RC update each step), instant limits (voltage, current, I²t), failure modes swapped into the running simulation, events with causes, operating-point assessment | done (first version) |
 | `circuiter-render` | Custom wgpu renderer for very large sheets and 3D | when egui's painter runs out |
 | `circuiter-logic` | Digital simulator: four-state values up to 64 bits, event queue with delta cycles and propagation delays, net resolution of several drivers, history of every net; parts from gates to register files, memories and the RV32I control unit | done (first version) |
@@ -259,9 +259,12 @@ schematic hierarchy ──► netlister ──► flat netlist ──┬─► c
    - later: higher MOSFET levels (BSIM), behavioural sources, `.include`/`.lib`
 5. Standard library growth: ~~NPN and PNP (2N3904/2N3906), transformer (linear,
    coupled windings), LED, fuse, VDD rail, CMOS logic gates (NOT, AND, OR, NAND, NOR,
-   XOR, XNOR) with hidden supply pins~~ (done); next JFETs, nonlinear transformer cores, op-amps,
-   switches, fuses, XSPICE digital primitives (gates, D flip-flops), each with ratings
-   and thermal data
+   XOR, XNOR) with hidden supply pins~~ (done); ~~op amps, comparators, regulators,
+   references, the 555, zener/Schottky/rectifier/bridge diodes, JFETs, power MOSFETs,
+   Darlingtons, thyristors, triacs, optocouplers, sensors, relays, motors, lamps,
+   speakers, electrolytics, crystals, varistors, batteries, dependent sources~~ (done,
+   built on behavioural sources); next nonlinear transformer cores, 7-segment displays
+   and glowing LEDs in live runs, more logic ICs
 6. ~~Physics and failure engine~~ (done, first version): cells carry `physics` (thermal
    resistance and capacity, destruction temperature, voltage/current/I²t limits,
    failure mode and effect) in terms of their parameters; the simulator calls an

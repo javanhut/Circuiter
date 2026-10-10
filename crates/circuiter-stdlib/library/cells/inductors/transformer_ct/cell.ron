@@ -1,0 +1,34 @@
+(
+    description: "Centre-tapped transformer: one primary and a secondary with a tap in the middle, for full-wave rectifiers and push-pull stages. n is the turns ratio of the primary to the whole secondary",
+    prefix: "T",
+    ports: [
+        (name: "p1", description: "Primary, dotted end"),
+        (name: "p2", description: "Primary"),
+        (name: "s1", description: "Secondary, dotted end"),
+        (name: "ct", description: "Centre tap"),
+        (name: "s2", description: "Secondary"),
+    ],
+    params: [
+        (name: "lp", kind: Real(unit: "H"), default: "1", description: "Primary inductance"),
+        (
+            name: "n",
+            kind: Real(unit: ""),
+            default: "10",
+            description: "Turns ratio, primary to whole secondary",
+        ),
+        (name: "k", kind: Real(unit: ""), default: "0.999", description: "Coupling coefficient"),
+        (name: "rp", kind: Real(unit: "Ω"), default: "1", description: "Primary resistance"),
+        (
+            name: "rs",
+            kind: Real(unit: "Ω"),
+            default: "0.1",
+            description: "Secondary resistance (whole)",
+        ),
+    ],
+    physics: (
+        thermal_resistance: "20",
+        heat_capacity: "30",
+        max_temperature: "180",
+        failure: (mode: Open, effect: Smoke),
+    ),
+)

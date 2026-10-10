@@ -1,0 +1,21 @@
+(
+    description: "Electrolytic capacitor: polarised, so p must stay positive. Reverse it (or exceed its voltage) and it conducts, heats and bursts. Includes its series resistance (ESR)",
+    prefix: "C",
+    ports: [(name: "p", description: "Positive (+)"), (name: "n", description: "Negative (−)")],
+    params: [
+        (name: "C", kind: Real(unit: "F"), default: "100u", description: "Capacitance"),
+        (name: "Vmax", kind: Real(unit: "V"), default: "25", description: "Voltage rating"),
+        (
+            name: "esr",
+            kind: Real(unit: "Ω"),
+            default: "100m",
+            description: "Equivalent series resistance",
+        ),
+    ],
+    physics: (
+        thermal_resistance: "30",
+        heat_capacity: "2",
+        max_temperature: "130",
+        failure: (mode: Short("p", "n"), effect: Explode),
+    ),
+)

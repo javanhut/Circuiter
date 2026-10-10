@@ -1,0 +1,7 @@
+(
+    template: "Q${inst}p ${inst}_g ${inst}_n ${node.a} ${model}p\nQ${inst}n ${inst}_n ${inst}_g ${node.k} ${model}n\nR${inst}g ${node.g} ${inst}_g 10\nR${inst}k ${inst}_g ${node.k} 1k",
+    models: [
+        ".model ${model}p PNP(IS=1e-14 BF=5 BR=1 CJE=20p CJC=20p TF=100n TR=5u)",
+        ".model ${model}n NPN(IS=1e-14 BF=50 BR=1 CJE=20p CJC=20p TF=50n TR=2u)",
+    ],
+)

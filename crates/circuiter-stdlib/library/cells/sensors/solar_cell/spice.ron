@@ -1,0 +1,6 @@
+(
+    template: "I${inst} ${node.n} ${node.p} DC {${param.isc}*${param.light}/1000}\nD${inst} ${node.p} ${node.n} ${model}\nR${inst} ${node.p} ${node.n} {${param.cells}*50}",
+    models: [
+        ".model ${model} D(IS=2.4n N={1.2*${param.cells}} RS={0.01*${param.cells}} BV=1k IBV=1u CJO=1n)",
+    ],
+)

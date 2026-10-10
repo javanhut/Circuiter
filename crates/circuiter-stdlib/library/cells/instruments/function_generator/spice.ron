@@ -1,0 +1,11 @@
+(
+    template: "",
+    choose: (
+        param: "wave",
+        templates: {
+            "sine": "V${inst} ${inst}_o ${node.com} DC ${param.offset} AC 1 SIN(${param.offset} ${param.amplitude} ${param.frequency})\nR${inst} ${inst}_o ${node.out} 50",
+            "square": "V${inst} ${inst}_o ${node.com} DC ${param.offset} PULSE({${param.offset}-${param.amplitude}} {${param.offset}+${param.amplitude}} 0 {0.001/${param.frequency}} {0.001/${param.frequency}} {0.499/${param.frequency}} {1/${param.frequency}})\nR${inst} ${inst}_o ${node.out} 50",
+            "triangle": "V${inst} ${inst}_o ${node.com} DC ${param.offset} PULSE({${param.offset}-${param.amplitude}} {${param.offset}+${param.amplitude}} 0 {0.5/${param.frequency}} {0.5/${param.frequency}} 1e-12 {1/${param.frequency}})\nR${inst} ${inst}_o ${node.out} 50",
+        },
+    ),
+)

@@ -1,0 +1,3 @@
+(
+    template: "V${inst} ${node.p} ${inst}_i DC ${param.V}\nR${inst} ${inst}_i ${node.n} ${param.r}",
+)

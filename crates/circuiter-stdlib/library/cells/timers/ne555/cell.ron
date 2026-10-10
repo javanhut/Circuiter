@@ -1,0 +1,35 @@
+(
+    description: "555 timer: the output goes high when trig falls below a third of the supply, and low (with dis shorted to ground) when thr rises above two thirds or rst is pulled low. Astable: R1 from vcc to dis, R2 from dis to thr and trig, C to ground; f ≈ 1.44 / ((R1 + 2 R2) C). 4.5 to 16 V",
+    prefix: "U",
+    ports: [
+        (name: "gnd", kind: PowerIn, description: "Ground (pin 1)"),
+        (name: "trig", kind: Input, description: "Trigger (pin 2): low starts a cycle"),
+        (name: "out", kind: Output, description: "Output (pin 3)"),
+        (
+            name: "rst",
+            kind: Input,
+            description: "Reset (pin 4): low stops it; tie to vcc when unused",
+        ),
+        (
+            name: "ctrl",
+            kind: Bidirectional,
+            description: "Control voltage (pin 5): two thirds of vcc; decouple with 10 nF",
+        ),
+        (name: "thr", kind: Input, description: "Threshold (pin 6)"),
+        (name: "dis", kind: Bidirectional, description: "Discharge (pin 7)"),
+        (name: "vcc", kind: PowerIn, description: "Supply (pin 8)"),
+    ],
+    params: [
+        (name: "vmax", kind: Real(unit: "V"), default: "16", description: "Supply voltage rating"),
+    ],
+    physics: (
+        thermal_resistance: "100",
+        heat_capacity: "50m",
+        max_temperature: "150",
+        limits: [
+            Voltage(ports: ("vcc", "gnd"), max: "{${param.vmax}*1.25}"),
+            Current(port: "out", max: "500m"),
+        ],
+        failure: (mode: Short("vcc", "gnd"), effect: Smoke),
+    ),
+)

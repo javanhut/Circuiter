@@ -1,0 +1,24 @@
+(
+    description: "NPN Darlington pair in one package: a gain of thousands, for driving relays, motors and lamps from a logic pin through a base resistor. Defaults are like a TIP120 (60 V, 5 A); it saturates at about 1 V",
+    prefix: "Q",
+    ports: [
+        (name: "c", description: "Collector"),
+        (name: "b", kind: Input, description: "Base"),
+        (name: "e", description: "Emitter"),
+    ],
+    params: [
+        (
+            name: "vceo",
+            kind: Real(unit: "V"),
+            default: "60",
+            description: "Collector-emitter voltage rating",
+        ),
+    ],
+    physics: (
+        thermal_resistance: "62",
+        heat_capacity: "2",
+        max_temperature: "150",
+        limits: [Voltage(ports: ("c", "e"), max: "{1.5*${param.vceo}}")],
+        failure: (mode: Short("c", "e"), effect: Pop),
+    ),
+)

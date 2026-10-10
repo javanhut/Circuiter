@@ -1,0 +1,4 @@
+[project]
+name = "analog_lab"
+top = "amplifier"
+description = "Everyday analog circuits: an op-amp amplifier, a 555 blinker, a mains power supply, a light switch, a motor driver and a relay driver"

@@ -1,0 +1,5 @@
+(
+    description: "Relay driver: hold PB1 and the transistor energises the relay, whose contacts move from the standby LED to the 12 V lamp. D1 across the coil protects the transistor when it lets go",
+    prefix: "X",
+    ports: [],
+)

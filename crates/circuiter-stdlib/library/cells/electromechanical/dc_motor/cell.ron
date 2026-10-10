@@ -1,0 +1,32 @@
+(
+    description: "Brushed DC motor: winding resistance and inductance, and a back-EMF of ke times its speed, which builds as the rotor (inertia j) spins up against friction and the load torque. Stalled, it draws the full supply over r and heats. No-load speed ≈ V / ke (rad/s)",
+    prefix: "M",
+    ports: [
+        (name: "a", description: "Terminal (+ to turn forward)"),
+        (name: "b", description: "Terminal"),
+    ],
+    params: [
+        (name: "r", kind: Real(unit: "Ω"), default: "2", description: "Winding resistance"),
+        (name: "l", kind: Real(unit: "H"), default: "1m", description: "Winding inductance"),
+        (
+            name: "ke",
+            kind: Real(unit: "V·s"),
+            default: "10m",
+            description: "Back-EMF (and torque) constant, V per rad/s",
+        ),
+        (name: "j", kind: Real(unit: "kg·m²"), default: "1u", description: "Rotor inertia"),
+        (
+            name: "friction",
+            kind: Real(unit: "N·m·s"),
+            default: "1u",
+            description: "Viscous friction",
+        ),
+        (name: "load", kind: Real(unit: "N·m"), default: "0", description: "Load torque"),
+    ],
+    physics: (
+        thermal_resistance: "8",
+        heat_capacity: "15",
+        max_temperature: "155",
+        failure: (mode: Open, effect: Smoke),
+    ),
+)

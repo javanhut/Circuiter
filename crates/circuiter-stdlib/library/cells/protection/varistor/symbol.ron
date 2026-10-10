@@ -1,0 +1,11 @@
+(
+    graphics: [
+        Rect(a: (-2.54, -1.016), b: (2.54, 1.016)),
+        Polyline(points: [(-3.048, 2.032), (-2.032, 2.032), (2.032, -2.032)]),
+        Text(at: (0.0, -2.54), text: "${name}", anchor: Center),
+    ],
+    pins: [
+        (port: "a", at: (-5.08, 0.0), direction: Right),
+        (port: "b", at: (5.08, 0.0), direction: Left),
+    ],
+)

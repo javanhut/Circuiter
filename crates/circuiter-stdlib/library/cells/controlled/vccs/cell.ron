@@ -1,0 +1,13 @@
+(
+    description: "Voltage-controlled current source (G): a current of gm times the voltage from cp to cn flows from p through the source to n",
+    prefix: "G",
+    ports: [
+        (name: "p", description: "Output +"),
+        (name: "n", description: "Output −"),
+        (name: "cp", description: "Control + (sensed voltage)"),
+        (name: "cn", description: "Control − (sensed voltage)"),
+    ],
+    params: [
+        (name: "gm", kind: Real(unit: "S"), default: "1m", description: "Transconductance (A/V)"),
+    ],
+)

@@ -1,0 +1,13 @@
+(
+    description: "Current-controlled current source (F): the current flowing in at cp and out at cn (a short between them) is mirrored, times gain, from p through the source to n",
+    prefix: "F",
+    ports: [
+        (name: "p", description: "Output +"),
+        (name: "n", description: "Output −"),
+        (name: "cp", description: "Control + (in series with the sensed current)"),
+        (name: "cn", description: "Control − (in series with the sensed current)"),
+    ],
+    params: [
+        (name: "gain", kind: Real(unit: ""), default: "10", description: "Current gain (A/A)"),
+    ],
+)

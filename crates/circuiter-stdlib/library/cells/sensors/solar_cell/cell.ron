@@ -1,0 +1,34 @@
+(
+    description: "Solar panel: cells in series, each about 0.6 V open-circuit; in full sun (1000 W/m²) it gives isc into a short. Load it to find its maximum power point",
+    prefix: "PV",
+    ports: [
+        (name: "p", kind: PowerOut, description: "Positive"),
+        (name: "n", kind: PowerOut, description: "Negative"),
+    ],
+    params: [
+        (
+            name: "cells",
+            kind: Real(unit: ""),
+            default: "36",
+            description: "Cells in series (36 makes a 12 V panel)",
+        ),
+        (
+            name: "isc",
+            kind: Real(unit: "A"),
+            default: "0.6",
+            description: "Short-circuit current in full sun",
+        ),
+        (
+            name: "light",
+            kind: Real(unit: "W/m²"),
+            default: "1000",
+            description: "Sunlight on it (full sun: 1000)",
+        ),
+    ],
+    physics: (
+        thermal_resistance: "5",
+        heat_capacity: "50",
+        max_temperature: "120",
+        failure: (mode: Open, effect: Smoke),
+    ),
+)

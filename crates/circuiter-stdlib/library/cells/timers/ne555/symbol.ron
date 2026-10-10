@@ -1,0 +1,18 @@
+(
+    generated: true,
+    graphics: [
+        Rect(a: (-5.08, -5.08), b: (5.08, 5.08)),
+        Text(at: (-5.08, -6.35), text: "${name}"),
+        Text(at: (-5.08, 6.35), text: "ne555"),
+    ],
+    pins: [
+        (port: "gnd", at: (0.0, 7.62), direction: Up, show_name: true),
+        (port: "trig", at: (-7.62, -2.54), direction: Right, show_name: true),
+        (port: "out", at: (7.62, -2.54), direction: Left, show_name: true),
+        (port: "rst", at: (-7.62, 0.0), direction: Right, show_name: true),
+        (port: "ctrl", at: (7.62, 0.0), direction: Left, show_name: true),
+        (port: "thr", at: (-7.62, 2.54), direction: Right, show_name: true),
+        (port: "dis", at: (7.62, 2.54), direction: Left, show_name: true),
+        (port: "vcc", at: (0.0, -7.62), direction: Down, show_name: true),
+    ],
+)

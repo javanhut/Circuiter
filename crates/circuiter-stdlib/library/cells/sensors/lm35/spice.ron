@@ -1,0 +1,3 @@
+(
+    template: "V${inst}t ${inst}_t ${node.gnd} DC {${param.temp}*0.01}\nB${inst}o ${inst}_o ${node.gnd} V=min(V(${inst}_t,${node.gnd}),V(${node.vs},${node.gnd})-1)\nR${inst}o ${inst}_o ${node.out} 1\nR${inst}q ${node.vs} ${node.gnd} 80k",
+)

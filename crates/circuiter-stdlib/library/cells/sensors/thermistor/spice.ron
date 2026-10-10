@@ -1,0 +1,3 @@
+(
+    template: "R${inst} ${node.a} ${node.b} {${param.r25}*exp(${param.beta}*(1/(${param.temp}+273.15)-1/298.15))}",
+)

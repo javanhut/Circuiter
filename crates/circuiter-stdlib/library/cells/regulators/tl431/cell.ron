@@ -1,0 +1,19 @@
+(
+    description: "TL431 adjustable shunt reference: conducts from cathode to anode as much as it takes to hold ref at 2.495 V above the anode. Alone (ref tied to cathode) it is a 2.5 V reference; with a divider, any voltage up to 36 V",
+    prefix: "U",
+    ports: [
+        (name: "k", description: "Cathode"),
+        (name: "a", description: "Anode"),
+        (name: "ref", kind: Input, description: "Reference input"),
+    ],
+    params: [
+        (name: "vmax", kind: Real(unit: "V"), default: "36", description: "Cathode voltage rating"),
+    ],
+    physics: (
+        thermal_resistance: "200",
+        heat_capacity: "10m",
+        max_temperature: "150",
+        limits: [Voltage(ports: ("k", "a"), max: "${param.vmax}"), Current(port: "k", max: "150m")],
+        failure: (mode: Short("k", "a"), effect: Smoke),
+    ),
+)

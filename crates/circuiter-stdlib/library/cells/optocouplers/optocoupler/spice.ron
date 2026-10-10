@@ -1,0 +1,7 @@
+(
+    template: "V${inst}s ${node.a} ${inst}_a DC 0\nD${inst} ${inst}_a ${node.k} ${model}d\nQ${inst} ${node.c} ${inst}_b ${node.e} ${model}q\nF${inst} ${node.c} ${inst}_b V${inst}s {${param.ctr}/300}\nR${inst} ${inst}_b ${node.e} 10meg",
+    models: [
+        ".model ${model}d D(IS=1e-15 N=1.5 RS=1 BV=6 IBV=10u CJO=30p)",
+        ".model ${model}q NPN(IS=1e-14 BF=300 VAF=50 CJE=10p CJC=8p TF=1n TR=1u)",
+    ],
+)

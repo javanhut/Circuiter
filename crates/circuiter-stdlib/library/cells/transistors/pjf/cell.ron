@@ -1,0 +1,60 @@
+(
+    description: "P-channel JFET: the mirror of the n-channel one; pinched off as the gate goes above the source. Defaults are like a 2N5460",
+    prefix: "J",
+    ports: [
+        (name: "d", description: "Drain"),
+        (name: "g", kind: Input, description: "Gate"),
+        (name: "s", description: "Source"),
+    ],
+    params: [
+        (
+            name: "vto",
+            kind: Real(unit: "V"),
+            default: "-2.5",
+            description: "Pinch-off voltage (gate to source, where the channel closes)",
+        ),
+        (
+            name: "beta",
+            kind: Real(unit: "A/V²"),
+            default: "0.48m",
+            description: "Transconductance parameter: Idss = beta × vto²",
+        ),
+        (
+            name: "lambda",
+            kind: Real(unit: "1/V"),
+            default: "5m",
+            description: "Channel-length modulation",
+        ),
+        (
+            name: "cgs",
+            kind: Real(unit: "F"),
+            default: "5p",
+            description: "Gate-source capacitance at zero bias",
+        ),
+        (
+            name: "cgd",
+            kind: Real(unit: "F"),
+            default: "2p",
+            description: "Gate-drain capacitance at zero bias",
+        ),
+        (
+            name: "is",
+            kind: Real(unit: "A"),
+            default: "10f",
+            description: "Gate junction saturation current",
+        ),
+        (
+            name: "vmax",
+            kind: Real(unit: "V"),
+            default: "40",
+            description: "Drain-source voltage rating",
+        ),
+    ],
+    physics: (
+        thermal_resistance: "350",
+        heat_capacity: "2.5m",
+        max_temperature: "150",
+        limits: [Voltage(ports: ("d", "s"), max: "{1.5*${param.vmax}}")],
+        failure: (mode: Short("d", "s"), effect: Pop),
+    ),
+)

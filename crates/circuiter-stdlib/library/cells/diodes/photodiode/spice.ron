@@ -1,0 +1,4 @@
+(
+    template: "D${inst} ${node.a} ${node.k} ${model}\nI${inst} ${node.k} ${node.a} DC {${param.lux}*${param.sens}}",
+    models: [".model ${model} D(IS=2n N=1.8 RS=1 BV=32 IBV=10u CJO=70p)"],
+)

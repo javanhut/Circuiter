@@ -1,0 +1,7 @@
+(
+    template: "M${inst} ${node.d} ${node.g} ${node.s} ${node.s} ${model} W=1 L=1\nD${inst} ${node.d} ${node.s} ${model}b",
+    models: [
+        ".model ${model} PMOS(LEVEL=1 VTO=${param.vto} KP=${param.kp} LAMBDA=0.01 CGSO=${param.cgs} CGDO=${param.cgd})",
+        ".model ${model}b D(IS=1n RS=10m BV={1.2*${param.vds}} IBV=250u CJO=500p TT=100n)",
+    ],
+)

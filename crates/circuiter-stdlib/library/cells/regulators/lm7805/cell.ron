@@ -1,0 +1,33 @@
+(
+    description: "78xx fixed linear regulator (7805: 5 V; set vout for a 7809, 7812…): holds out at vout above gnd while the input stays at least the dropout above it, up to its current limit. The difference is burned as heat: (in − out) × current",
+    prefix: "U",
+    ports: [
+        (name: "in", kind: PowerIn, description: "Input"),
+        (name: "gnd", kind: PowerIn, description: "Ground (common)"),
+        (name: "out", kind: PowerOut, description: "Regulated output"),
+    ],
+    params: [
+        (name: "vout", kind: Real(unit: "V"), default: "5", description: "Output voltage"),
+        (
+            name: "dropout",
+            kind: Real(unit: "V"),
+            default: "2",
+            description: "How far above the output the input must stay",
+        ),
+        (name: "iq", kind: Real(unit: "A"), default: "5m", description: "Quiescent current"),
+        (
+            name: "ilimit",
+            kind: Real(unit: "A"),
+            default: "1.5",
+            description: "Output current limit",
+        ),
+        (name: "vmax", kind: Real(unit: "V"), default: "35", description: "Input voltage rating"),
+    ],
+    physics: (
+        thermal_resistance: "65",
+        heat_capacity: "1",
+        max_temperature: "175",
+        limits: [Voltage(ports: ("in", "gnd"), max: "${param.vmax}")],
+        failure: (mode: Open, effect: Smoke),
+    ),
+)

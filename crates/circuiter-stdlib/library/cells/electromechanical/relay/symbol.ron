@@ -1,0 +1,24 @@
+(
+    graphics: [
+        Rect(a: (-6.35, -2.54), b: (-3.81, 2.54)),
+        Polyline(points: [(-6.35, 1.27), (-3.81, -1.27)]),
+        Polyline(points: [(-3.81, 0.0), (-3.048, 0.0)]),
+        Polyline(points: [(-2.54, 0.0), (-1.778, 0.0)]),
+        Polyline(points: [(-1.016, 0.0), (-0.254, 0.0)]),
+        Polyline(points: [(0.508, 0.0), (1.016, 0.0)]),
+        Polyline(points: [(2.54, 2.54), (0.254, -2.286)]),
+        Circle(center: (2.54, 2.54), radius: 0.254, fill: true),
+        Polyline(points: [(0.0, -2.54), (0.0, -2.032)]),
+        Polyline(points: [(5.08, -2.54), (5.08, -2.032)]),
+        Text(at: (-5.08, -4.064), text: "${name}"),
+        Text(at: (-0.762, -3.302), text: "nc"),
+        Text(at: (4.064, -3.302), text: "no"),
+    ],
+    pins: [
+        (port: "c1", at: (-5.08, -5.08), direction: Down),
+        (port: "c2", at: (-5.08, 5.08), direction: Up),
+        (port: "com", at: (2.54, 5.08), direction: Up),
+        (port: "nc", at: (0.0, -5.08), direction: Down),
+        (port: "no", at: (5.08, -5.08), direction: Down),
+    ],
+)

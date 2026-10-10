@@ -1,0 +1,14 @@
+(
+    description: "Incandescent lamp: its filament\'s resistance rises tenfold as it heats, so it draws a surge when switched on. Rated v and p; it burns out at twice its voltage",
+    prefix: "LP",
+    ports: [(name: "a"), (name: "b")],
+    params: [
+        (name: "v", kind: Real(unit: "V"), default: "12", description: "Rated voltage"),
+        (name: "p", kind: Real(unit: "W"), default: "5", description: "Rated power"),
+        (name: "tau", kind: Real(unit: "s"), default: "50m", description: "Filament warm-up time"),
+    ],
+    physics: (
+        limits: [Voltage(ports: ("a", "b"), max: "{2*${param.v}}")],
+        failure: (mode: Open, effect: Flash),
+    ),
+)

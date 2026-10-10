@@ -1,0 +1,5 @@
+(
+    description: "Light switch: as light on the LDR rises its resistance falls, sense drops below the level set by RV1 (3.5 V: about 3 lux), and the comparator pulls the LED on. It starts in the dark: run it live and turn the light up",
+    prefix: "X",
+    ports: [],
+)

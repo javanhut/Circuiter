@@ -1,0 +1,16 @@
+(
+    description: "Varistor (MOV): nearly open below its voltage, then conducts steeply to clamp surges; absorbing too much energy heats it until it fails short. vnom is the voltage at 1 mA",
+    prefix: "RV",
+    ports: [(name: "a"), (name: "b")],
+    params: [
+        (name: "vnom", kind: Real(unit: "V"), default: "470", description: "Voltage at 1 mA"),
+        (name: "alpha", kind: Real(unit: ""), default: "30", description: "Steepness"),
+        (name: "c", kind: Real(unit: "F"), default: "500p", description: "Capacitance"),
+    ],
+    physics: (
+        thermal_resistance: "40",
+        heat_capacity: "1",
+        max_temperature: "200",
+        failure: (mode: Short("a", "b"), effect: Explode),
+    ),
+)

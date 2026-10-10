@@ -1,0 +1,20 @@
+(
+    description: "Photodiode: light makes a current flow out of the anode (into the cathode inside), in proportion to the light. Reverse-bias it into a resistor or a transimpedance amplifier, or use it as a tiny solar cell. Defaults are like a BPW34",
+    prefix: "D",
+    ports: [(name: "a", description: "Anode"), (name: "k", description: "Cathode")],
+    params: [
+        (
+            name: "lux",
+            kind: Real(unit: "lx"),
+            default: "100",
+            description: "Light on it, in lux (daylight indoors: a few hundred)",
+        ),
+        (name: "sens", kind: Real(unit: "A"), default: "70n", description: "Current per lux"),
+    ],
+    physics: (
+        thermal_resistance: "400",
+        heat_capacity: "20m",
+        max_temperature: "125",
+        failure: (mode: Short("a", "k"), effect: Smoke),
+    ),
+)

@@ -1,0 +1,12 @@
+(
+    description: "Changeover switch (SPDT): com joins a, or b when thrown. While the circuit runs live, click it to throw it",
+    prefix: "SW",
+    ports: [
+        (name: "com", description: "Common"),
+        (name: "a", description: "Joined to com at rest"),
+        (name: "b", description: "Joined to com when thrown"),
+    ],
+    params: [
+        (name: "thrown", kind: Bool, default: "false", description: "Thrown: com joined to b"),
+    ],
+)

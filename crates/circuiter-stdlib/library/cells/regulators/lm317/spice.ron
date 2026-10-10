@@ -1,0 +1,3 @@
+(
+    template: "B${inst}r ${inst}_t 0 V=0.5*((V(${node.adj})+1.25)+(V(${node.in})-${param.dropout})-sqrt(((V(${node.adj})+1.25)-(V(${node.in})-${param.dropout}))^2+1e-4))-300*uramp(I(V${inst}s)-${param.ilimit})\nV${inst}s ${inst}_t ${inst}_u DC 0\nR${inst}o ${inst}_u ${node.out} 10m\nB${inst}i ${node.in} 0 I=uramp(I(V${inst}s))\nB${inst}a ${node.in} ${node.adj} I=50u*tanh(V(${node.in},${node.adj})/0.5)",
+)

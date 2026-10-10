@@ -38,6 +38,7 @@ cargo run --release -p circuiter-app -- examples/cmos_inverter
 cargo run --release -p circuiter-app -- examples/ce_amplifier
 cargo run --release -p circuiter-app -- examples/riscv
 cargo run --release -p circuiter-app -- examples/bench
+cargo run --release -p circuiter-app -- examples/analog_lab
 ```
 
 The examples are a CMOS inverter built from two MOSFETs and driven by a clock, a
@@ -45,8 +46,10 @@ one-transistor audio amplifier (a 2N3904 common-emitter stage, about 44 dB of ga
 with a power LED, a half adder built from logic gates, an overstress lab where an
 LED, a fuse and a resistor are pushed past their limits, a RISC-V processor that runs
 programs in assembly, C and Rust (built from digital parts, and again from gates
-alone), and an electronics bench to run live: a supply to turn, switches, a button,
-LEDs, a counter, multimeters and an oscilloscope.
+alone), an electronics bench to run live (a supply to turn, switches, a button, LEDs,
+a counter, multimeters and an oscilloscope), and an analog lab of everyday circuits: an
+op-amp amplifier, a 555 blinker, a mains power supply with a 7805, a light switch, a
+motor driver and a relay driver.
 
 Start your own with File → New Project… (or the welcome screen): pick an empty folder
 and the project is named after it.
@@ -89,7 +92,7 @@ and the project is named after it.
 | Net label | `L`, type a name, click on a wire. Same-named labels are connected |
 | Port | `P`, name and direction, then click. Ports are how a cell connects to the sheets that use it |
 | Select | Click; Shift+click adds; drag across empty space to box-select. Selecting a wire highlights its whole net |
-| Move | Drag a part or a wire (whatever tool is active). Wires stay attached, re-routing at right angles around the part; whatever joins a wire part-way (a T, a label) stays joined |
+| Move | Drag a part (whatever tool is active): its wires stay attached, re-routing at right angles around it. Drag a wire to move the segment under the pointer sideways, as in other EDA tools: a horizontal run up or down, a vertical one left or right, the segments either side stretching to follow and a jog added where it ends on a pin. Whatever joins it part-way (a T, a label) stays joined. Select several things to move them together |
 | Rotate, mirror, delete | `R`, `X`, `Delete` or `Backspace` |
 | Copy, cut, paste, duplicate | `Ctrl+C`, `Ctrl+X`, `Ctrl+V` (at the pointer), `Ctrl+D`. Parts come with the wires between them and get fresh names; paste works across sheets and between Circuiter windows |
 | Edit values | Change the name or any parameter in the inspector (`4k7`, `100n`, `2u`…); invalid values are refused. ↺ resets to the default |
@@ -164,12 +167,15 @@ Parts you can operate (folder `interactive/`):
 | `pushbutton` | Closed only while held | Hold the mouse on it |
 | `dial` | Adjustable DC supply between min and max | Drag its knob in Properties |
 | `potentiometer` | A resistor with a sliding tap | Drag its knob in Properties |
+| `switch_spdt` | Changeover switch: com to a, or to b when thrown | Click it to throw it |
 | `toggle` | Logic switch: a steady 0 or 1 | Click it to flip it |
 | `button` | Logic button: 1 while held | Hold the mouse on it |
 | `high`, `low` | Steady logic 1 and 0 | |
 
-Outside a live run, their parameters (closed, pressed, on, value, position) set how
-they start.
+Sensors take sliders too: light on a light-dependent resistor, photodiode or
+phototransistor (lux), sunlight on a solar panel (W/m²), and the temperature of a
+thermistor or LM35. Outside a live run, their parameters (closed, pressed, on, value,
+position, lux, temp) set how they start.
 
 **Instruments**
 
@@ -181,6 +187,28 @@ the circuit except what a real one would.
 |---|---|
 | `multimeter` | Mode V, A or Ω in Properties. **V**: red lead and COM across a part (10 MΩ input). **A**: in series, in place of a wire (0 Ω): break the wire and put the leads on its ends. **Ω**: across an unpowered part (1 mA test current). The reading shows on the meter on the sheet and in Properties, live or after a run |
 | `oscilloscope` | Four channels, each the voltage at its probe against COM (or ground when COM is left open). The Oscilloscope tab shows the traces with a front panel: channels on and off, volts per division for each, time per division, trigger (channel, level, rising or falling, auto), Run/Stop, Autoscale, and measurements per channel (peak-to-peak, mean, frequency). Live it sweeps continuously; after a Run it shows the recorded run |
+
+**Parts for analog circuits**
+
+Besides resistors, capacitors, inductors, transformers, diodes, LEDs, bipolar and MOS
+transistors, sources and fuses, the standard library has:
+
+| Folder | Parts |
+|---|---|
+| `amplifiers/` | `opamp` (set by its datasheet figures: gain, gain-bandwidth, slew rate, output swing, output resistance and current limit, supply current, offset), `lm358`, `tl072`, `ne5532`, `ua741` (the published Boyle macromodel), `lm393` comparator (open collector) |
+| `regulators/` | `lm7805` (any 78xx: set vout), `ams1117` low-dropout, `lm317` adjustable, `tl431` shunt reference. Their dropout and current limit are modelled, and the heat they burn shows in Physics |
+| `timers/` | `ne555` |
+| `diodes/` | `zener`, `schottky`, `rectifier` (1N4007), `bridge` rectifier, `photodiode` |
+| `transistors/` | `njf` and `pjf` JFETs, `nmos_power` and `pmos_power` MOSFETs (with body diodes), `darlington`, `scr` thyristor, `triac`, `phototransistor` |
+| `optocouplers/` | `optocoupler` (LED and phototransistor, set by its current transfer ratio) |
+| `sensors/` | `thermistor` (NTC), `ldr`, `solar_cell` panel, `lm35` temperature sensor |
+| `electromechanical/` | `relay` (coil with inductance, pull-in and drop-out currents, changeover contacts), `dc_motor` (winding, back-EMF, inertia, friction and load torque), `speaker`, `lamp` (incandescent, with its cold-start surge) |
+| `capacitors/`, `crystals/`, `inductors/`, `protection/` | `electrolytic` (polarised: reverse it and it heats and bursts), `crystal`, `transformer_ct` (centre-tapped), `varistor` |
+| `sources/`, `instruments/` | `battery` (with internal resistance), `isine`, `function_generator` (sine, square or triangle) |
+| `controlled/` | `vcvs`, `vccs`, `cccs`, `ccvs`: the four dependent sources, for building models |
+
+Parts carry ratings like the others: a regulator with too much to drop overheats, a
+reversed electrolytic bursts, a motor stalled too long burns out.
 
 **Mixed analog and digital circuits**
 

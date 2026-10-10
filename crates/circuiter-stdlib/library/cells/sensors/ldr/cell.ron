@@ -1,0 +1,21 @@
+(
+    description: "Light-dependent resistor (photoresistor): bright light, low resistance; darkness, high. Defaults are like a GL5528: about 10 kΩ at 10 lux. Set the light (live, too)",
+    prefix: "R",
+    ports: [(name: "a"), (name: "b")],
+    params: [
+        (name: "lux", kind: Real(unit: "lx"), default: "10", description: "Light on it, in lux"),
+        (name: "r10", kind: Real(unit: "Ω"), default: "10k", description: "Resistance at 10 lux"),
+        (
+            name: "gamma",
+            kind: Real(unit: ""),
+            default: "0.7",
+            description: "How steeply resistance falls with light",
+        ),
+        (
+            name: "rdark",
+            kind: Real(unit: "Ω"),
+            default: "1meg",
+            description: "Resistance in the dark",
+        ),
+    ],
+)

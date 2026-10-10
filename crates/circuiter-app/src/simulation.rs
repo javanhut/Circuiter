@@ -706,6 +706,61 @@ mod tests {
         assert!(sim.failure("R3").is_some());
     }
 
+    /// Every circuit of the analog lab example runs from power-on and does its job.
+    #[test]
+    fn the_analog_lab_circuits_work() {
+        let run = |cell: &str, tstop: f64, tstep: f64| {
+            let (design, top) = load("analog_lab", cell);
+            let mut sim = Simulation::prepare(&design, &top).unwrap();
+            assert!(sim.diagnostics.is_empty(), "{cell}: {:?}", sim.diagnostics);
+            sim.run(Analysis::Tran { tstop, tstep, power_on: true });
+            assert_eq!(sim.error, None, "{cell}");
+            let Some(Results::Tran { result, .. }) = sim.results.clone() else { panic!("{cell}") };
+            (sim, result)
+        };
+        let wave = |sim: &Simulation, r: &circuiter_sim::TranResult, net: &str| {
+            let node = &sim.netlist.nets[sim.netlist.net(net).unwrap()].node;
+            r.voltage(&sim.circuit, node).unwrap()
+        };
+        let span = |x: &[f64]| {
+            let half = &x[x.len() / 2..];
+            let hi = half.iter().copied().fold(f64::MIN, f64::max);
+            let lo = half.iter().copied().fold(f64::MAX, f64::min);
+            (lo, hi)
+        };
+
+        let (sim, r) = run("amplifier", 3e-3, 2e-6);
+        let (lo, hi) = span(&wave(&sim, &r, "out"));
+        assert!((hi - 5.5).abs() < 0.15 && (lo + 5.5).abs() < 0.15, "gain 11: {lo}..{hi}");
+
+        let (sim, r) = run("blinker", 3.0, 1e-3);
+        let out = wave(&sim, &r, "out");
+        let rises = out.windows(2).filter(|w| w[0] < 4.0 && w[1] >= 4.0).count();
+        assert!((3..=6).contains(&rises), "about 1.5 Hz for 3 s: {rises} rising edges");
+        let (lo, hi) = span(&wave(&sim, &r, "led"));
+        assert!(hi > 1.7 && lo < 0.5, "the LED lights and goes out: {lo}..{hi}");
+
+        let (sim, r) = run("power_supply", 0.3, 50e-6);
+        let (lo, hi) = span(&wave(&sim, &r, "5v"));
+        assert!((lo - 5.0).abs() < 0.05 && (hi - 5.0).abs() < 0.05, "5 V: {lo}..{hi}");
+        let (lo, _) = span(&wave(&sim, &r, "raw"));
+        assert!(lo > 7.0, "the reservoir stays above the dropout: {lo}");
+
+        let (sim, r) = run("light_switch", 1e-3, 1e-6);
+        let out = wave(&sim, &r, "out");
+        assert!(*out.last().unwrap() > 4.5, "1 lux is dark: the comparator lets go");
+
+        let (sim, r) = run("motor_driver", 0.2, 100e-6);
+        let drain = wave(&sim, &r, "drain");
+        assert!(*drain.last().unwrap() > 11.9, "switch open: the motor is off");
+
+        let (sim, r) = run("relay_driver", 20e-3, 20e-6);
+        let lamp = wave(&sim, &r, "lamp");
+        assert!(lamp.last().unwrap().abs() < 0.01, "button released: the lamp is off");
+        let standby = wave(&sim, &r, "led");
+        assert!(*standby.last().unwrap() > 1.7, "and the standby LED on");
+    }
+
     fn load(name: &str, top: &str) -> (Design, CellId) {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples").join(name);
         let project = Project::load(&root).unwrap();

@@ -585,11 +585,13 @@ pub(super) fn live_part_controls(ui: &mut egui::Ui, ws: &mut Workspace, index: u
     section(ui, "Live");
     let mut set = None;
     match kind {
-        ControlKind::Switch | ControlKind::Toggle => {
+        ControlKind::Switch | ControlKind::Toggle | ControlKind::Changeover => {
             let on = value == "true";
             let word = match (kind, on) {
                 (ControlKind::Switch, true) => "Closed",
                 (ControlKind::Switch, false) => "Open",
+                (ControlKind::Changeover, true) => "Thrown: com to b",
+                (ControlKind::Changeover, false) => "At rest: com to a",
                 (_, true) => "On (1)",
                 (_, false) => "Off (0)",
             };
@@ -629,6 +631,26 @@ pub(super) fn live_part_controls(ui: &mut egui::Ui, ws: &mut Workspace, index: u
             if ui.add(egui::Slider::new(&mut v, 0.0..=1.0).text("position")).changed() {
                 set = Some(format!("{v}"));
             }
+        }
+        ControlKind::Light | ControlKind::Sunlight | ControlKind::Temperature => {
+            let mut v: f64 = circuiter_model::units::parse_quantity(&value, None).unwrap_or(0.0);
+            let slider = match kind {
+                // Moonlight to direct sun, on a logarithmic scale.
+                ControlKind::Light => {
+                    egui::Slider::new(&mut v, 0.1..=100_000.0).logarithmic(true).suffix(" lx")
+                }
+                ControlKind::Sunlight => egui::Slider::new(&mut v, 0.0..=1200.0).suffix(" W/m²"),
+                _ => egui::Slider::new(&mut v, -40.0..=150.0).suffix(" °C"),
+            };
+            if ui.add(slider).changed() {
+                set = Some(format!("{v}"));
+            }
+            let hint = match kind {
+                ControlKind::Light => "Indoors a few hundred lux, daylight tens of thousands",
+                ControlKind::Sunlight => "Full sun is about 1000 W/m²",
+                _ => "Its temperature",
+            };
+            ui.label(RichText::new(hint).small().color(p.weak));
         }
     }
     if let Some(v) = set {

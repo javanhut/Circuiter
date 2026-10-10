@@ -33,6 +33,14 @@ pub enum ControlKind {
     Dial,
     /// A wiper position, 0 to 1.
     Potentiometer,
+    /// Click: a changeover switch thrown or at rest.
+    Changeover,
+    /// Light falling on a sensor, in lux.
+    Light,
+    /// Sunlight on a solar panel, W/m².
+    Sunlight,
+    /// A sensor's temperature, °C.
+    Temperature,
 }
 
 impl ControlKind {
@@ -47,6 +55,10 @@ impl ControlKind {
             "button" => ControlKind::Button,
             "dial" => ControlKind::Dial,
             "potentiometer" => ControlKind::Potentiometer,
+            "switch_spdt" => ControlKind::Changeover,
+            "ldr" | "photodiode" | "phototransistor" => ControlKind::Light,
+            "solar_cell" => ControlKind::Sunlight,
+            "thermistor" | "lm35" => ControlKind::Temperature,
             _ => return None,
         })
     }
@@ -59,6 +71,10 @@ impl ControlKind {
             ControlKind::Toggle => "on",
             ControlKind::Dial => "value",
             ControlKind::Potentiometer => "position",
+            ControlKind::Changeover => "thrown",
+            ControlKind::Light => "lux",
+            ControlKind::Sunlight => "light",
+            ControlKind::Temperature => "temp",
         }
     }
 
@@ -69,7 +85,7 @@ impl ControlKind {
 
     /// Flipped by a click.
     pub fn clicks(self) -> bool {
-        matches!(self, ControlKind::Switch | ControlKind::Toggle)
+        matches!(self, ControlKind::Switch | ControlKind::Toggle | ControlKind::Changeover)
     }
 }
 
@@ -176,6 +192,9 @@ struct Control {
     devices: Vec<String>,
     /// A potentiometer's end-to-end resistance.
     ohms: f64,
+    /// Its cell, and its numeric parameters: what a sensor's reading is worked out from.
+    cell: String,
+    params: BTreeMap<String, f64>,
 }
 
 /// Commands from the window.
@@ -291,6 +310,27 @@ fn analog_settings(c: &Control, value: &str) -> Vec<(String, f64)> {
             }
             out
         }
+        ControlKind::Changeover => {
+            let (rest, thrown) = if on { (1e9, 0.05) } else { (0.05, 1e9) };
+            c.devices.iter().cloned().zip([rest, thrown]).collect()
+        }
+        ControlKind::Light | ControlKind::Sunlight | ControlKind::Temperature => {
+            let x = number(value);
+            let p = |k: &str| c.params.get(k).copied().unwrap_or(0.0);
+            // The device the reading sets, by its kind letter, and what to set it to.
+            let (letter, set) = match c.cell.as_str() {
+                "ldr" => ('R', p("rdark").min(p("r10") * (x.max(1e-3) / 10.0).powf(-p("gamma")))),
+                "photodiode" | "phototransistor" => ('I', x * p("sens")),
+                "solar_cell" => ('I', p("isc") * x / 1000.0),
+                "thermistor" => {
+                    ('R', p("r25") * (p("beta") * (1.0 / (x + 273.15) - 1.0 / 298.15)).exp())
+                }
+                "lm35" => ('V', x * 0.01),
+                _ => return Vec::new(),
+            };
+            let device = c.devices.iter().find(|d| d.starts_with(letter));
+            device.map(|d| vec![(d.clone(), set)]).unwrap_or_default()
+        }
         ControlKind::Toggle | ControlKind::Button => Vec::new(),
     }
 }
@@ -339,7 +379,20 @@ impl Session {
             let Some((params, def)) = instance(design, top, path) else { continue };
             let ohms = number(&param_of(&params, &def, "R"));
             states.insert(path.to_owned(), param_of(&params, &def, kind.param()));
-            controls.push(Control { path: path.to_owned(), kind, devices, ohms });
+            let values = def
+                .cell
+                .params
+                .iter()
+                .map(|p| (p.name.clone(), number(&param_of(&params, &def, &p.name))))
+                .collect();
+            controls.push(Control {
+                path: path.to_owned(),
+                kind,
+                devices,
+                ohms,
+                cell: cell.cell.clone(),
+                params: values,
+            });
         }
         let initial: Vec<(String, f64)> =
             controls.iter().flat_map(|c| analog_settings(c, &states[&c.path])).collect();
@@ -709,6 +762,42 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn sensors_and_a_changeover_switch_respond_while_running() {
+        let (d, top) = design(&[
+            ("V1", "std:vdc", &[], &[("p", "in"), ("n", "GND")]),
+            ("R1", "std:resistor", &[("R", "10k")], &[("a", "in"), ("b", "l")]),
+            ("L1", "std:ldr", &[], &[("a", "l"), ("b", "GND")]),
+            ("SW1", "std:switch_spdt", &[], &[("com", "in"), ("a", "sa"), ("b", "sb")]),
+            ("RA", "std:resistor", &[], &[("a", "sa"), ("b", "GND")]),
+            ("RB", "std:resistor", &[], &[("a", "sb"), ("b", "GND")]),
+            ("U1", "std:lm35", &[], &[("vs", "in"), ("out", "t"), ("gnd", "GND")]),
+        ]);
+        let s = Session::start(&d, &top, Path::new("."), 1e-3).unwrap();
+        assert_eq!(s.control("L1"), Some(ControlKind::Light));
+        assert_eq!(s.control("SW1"), Some(ControlKind::Changeover));
+        assert_eq!(s.control("U1"), Some(ControlKind::Temperature));
+        let (l, sa, sb, t) = (
+            s.netlist.net("l").unwrap(),
+            s.netlist.net("sa").unwrap(),
+            s.netlist.net("sb").unwrap(),
+            s.netlist.net("t").unwrap(),
+        );
+        // 10 lux: the LDR is 10 kΩ, half the supply.
+        until(&s, "dim", |sh| sh.voltages[l].is_some_and(|v| (v - 2.5).abs() < 0.05));
+        until(&s, "at rest", |sh| sh.voltages[sa].is_some_and(|v| v > 4.9));
+        until(&s, "25 °C", |sh| sh.voltages[t].is_some_and(|v| (v - 0.25).abs() < 0.002));
+        s.send(Command::Set("L1".into(), "1000".into()));
+        s.send(Command::Set("SW1".into(), "true".into()));
+        s.send(Command::Set("U1".into(), "80".into()));
+        // 1000 lux: about 400 Ω.
+        until(&s, "bright", |sh| sh.voltages[l].is_some_and(|v| v < 0.25));
+        until(&s, "thrown", |sh| {
+            sh.voltages[sb].is_some_and(|v| v > 4.9) && sh.voltages[sa].is_some_and(|v| v < 0.01)
+        });
+        until(&s, "80 °C", |sh| sh.voltages[t].is_some_and(|v| (v - 0.8).abs() < 0.002));
     }
 
     #[test]

@@ -1,0 +1,25 @@
+(
+    description: "Thyristor (SCR): blocks until a small current into the gate turns it on, then conducts from anode to cathode, even with the gate released, until the current falls below its holding current. Defaults are like a 2N5064 / C106",
+    prefix: "D",
+    ports: [
+        (name: "a", description: "Anode"),
+        (name: "k", description: "Cathode"),
+        (name: "g", kind: Input, description: "Gate"),
+    ],
+    params: [
+        (
+            name: "vdrm",
+            kind: Real(unit: "V"),
+            default: "400",
+            description: "Off-state voltage rating",
+        ),
+        (name: "imax", kind: Real(unit: "A"), default: "4", description: "Current rating"),
+    ],
+    physics: (
+        thermal_resistance: "75",
+        heat_capacity: "0.5",
+        max_temperature: "125",
+        limits: [Voltage(ports: ("a", "k"), max: "{1.3*${param.vdrm}}")],
+        failure: (mode: Short("a", "k"), effect: Pop),
+    ),
+)

@@ -1,0 +1,15 @@
+(
+    graphics: [
+        Rect(a: (-5.08, -2.54), b: (5.08, 2.54)),
+        Text(at: (0.0, 0.0), text: "78xx", anchor: Center),
+        Text(at: (-5.08, -3.556), text: "${name}"),
+        Text(at: (-4.572, -1.27), text: "IN"),
+        Text(at: (2.286, -1.27), text: "OUT"),
+        Text(at: (-1.016, 1.778), text: "GND"),
+    ],
+    pins: [
+        (port: "in", at: (-7.62, 0.0), direction: Right),
+        (port: "out", at: (7.62, 0.0), direction: Left),
+        (port: "gnd", at: (0.0, 5.08), direction: Up),
+    ],
+)

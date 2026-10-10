@@ -1,0 +1,3 @@
+(
+    template: "L${inst} ${node.a} ${inst}_1 {1/((6.283185307*${param.f})^2*${param.cm})}\nC${inst}m ${inst}_1 ${inst}_2 ${param.cm}\nR${inst} ${inst}_2 ${node.b} ${param.rm}\nC${inst}0 ${node.a} ${node.b} ${param.c0}",
+)

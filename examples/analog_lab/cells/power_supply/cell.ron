@@ -1,0 +1,5 @@
+(
+    description: "Linear power supply: 230 V mains, a 15:1 centre-tapped transformer, full-wave rectifiers, a 2200 µF reservoir and a 7805 giving 5 V at 100 mA. Watch the ripple on raw and the regulator\'s temperature",
+    prefix: "X",
+    ports: [],
+)

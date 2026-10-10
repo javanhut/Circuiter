@@ -1,8 +1,6 @@
 //! A parsed deck turned into devices on numbered nodes, ready to simulate.
 
-use crate::device::{
-    Bjt, BjtModel, Diode, DiodeModel, Jfet, JfetModel, MosModel, Mosfet, Source,
-};
+use crate::device::{Bjt, BjtModel, Diode, DiodeModel, Jfet, JfetModel, MosModel, Mosfet, Source};
 use crate::parse::{Deck, parse};
 use std::collections::HashMap;
 
@@ -398,7 +396,8 @@ impl Circuit {
                     }
                 }
                 'B' => {
-                    let b = card.behavior.as_ref().ok_or_else(|| at("needs an expression".into()))?;
+                    let b =
+                        card.behavior.as_ref().ok_or_else(|| at("needs an expression".into()))?;
                     let mut inputs: Vec<PolyInput> = b
                         .voltages
                         .iter()

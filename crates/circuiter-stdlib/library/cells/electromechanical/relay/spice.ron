@@ -1,0 +1,7 @@
+(
+    template: "V${inst}s ${node.c1} ${inst}_c DC 0\nR${inst}c ${inst}_c ${inst}_l ${param.rcoil}\nL${inst}c ${inst}_l ${node.c2} ${param.lcoil}\nB${inst}a ${inst}_a 0 V=abs(I(V${inst}s))\nB${inst}b ${inst}_b 0 V=-abs(I(V${inst}s))\nS${inst}o ${node.com} ${node.no} ${inst}_a 0 ${model}o\nS${inst}c ${node.com} ${node.nc} ${inst}_b 0 ${model}c ON",
+    models: [
+        ".model ${model}o SW(VT={0.425*(${param.vcoil}/${param.rcoil})} VH={0.325*(${param.vcoil}/${param.rcoil})} RON=${param.ron} ROFF=1g)",
+        ".model ${model}c SW(VT={-0.425*(${param.vcoil}/${param.rcoil})} VH={0.325*(${param.vcoil}/${param.rcoil})} RON=${param.ron} ROFF=1g)",
+    ],
+)

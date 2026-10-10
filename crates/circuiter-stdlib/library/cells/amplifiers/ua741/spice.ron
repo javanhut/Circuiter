@@ -1,0 +1,6 @@
+(
+    template: "X${inst} ${node.inp} ${node.inn} ${node.vp} ${node.vn} ${node.out} ${model}",
+    models: [
+        ".subckt ${model} 1 2 3 4 5\nc1 11 12 8.661E-12\nc2 6 7 30.00E-12\ndc 5 53 dx\nde 54 5 dx\ndlp 90 91 dx\ndln 92 90 dx\ndp 4 3 dx\negnd 99 0 poly(2) (3,0) (4,0) 0 .5 .5\nfb 7 99 poly(5) vb vc ve vlp vln 0 10.61E6 -10E6 10E6 10E6 -10E6\nga 6 0 11 12 188.5E-6\ngcm 0 6 10 99 5.961E-9\niee 10 4 dc 15.16E-6\nhlim 90 0 vlim 1K\nq1 11 2 13 qx\nq2 12 1 14 qx\nr2 6 9 100.0E3\nrc1 3 11 5.305E3\nrc2 3 12 5.305E3\nre1 13 10 1.836E3\nre2 14 10 1.836E3\nree 10 99 13.19E6\nro1 8 5 50\nro2 7 99 100\nrp 3 4 18.16E3\nvb 9 0 dc 0\nvc 3 53 dc 1\nve 54 4 dc 1\nvlim 7 8 dc 0\nvlp 91 0 dc 40\nvln 0 92 dc 40\n.model dx D(Is=800.0E-18 Rs=1)\n.model qx NPN(Is=800.0E-18 Bf=93.75)\n.ends",
+    ],
+)

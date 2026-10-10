@@ -1,0 +1,16 @@
+(
+    graphics: [
+        Polyline(points: [(-5.08, -5.08), (-5.08, 5.08), (5.08, 0.0), (-5.08, -5.08)]),
+        Polyline(points: [(-4.572, -2.54), (-3.556, -2.54)]),
+        Polyline(points: [(-4.572, 2.54), (-3.556, 2.54)]),
+        Polyline(points: [(-4.064, 2.032), (-4.064, 3.048)]),
+        Text(at: (1.778, -4.318), text: "${name}"),
+    ],
+    pins: [
+        (port: "inn", at: (-7.62, -2.54), direction: Right),
+        (port: "inp", at: (-7.62, 2.54), direction: Right),
+        (port: "out", at: (7.62, 0.0), direction: Left),
+        (port: "vp", at: (0.0, -5.08), direction: Down),
+        (port: "vn", at: (0.0, 5.08), direction: Up),
+    ],
+)

@@ -1,0 +1,4 @@
+(
+    template: "B${inst}k ${node.k} ${node.a} I=0.5*((5*(V(${node.ref},${node.a})-2.495))+sqrt((5*(V(${node.ref},${node.a})-2.495))^2+1e-12))*tanh(V(${node.k},${node.a})/0.3)\nD${inst} ${node.a} ${node.k} ${model}\nR${inst}r ${node.ref} ${node.a} 1.2meg",
+    models: [".model ${model} D(IS=1e-14 RS=0.5)"],
+)

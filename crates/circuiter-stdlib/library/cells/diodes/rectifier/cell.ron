@@ -1,0 +1,28 @@
+(
+    description: "Rectifier diode for mains and power supplies. Defaults are a 1N4007: 1000 V, 1 A, about 0.9 V forward at 1 A, slow to recover",
+    prefix: "D",
+    ports: [(name: "a", description: "Anode"), (name: "k", description: "Cathode")],
+    params: [
+        (name: "is", kind: Real(unit: "A"), default: "7.03n", description: "Saturation current"),
+        (name: "n", kind: Real(unit: ""), default: "1.81", description: "Emission coefficient"),
+        (name: "rs", kind: Real(unit: "Ω"), default: "34m", description: "Series resistance"),
+        (
+            name: "bv",
+            kind: Real(unit: "V"),
+            default: "1000",
+            description: "Reverse breakdown voltage",
+        ),
+        (
+            name: "tt",
+            kind: Real(unit: "s"),
+            default: "4u",
+            description: "Transit time (reverse recovery)",
+        ),
+    ],
+    physics: (
+        thermal_resistance: "100",
+        heat_capacity: "100m",
+        max_temperature: "175",
+        failure: (mode: Short("a", "k"), effect: Smoke),
+    ),
+)

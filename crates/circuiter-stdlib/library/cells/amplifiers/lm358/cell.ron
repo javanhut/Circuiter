@@ -1,0 +1,65 @@
+(
+    description: "LM358 op amp (one of the two): single supply, 3 to 32 V; the output reaches down to V− (ground) but stops 1.5 V below V+. 1 MHz, 0.3 V/µs",
+    prefix: "U",
+    ports: [
+        (name: "inp", kind: Input, description: "Non-inverting input (+)"),
+        (name: "inn", kind: Input, description: "Inverting input (−)"),
+        (name: "out", kind: Output, description: "Output"),
+        (name: "vp", kind: PowerIn, description: "Positive supply (V+)"),
+        (
+            name: "vn",
+            kind: PowerIn,
+            description: "Negative supply (V−), or ground for a single supply",
+        ),
+    ],
+    params: [
+        (name: "gain", kind: Real(unit: ""), default: "100k", description: "Open-loop gain (V/V)"),
+        (
+            name: "gbw",
+            kind: Real(unit: "Hz"),
+            default: "1meg",
+            description: "Gain-bandwidth product",
+        ),
+        (name: "sr", kind: Real(unit: "V/s"), default: "0.3meg", description: "Slew rate"),
+        (
+            name: "rin",
+            kind: Real(unit: "Ω"),
+            default: "10meg",
+            description: "Resistance between the inputs",
+        ),
+        (name: "rout", kind: Real(unit: "Ω"), default: "50", description: "Output resistance"),
+        (
+            name: "isc",
+            kind: Real(unit: "A"),
+            default: "40m",
+            description: "Output short-circuit current",
+        ),
+        (
+            name: "vhigh",
+            kind: Real(unit: "V"),
+            default: "1.5",
+            description: "How far below V+ the output can reach",
+        ),
+        (
+            name: "vlow",
+            kind: Real(unit: "V"),
+            default: "0.02",
+            description: "How far above V− the output can reach",
+        ),
+        (name: "iq", kind: Real(unit: "A"), default: "0.35m", description: "Supply current"),
+        (name: "vos", kind: Real(unit: "V"), default: "0", description: "Input offset voltage"),
+        (
+            name: "vmax",
+            kind: Real(unit: "V"),
+            default: "32",
+            description: "Supply voltage rating, V+ to V−",
+        ),
+    ],
+    physics: (
+        thermal_resistance: "150",
+        heat_capacity: "100m",
+        max_temperature: "150",
+        limits: [Voltage(ports: ("vp", "vn"), max: "${param.vmax}")],
+        failure: (mode: Short("vp", "vn"), effect: Smoke),
+    ),
+)

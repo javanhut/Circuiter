@@ -1,0 +1,10 @@
+(
+    template: "",
+    choose: (
+        param: "thrown",
+        templates: {
+            "false": "R${inst}a ${node.com} ${node.a} 0.05\nR${inst}b ${node.com} ${node.b} 1g",
+            "true": "R${inst}a ${node.com} ${node.a} 1g\nR${inst}b ${node.com} ${node.b} 0.05",
+        },
+    ),
+)

@@ -1,0 +1,28 @@
+(
+    description: "LM393 comparator (one of the two): the open-collector output pulls down to V− while the − input is above the + input, and lets go otherwise, so it needs a pull-up resistor. 2 to 36 V",
+    prefix: "U",
+    ports: [
+        (name: "inp", kind: Input, description: "Non-inverting input (+)"),
+        (name: "inn", kind: Input, description: "Inverting input (−)"),
+        (name: "out", kind: Output, description: "Open-collector output: needs a pull-up"),
+        (name: "vp", kind: PowerIn, description: "Positive supply"),
+        (name: "vn", kind: PowerIn, description: "Negative supply or ground"),
+    ],
+    params: [
+        (
+            name: "isink",
+            kind: Real(unit: "A"),
+            default: "16m",
+            description: "Most the output can sink",
+        ),
+        (name: "tresp", kind: Real(unit: "s"), default: "300n", description: "Response time"),
+        (name: "vmax", kind: Real(unit: "V"), default: "36", description: "Supply voltage rating"),
+    ],
+    physics: (
+        thermal_resistance: "150",
+        heat_capacity: "100m",
+        max_temperature: "150",
+        limits: [Voltage(ports: ("vp", "vn"), max: "${param.vmax}")],
+        failure: (mode: Short("vp", "vn"), effect: Smoke),
+    ),
+)

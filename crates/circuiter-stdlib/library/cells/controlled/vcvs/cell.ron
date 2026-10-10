@@ -1,0 +1,13 @@
+(
+    description: "Voltage-controlled voltage source (E): the voltage from p to n is gain times the voltage from cp to cn. The control draws no current",
+    prefix: "E",
+    ports: [
+        (name: "p", description: "Output +"),
+        (name: "n", description: "Output −"),
+        (name: "cp", description: "Control + (sensed voltage)"),
+        (name: "cn", description: "Control − (sensed voltage)"),
+    ],
+    params: [
+        (name: "gain", kind: Real(unit: ""), default: "10", description: "Voltage gain (V/V)"),
+    ],
+)

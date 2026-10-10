@@ -1,0 +1,4 @@
+(
+    template: "C${inst} ${node.p} ${inst}_e ${param.C}\nR${inst} ${inst}_e ${node.n} ${param.esr}\nD${inst} ${node.n} ${node.p} ${model}",
+    models: [".model ${model} D(IS=1n N=2 RS=0.5 BV={1.3*${param.Vmax}} IBV=1m)"],
+)

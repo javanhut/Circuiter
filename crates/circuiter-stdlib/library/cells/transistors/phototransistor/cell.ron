@@ -1,0 +1,21 @@
+(
+    description: "NPN phototransistor: light on the base lets a collector current flow, about 0.2 µA per lux; it saturates when the load allows less",
+    prefix: "Q",
+    ports: [(name: "c", description: "Collector"), (name: "e", description: "Emitter")],
+    params: [
+        (name: "lux", kind: Real(unit: "lx"), default: "100", description: "Light on it, in lux"),
+        (
+            name: "sens",
+            kind: Real(unit: "A"),
+            default: "1n",
+            description: "Base photocurrent per lux",
+        ),
+    ],
+    physics: (
+        thermal_resistance: "350",
+        heat_capacity: "2.5m",
+        max_temperature: "125",
+        limits: [Voltage(ports: ("c", "e"), max: "45")],
+        failure: (mode: Short("c", "e"), effect: Pop),
+    ),
+)

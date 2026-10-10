@@ -1,0 +1,17 @@
+(
+    description: "LM35 temperature sensor: out is 10 mV per °C above gnd (250 mV at 25 °C). Set its temperature (live, too). 4 to 30 V supply",
+    prefix: "U",
+    ports: [
+        (name: "vs", kind: PowerIn, description: "Supply"),
+        (name: "out", kind: Output, description: "10 mV/°C"),
+        (name: "gnd", kind: PowerIn, description: "Ground"),
+    ],
+    params: [(name: "temp", kind: Real(unit: "°C"), default: "25", description: "Its temperature")],
+    physics: (
+        thermal_resistance: "180",
+        heat_capacity: "20m",
+        max_temperature: "150",
+        limits: [Voltage(ports: ("vs", "gnd"), max: "35")],
+        failure: (mode: Short("vs", "gnd"), effect: Smoke),
+    ),
+)

@@ -1,0 +1,30 @@
+(
+    description: "Relay: current in the coil (c1 to c2) pulls com from nc over to no. It pulls in at three quarters of the rated coil current and drops out below a tenth. The coil is an inductor: switch it off without a diode across it and it kicks back hard",
+    prefix: "K",
+    ports: [
+        (name: "c1", description: "Coil"),
+        (name: "c2", description: "Coil"),
+        (name: "com", description: "Common contact"),
+        (name: "no", description: "Normally open: joined to com while energised"),
+        (name: "nc", description: "Normally closed: joined to com at rest"),
+    ],
+    params: [
+        (name: "vcoil", kind: Real(unit: "V"), default: "5", description: "Rated coil voltage"),
+        (name: "rcoil", kind: Real(unit: "Ω"), default: "70", description: "Coil resistance"),
+        (name: "lcoil", kind: Real(unit: "H"), default: "100m", description: "Coil inductance"),
+        (
+            name: "ron",
+            kind: Real(unit: "Ω"),
+            default: "50m",
+            description: "Closed contact resistance",
+        ),
+        (name: "imax", kind: Real(unit: "A"), default: "10", description: "Contact current rating"),
+    ],
+    physics: (
+        thermal_resistance: "20",
+        heat_capacity: "5",
+        max_temperature: "130",
+        limits: [Current(port: "com", max: "{3*${param.imax}}")],
+        failure: (mode: Open, effect: Smoke),
+    ),
+)

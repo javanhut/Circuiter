@@ -1,0 +1,22 @@
+(
+    graphics: [
+        Rect(a: (-5.08, -3.81), b: (5.08, 3.81)),
+        Arc(center: (-2.54, 0.0), radius: 0.762, start: 0.0, end: 180.0),
+        Arc(center: (-1.016, 0.0), radius: 0.762, start: 180.0, end: 360.0),
+        Polyline(
+            points: [
+                (0.508, 0.762),
+                (0.508, -0.762),
+                (1.778, -0.762),
+                (1.778, 0.762),
+                (3.048, 0.762),
+            ],
+        ),
+        Text(at: (-5.08, -4.826), text: "${name}"),
+        Text(at: (0.0, 2.54), text: "${param.frequency}", anchor: Center),
+    ],
+    pins: [
+        (port: "out", at: (7.62, -2.54), direction: Left),
+        (port: "com", at: (7.62, 2.54), direction: Left),
+    ],
+)

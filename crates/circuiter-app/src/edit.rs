@@ -357,7 +357,11 @@ pub fn drag_segment(
         let prev = old[k - 1];
         if prev.x != a2.x && prev.y != a2.y {
             // The neighbour ran along the segment: turn a corner to meet it.
-            points.push(if a.y == b.y { Point::new(a2.x, prev.y) } else { Point::new(prev.x, a2.y) });
+            points.push(if a.y == b.y {
+                Point::new(a2.x, prev.y)
+            } else {
+                Point::new(prev.x, a2.y)
+            });
         }
         points.push(a2);
     }
@@ -373,7 +377,11 @@ pub fn drag_segment(
     } else {
         let next = old[k + 2];
         if next.x != b2.x && next.y != b2.y {
-            points.push(if a.y == b.y { Point::new(b2.x, next.y) } else { Point::new(next.x, b2.y) });
+            points.push(if a.y == b.y {
+                Point::new(b2.x, next.y)
+            } else {
+                Point::new(next.x, b2.y)
+            });
         }
         points.extend_from_slice(&old[k + 2..]);
     }
@@ -1289,7 +1297,14 @@ mod tests {
         drag_segment(&d, "std", &mut def, 0, mm(10.0, 0.0), mm(0.0, 5.08));
         assert_eq!(
             def.schematic.as_ref().unwrap().wires[0].points,
-            [mm(5.08, 0.0), mm(7.62, 0.0), mm(7.62, 5.08), mm(15.24, 5.08), mm(15.24, 10.16), mm(25.4, 10.16)]
+            [
+                mm(5.08, 0.0),
+                mm(7.62, 0.0),
+                mm(7.62, 5.08),
+                mm(15.24, 5.08),
+                mm(15.24, 10.16),
+                mm(25.4, 10.16)
+            ]
         );
         assert_eq!(partition(&d, &def), partition(&d, &stepped(&d)));
     }

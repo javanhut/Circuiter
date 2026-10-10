@@ -1,0 +1,65 @@
+(
+    description: "Operational amplifier, set by its datasheet figures: open-loop gain, gain-bandwidth, slew rate, how near the rails the output reaches, output resistance and current limit, supply current. Defaults are a general-purpose bipolar part. Its supply current is drawn from V+ and V−",
+    prefix: "U",
+    ports: [
+        (name: "inp", kind: Input, description: "Non-inverting input (+)"),
+        (name: "inn", kind: Input, description: "Inverting input (−)"),
+        (name: "out", kind: Output, description: "Output"),
+        (name: "vp", kind: PowerIn, description: "Positive supply (V+)"),
+        (
+            name: "vn",
+            kind: PowerIn,
+            description: "Negative supply (V−), or ground for a single supply",
+        ),
+    ],
+    params: [
+        (name: "gain", kind: Real(unit: ""), default: "200k", description: "Open-loop gain (V/V)"),
+        (
+            name: "gbw",
+            kind: Real(unit: "Hz"),
+            default: "1meg",
+            description: "Gain-bandwidth product",
+        ),
+        (name: "sr", kind: Real(unit: "V/s"), default: "0.5meg", description: "Slew rate"),
+        (
+            name: "rin",
+            kind: Real(unit: "Ω"),
+            default: "2meg",
+            description: "Resistance between the inputs",
+        ),
+        (name: "rout", kind: Real(unit: "Ω"), default: "75", description: "Output resistance"),
+        (
+            name: "isc",
+            kind: Real(unit: "A"),
+            default: "25m",
+            description: "Output short-circuit current",
+        ),
+        (
+            name: "vhigh",
+            kind: Real(unit: "V"),
+            default: "1.5",
+            description: "How far below V+ the output can reach",
+        ),
+        (
+            name: "vlow",
+            kind: Real(unit: "V"),
+            default: "1.5",
+            description: "How far above V− the output can reach",
+        ),
+        (name: "iq", kind: Real(unit: "A"), default: "1.7m", description: "Supply current"),
+        (name: "vos", kind: Real(unit: "V"), default: "0", description: "Input offset voltage"),
+        (
+            name: "vmax",
+            kind: Real(unit: "V"),
+            default: "36",
+            description: "Supply voltage rating, V+ to V−",
+        ),
+    ],
+    physics: (
+        thermal_resistance: "150",
+        heat_capacity: "100m",
+        max_temperature: "150",
+        limits: [Voltage(ports: ("vp", "vn"), max: "${param.vmax}")],
+        failure: (mode: Short("vp", "vn"), effect: Smoke),
+    ),
+)

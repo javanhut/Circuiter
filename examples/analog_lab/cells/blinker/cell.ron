@@ -1,0 +1,5 @@
+(
+    description: "555 astable blinking an LED: f ≈ 1.44 / ((R1 + 2 R2) C1), about 1.5 Hz. Run it live",
+    prefix: "X",
+    ports: [],
+)

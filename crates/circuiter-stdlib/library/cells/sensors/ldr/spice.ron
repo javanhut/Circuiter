@@ -1,0 +1,3 @@
+(
+    template: "R${inst} ${node.a} ${node.b} {min(${param.rdark},${param.r10}*pow(max(${param.lux},0.001)/10,-${param.gamma}))}",
+)

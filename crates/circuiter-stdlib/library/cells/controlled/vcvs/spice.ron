@@ -1,0 +1,3 @@
+(
+    template: "E${inst} ${node.p} ${node.n} ${node.cp} ${node.cn} ${param.gain}",
+)

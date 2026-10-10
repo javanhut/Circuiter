@@ -1,0 +1,57 @@
+(
+    description: "P-channel power MOSFET for high-side switching: turns on as the gate goes a few volts below the source. Defaults are like an IRF9540N (100 V, 117 mΩ at −10 V)",
+    prefix: "Q",
+    ports: [
+        (name: "d", description: "Drain"),
+        (name: "g", kind: Input, description: "Gate"),
+        (name: "s", description: "Source"),
+    ],
+    params: [
+        (
+            name: "vto",
+            kind: Real(unit: "V"),
+            default: "-3.5",
+            description: "Gate threshold voltage",
+        ),
+        (
+            name: "kp",
+            kind: Real(unit: "A/V²"),
+            default: "1.3",
+            description: "Transconductance: on resistance ≈ 1 / (kp × (Vgs − vto))",
+        ),
+        (
+            name: "cgs",
+            kind: Real(unit: "F"),
+            default: "1.7n",
+            description: "Gate-source capacitance",
+        ),
+        (
+            name: "cgd",
+            kind: Real(unit: "F"),
+            default: "100p",
+            description: "Gate-drain (Miller) capacitance",
+        ),
+        (
+            name: "vds",
+            kind: Real(unit: "V"),
+            default: "100",
+            description: "Drain-source voltage rating",
+        ),
+        (
+            name: "vgs",
+            kind: Real(unit: "V"),
+            default: "20",
+            description: "Gate-source voltage rating",
+        ),
+    ],
+    physics: (
+        thermal_resistance: "62",
+        heat_capacity: "2",
+        max_temperature: "175",
+        limits: [
+            Voltage(ports: ("d", "s"), max: "{1.2*${param.vds}}"),
+            Voltage(ports: ("g", "s"), max: "{1.5*${param.vgs}}"),
+        ],
+        failure: (mode: Short("d", "s"), effect: Pop),
+    ),
+)

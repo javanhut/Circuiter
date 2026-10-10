@@ -1,0 +1,6 @@
+(
+    template: "D${inst} ${node.a} ${node.k} ${model}",
+    models: [
+        ".model ${model} D(IS=1n N=1 RS=${param.rs} BV=${param.vz} IBV=${param.izt} CJO=100p TT=50n)",
+    ],
+)

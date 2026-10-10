@@ -1,0 +1,5 @@
+(
+    description: "Non-inverting amplifier: a TL072 with a gain of 1 + RF/RG = 11 on ±12 V. Turn the input up past 1 V and the output clips short of the rails",
+    prefix: "X",
+    ports: [],
+)

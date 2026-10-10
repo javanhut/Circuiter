@@ -1,0 +1,13 @@
+(
+    description: "Current-controlled voltage source (H): the voltage from p to n is r times the current flowing in at cp and out at cn (a short between them)",
+    prefix: "H",
+    ports: [
+        (name: "p", description: "Output +"),
+        (name: "n", description: "Output −"),
+        (name: "cp", description: "Control + (in series with the sensed current)"),
+        (name: "cn", description: "Control − (in series with the sensed current)"),
+    ],
+    params: [
+        (name: "r", kind: Real(unit: "Ω"), default: "1k", description: "Transresistance (V/A)"),
+    ],
+)

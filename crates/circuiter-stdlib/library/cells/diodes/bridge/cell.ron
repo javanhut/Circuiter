@@ -1,0 +1,24 @@
+(
+    description: "Bridge rectifier: four rectifier diodes turning AC on ac1 and ac2 into DC between plus and minus, two diode drops (about 1.8 V) below the peak",
+    prefix: "D",
+    ports: [
+        (name: "ac1", description: "AC input"),
+        (name: "ac2", description: "AC input"),
+        (name: "plus", kind: PowerOut, description: "DC +"),
+        (name: "minus", kind: PowerOut, description: "DC −"),
+    ],
+    params: [
+        (
+            name: "bv",
+            kind: Real(unit: "V"),
+            default: "1000",
+            description: "Reverse voltage rating of each diode",
+        ),
+    ],
+    physics: (
+        thermal_resistance: "40",
+        heat_capacity: "1",
+        max_temperature: "150",
+        failure: (mode: Short("ac1", "ac2"), effect: Smoke),
+    ),
+)

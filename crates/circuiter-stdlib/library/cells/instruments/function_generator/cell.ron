@@ -1,0 +1,20 @@
+(
+    description: "Function generator: a sine, square or triangle wave of the frequency and amplitude you set, around an offset, from a 50 Ω output. Its leads clip onto any wire",
+    prefix: "FG",
+    ports: [
+        (name: "out", kind: PowerOut, description: "Output (red lead)"),
+        (name: "com", kind: PowerOut, description: "Common (black lead)"),
+    ],
+    params: [
+        (
+            name: "wave",
+            kind: Choice(["sine", "square", "triangle"]),
+            default: "sine",
+            description: "Waveform",
+        ),
+        (name: "frequency", kind: Real(unit: "Hz"), default: "1k", description: "Frequency"),
+        (name: "amplitude", kind: Real(unit: "V"), default: "1", description: "Peak amplitude"),
+        (name: "offset", kind: Real(unit: "V"), default: "0", description: "DC offset"),
+    ],
+    probe: true,
+)

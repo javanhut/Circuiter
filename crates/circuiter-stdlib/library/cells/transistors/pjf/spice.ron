@@ -1,0 +1,6 @@
+(
+    template: "J${inst} ${node.d} ${node.g} ${node.s} ${model}",
+    models: [
+        ".model ${model} PJF(VTO=${param.vto} BETA=${param.beta} LAMBDA=${param.lambda} RD=1 RS=1 CGS=${param.cgs} CGD=${param.cgd} IS=${param.is} PB=1)",
+    ],
+)

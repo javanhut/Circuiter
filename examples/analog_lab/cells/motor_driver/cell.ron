@@ -1,0 +1,5 @@
+(
+    description: "Motor driver: SW1 turns the MOSFET on and the motor spins up; its current starts high and falls as the back-EMF builds. D1 catches the winding\'s kick when it switches off",
+    prefix: "X",
+    ports: [],
+)

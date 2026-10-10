@@ -812,9 +812,9 @@ mod tests {
 
     #[test]
     fn errors_name_the_line() {
-        let e = parse("R1 a b\nJ1 d g s jx").unwrap_err();
+        let e = parse("R1 a b\nT1 a 0 b 0 Z0=50 TD=1n").unwrap_err();
         assert!(e.starts_with("line 1"), "{e}");
-        assert!(parse("J1 d g s jx").unwrap_err().contains("not supported"));
+        assert!(parse("T1 a 0 b 0 Z0=50 TD=1n").unwrap_err().contains("not supported"));
     }
 }
 

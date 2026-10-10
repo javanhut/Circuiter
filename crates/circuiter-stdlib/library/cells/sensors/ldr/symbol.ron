@@ -1,0 +1,21 @@
+(
+    graphics: [
+        Rect(a: (-2.54, -1.016), b: (2.54, 1.016)),
+        Circle(center: (0.0, 0.0), radius: 3.302),
+        Text(at: (0.0, -4.064), text: "${name}", anchor: Center),
+        Polyline(points: [(-3.302, -3.81), (-1.878, -2.386)]),
+        Polyline(
+            points: [(-1.524, -2.032), (-2.054, -2.209), (-1.701, -2.562), (-1.524, -2.032)],
+            fill: true,
+        ),
+        Polyline(points: [(-1.778, -4.318), (-0.354, -2.894)]),
+        Polyline(
+            points: [(0.0, -2.54), (-0.53, -2.717), (-0.177, -3.07), (0.0, -2.54)],
+            fill: true,
+        ),
+    ],
+    pins: [
+        (port: "a", at: (-5.08, 0.0), direction: Right),
+        (port: "b", at: (5.08, 0.0), direction: Left),
+    ],
+)

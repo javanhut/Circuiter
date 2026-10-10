@@ -1,0 +1,60 @@
+(
+    description: "N-channel JFET: conducts with the gate at the source and is pinched off as the gate goes below it. Defaults are a 2N3819",
+    prefix: "J",
+    ports: [
+        (name: "d", description: "Drain"),
+        (name: "g", kind: Input, description: "Gate"),
+        (name: "s", description: "Source"),
+    ],
+    params: [
+        (
+            name: "vto",
+            kind: Real(unit: "V"),
+            default: "-3",
+            description: "Pinch-off voltage (gate to source, where the channel closes)",
+        ),
+        (
+            name: "beta",
+            kind: Real(unit: "A/V²"),
+            default: "1.3m",
+            description: "Transconductance parameter: Idss = beta × vto²",
+        ),
+        (
+            name: "lambda",
+            kind: Real(unit: "1/V"),
+            default: "2.25m",
+            description: "Channel-length modulation",
+        ),
+        (
+            name: "cgs",
+            kind: Real(unit: "F"),
+            default: "2.4p",
+            description: "Gate-source capacitance at zero bias",
+        ),
+        (
+            name: "cgd",
+            kind: Real(unit: "F"),
+            default: "1.6p",
+            description: "Gate-drain capacitance at zero bias",
+        ),
+        (
+            name: "is",
+            kind: Real(unit: "A"),
+            default: "33.57f",
+            description: "Gate junction saturation current",
+        ),
+        (
+            name: "vmax",
+            kind: Real(unit: "V"),
+            default: "25",
+            description: "Drain-source voltage rating",
+        ),
+    ],
+    physics: (
+        thermal_resistance: "350",
+        heat_capacity: "2.5m",
+        max_temperature: "150",
+        limits: [Voltage(ports: ("d", "s"), max: "{1.5*${param.vmax}}")],
+        failure: (mode: Short("d", "s"), effect: Pop),
+    ),
+)

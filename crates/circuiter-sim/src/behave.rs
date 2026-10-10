@@ -173,7 +173,9 @@ fn renumber(e: Expr, f: &dyn Fn(usize) -> usize) -> Expr {
         Expr::Neg(a) => Expr::Neg(b(a)),
         Expr::Not(a) => Expr::Not(b(a)),
         Expr::Bin(op, x, y) => Expr::Bin(op, b(x), b(y)),
-        Expr::Call(func, args) => Expr::Call(func, args.into_iter().map(|a| renumber(a, f)).collect()),
+        Expr::Call(func, args) => {
+            Expr::Call(func, args.into_iter().map(|a| renumber(a, f)).collect())
+        }
         Expr::Cond(c, x, y) => Expr::Cond(b(c), b(x), b(y)),
         other => other,
     }
@@ -335,7 +337,9 @@ impl Parser<'_> {
                     let c = self.s[self.i];
                     let exponent_sign = (c == b'+' || c == b'-')
                         && matches!(self.s[self.i - 1], b'e' | b'E')
-                        && self.s[start..self.i - 1].iter().all(|b| b.is_ascii_digit() || *b == b'.');
+                        && self.s[start..self.i - 1]
+                            .iter()
+                            .all(|b| b.is_ascii_digit() || *b == b'.');
                     if c.is_ascii_alphanumeric() || c == b'.' || exponent_sign {
                         self.i += 1;
                     } else {

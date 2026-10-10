@@ -1,0 +1,4 @@
+(
+    template: "D${inst}1 ${node.ac1} ${node.plus} ${model}\nD${inst}2 ${node.ac2} ${node.plus} ${model}\nD${inst}3 ${node.minus} ${node.ac1} ${model}\nD${inst}4 ${node.minus} ${node.ac2} ${model}",
+    models: [".model ${model} D(IS=7.03n N=1.81 RS=34m BV=${param.bv} IBV=5u CJO=15p TT=4u)"],
+)

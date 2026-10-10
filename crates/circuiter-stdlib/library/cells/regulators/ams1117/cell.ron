@@ -1,0 +1,28 @@
+(
+    description: "AMS1117 low-dropout regulator (3.3 V; set vout for others): needs only 1.1 V above its output",
+    prefix: "U",
+    ports: [
+        (name: "in", kind: PowerIn, description: "Input"),
+        (name: "gnd", kind: PowerIn, description: "Ground (common)"),
+        (name: "out", kind: PowerOut, description: "Regulated output"),
+    ],
+    params: [
+        (name: "vout", kind: Real(unit: "V"), default: "3.3", description: "Output voltage"),
+        (
+            name: "dropout",
+            kind: Real(unit: "V"),
+            default: "1.1",
+            description: "How far above the output the input must stay",
+        ),
+        (name: "iq", kind: Real(unit: "A"), default: "5m", description: "Quiescent current"),
+        (name: "ilimit", kind: Real(unit: "A"), default: "1", description: "Output current limit"),
+        (name: "vmax", kind: Real(unit: "V"), default: "15", description: "Input voltage rating"),
+    ],
+    physics: (
+        thermal_resistance: "90",
+        heat_capacity: "0.5",
+        max_temperature: "175",
+        limits: [Voltage(ports: ("in", "gnd"), max: "${param.vmax}")],
+        failure: (mode: Open, effect: Smoke),
+    ),
+)

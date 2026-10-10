@@ -1,0 +1,10 @@
+(
+    description: "NTC thermistor: a resistor whose resistance falls as it warms, r25 at 25 °C, following its B constant. Set its temperature (live, too)",
+    prefix: "RT",
+    ports: [(name: "a"), (name: "b")],
+    params: [
+        (name: "r25", kind: Real(unit: "Ω"), default: "10k", description: "Resistance at 25 °C"),
+        (name: "beta", kind: Real(unit: "K"), default: "3950", description: "B constant"),
+        (name: "temp", kind: Real(unit: "°C"), default: "25", description: "Its temperature"),
+    ],
+)

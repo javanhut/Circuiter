@@ -1,0 +1,26 @@
+(
+    description: "Optocoupler: an infrared LED (a, k) shining on a phototransistor (c, e), with no electrical connection between the two sides. The collector current is ctr times the LED current, until the transistor saturates. Defaults are like a PC817",
+    prefix: "U",
+    ports: [
+        (name: "a", description: "LED anode"),
+        (name: "k", description: "LED cathode"),
+        (name: "c", description: "Transistor collector"),
+        (name: "e", description: "Transistor emitter"),
+    ],
+    params: [
+        (
+            name: "ctr",
+            kind: Real(unit: ""),
+            default: "1",
+            description: "Current transfer ratio (1 = 100 %)",
+        ),
+        (name: "ifmax", kind: Real(unit: "A"), default: "50m", description: "LED current rating"),
+    ],
+    physics: (
+        thermal_resistance: "250",
+        heat_capacity: "50m",
+        max_temperature: "125",
+        limits: [Current(port: "a", max: "{5*${param.ifmax}}")],
+        failure: (mode: Open, effect: Smoke),
+    ),
+)

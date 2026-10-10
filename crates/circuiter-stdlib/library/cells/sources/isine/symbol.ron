@@ -1,0 +1,18 @@
+(
+    graphics: [
+        Circle(center: (0.0, 0.0), radius: 2.54),
+        Polyline(points: [(0.0, -1.524), (0.0, 0.762)]),
+        Polyline(
+            points: [(-0.508, 0.762), (0.508, 0.762), (0.0, 1.524), (-0.508, 0.762)],
+            fill: true,
+        ),
+        Arc(center: (1.651, -0.762), radius: 0.381, start: 0.0, end: 180.0),
+        Arc(center: (2.413, -0.762), radius: 0.381, start: 180.0, end: 360.0),
+        Text(at: (3.302, -0.508), text: "${name}"),
+        Text(at: (3.302, 1.27), text: "${param.amplitude}"),
+    ],
+    pins: [
+        (port: "p", at: (0.0, -5.08), direction: Down),
+        (port: "n", at: (0.0, 5.08), direction: Up),
+    ],
+)

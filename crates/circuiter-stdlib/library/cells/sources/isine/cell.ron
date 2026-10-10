@@ -1,0 +1,11 @@
+(
+    description: "Sine current source: offset plus amplitude × sin(2π f t), flowing from p through the source to n",
+    prefix: "I",
+    ports: [(name: "p", kind: PowerOut), (name: "n", kind: PowerOut)],
+    params: [
+        (name: "amplitude", kind: Real(unit: "A"), default: "1m", description: "Peak current"),
+        (name: "frequency", kind: Real(unit: "Hz"), default: "1k", description: "Frequency"),
+        (name: "offset", kind: Real(unit: "A"), default: "0", description: "DC offset"),
+        (name: "ac", kind: Real(unit: "A"), default: "1m", description: "AC analysis magnitude"),
+    ],
+)

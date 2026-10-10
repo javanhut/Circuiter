@@ -1,0 +1,15 @@
+(
+    graphics: [
+        Polyline(points: [(-1.016, -2.032), (-1.016, 2.032)]),
+        Polyline(points: [(1.016, -2.032), (1.016, 2.032)]),
+        Polyline(points: [(-1.016, -1.778), (-1.016, -0.254), (1.016, -1.016), (-1.016, -1.778)]),
+        Polyline(points: [(1.016, 0.254), (1.016, 1.778), (-1.016, 1.016), (1.016, 0.254)]),
+        Polyline(points: [(1.016, 1.016), (2.54, 2.54)]),
+        Text(at: (0.0, -2.794), text: "${name}", anchor: Center),
+    ],
+    pins: [
+        (port: "mt2", at: (-2.54, 0.0), direction: Right, length: 1.524),
+        (port: "mt1", at: (2.54, 0.0), direction: Left, length: 1.524),
+        (port: "g", at: (2.54, 5.08), direction: Up),
+    ],
+)

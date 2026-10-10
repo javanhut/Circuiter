@@ -1,0 +1,16 @@
+(
+    description: "Quartz crystal: a sharp series resonance at f (its motional inductance, capacitance and resistance) in parallel with the holder capacitance. Use it in a Pierce oscillator with an inverter or a transistor",
+    prefix: "Y",
+    ports: [(name: "a"), (name: "b")],
+    params: [
+        (
+            name: "f",
+            kind: Real(unit: "Hz"),
+            default: "16meg",
+            description: "Series resonant frequency",
+        ),
+        (name: "cm", kind: Real(unit: "F"), default: "15f", description: "Motional capacitance"),
+        (name: "rm", kind: Real(unit: "Ω"), default: "30", description: "Motional resistance"),
+        (name: "c0", kind: Real(unit: "F"), default: "4p", description: "Holder capacitance"),
+    ],
+)

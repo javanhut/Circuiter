@@ -1,0 +1,3 @@
+(
+    template: "R${inst}i ${node.inp} ${node.inn} 10meg\nB${inst}d ${inst}_d 0 V=0.5*(1+tanh(5000*V(${node.inn},${node.inp})))\nR${inst}d ${inst}_d ${inst}_e 1k\nC${inst}d ${inst}_e 0 {${param.tresp}/1000}\nB${inst}o ${node.out} ${node.vn} I=${param.isink}*V(${inst}_e)*tanh(V(${node.out},${node.vn})/0.25)\nR${inst}l ${node.out} ${node.vn} 1g\nB${inst}q ${node.vp} ${node.vn} I=0.4m*tanh(V(${node.vp},${node.vn}))",
+)

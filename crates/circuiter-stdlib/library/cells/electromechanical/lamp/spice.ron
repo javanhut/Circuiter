@@ -1,0 +1,3 @@
+(
+    template: "B${inst} ${node.a} ${node.b} I=V(${node.a},${node.b})/((${param.v}^2/${param.p}/10)*(1+V(${inst}_t)))\nB${inst}h 0 ${inst}_t I=V(${node.a},${node.b})^2/((${param.v}^2/${param.p}/10)*(1+V(${inst}_t)))\nR${inst}t ${inst}_t 0 {9/${param.p}}\nC${inst}t ${inst}_t 0 {${param.tau}*${param.p}/9}",
+)

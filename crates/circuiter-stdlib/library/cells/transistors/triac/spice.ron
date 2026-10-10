@@ -1,0 +1,7 @@
+(
+    template: "Q${inst}p1 ${inst}_g1 ${inst}_n1 ${node.mt2} ${model}p\nQ${inst}n1 ${inst}_n1 ${inst}_g1 ${node.mt1} ${model}n\nR${inst}g1 ${node.g} ${inst}_g1 10\nR${inst}k1 ${inst}_g1 ${node.mt1} 1k\nQ${inst}p2 ${inst}_g2 ${inst}_n2 ${node.mt1} ${model}p\nQ${inst}n2 ${inst}_n2 ${inst}_g2 ${node.mt2} ${model}n\nR${inst}g2 ${node.g} ${inst}_n2 10\nR${inst}s2 ${node.mt1} ${inst}_n2 1k\nR${inst}k2 ${inst}_g2 ${node.mt2} 1k",
+    models: [
+        ".model ${model}p PNP(IS=1e-14 BF=5 BR=1 CJE=20p CJC=20p TF=100n TR=5u)",
+        ".model ${model}n NPN(IS=1e-14 BF=50 BR=1 CJE=20p CJC=20p TF=50n TR=2u)",
+    ],
+)

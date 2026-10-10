@@ -1,0 +1,16 @@
+(
+    description: "Loudspeaker: its voice coil\'s resistance (8 Ω) and inductance. Drive it through a capacitor or an audio amplifier",
+    prefix: "LS",
+    ports: [(name: "a", description: "+"), (name: "b", description: "−")],
+    params: [
+        (name: "r", kind: Real(unit: "Ω"), default: "8", description: "Voice coil resistance"),
+        (name: "l", kind: Real(unit: "H"), default: "100u", description: "Voice coil inductance"),
+        (name: "p", kind: Real(unit: "W"), default: "1", description: "Power rating"),
+    ],
+    physics: (
+        thermal_resistance: "{80/${param.p}}",
+        heat_capacity: "2",
+        max_temperature: "200",
+        failure: (mode: Open, effect: Smoke),
+    ),
+)

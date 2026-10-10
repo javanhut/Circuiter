@@ -1,0 +1,8 @@
+(
+    template: "Q${inst}1 ${node.c} ${node.b} ${inst}_m ${model}a\nQ${inst}2 ${node.c} ${inst}_m ${node.e} ${model}b\nR${inst}1 ${node.b} ${inst}_m 8k\nR${inst}2 ${inst}_m ${node.e} 120\nD${inst} ${node.e} ${node.c} ${model}d",
+    models: [
+        ".model ${model}a NPN(IS=1e-13 BF=100 VAF=100 CJE=20p CJC=10p TF=1n TR=100n)",
+        ".model ${model}b NPN(IS=5e-12 BF=60 VAF=100 RC=0.1 RB=1 IKF=3 CJE=200p CJC=100p TF=10n TR=1u)",
+        ".model ${model}d D(IS=1n RS=50m BV=100)",
+    ],
+)

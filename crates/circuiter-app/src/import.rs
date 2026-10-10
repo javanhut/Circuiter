@@ -163,6 +163,11 @@ fn device(
             "Q${inst} ${node.c} ${node.b} ${node.e} ${model}",
             format!("Q1 t0 t1 t2 {model}"),
         ),
+        "njf" | "pjf" => (
+            kind,
+            "J${inst} ${node.d} ${node.g} ${node.s} ${model}",
+            format!("J1 t0 t1 t2 {model}"),
+        ),
         "nmos" | "pmos" => (
             kind,
             "M${inst} ${node.d} ${node.g} ${node.s} ${node.b} ${model} W=${param.w} L=${param.l}",
@@ -213,14 +218,18 @@ mod tests {
 E1 out 0 in+ in- {gain}
 .ends LM_TEST
 .subckt Weird 1 2
-B1 1 2 V=1
-.ends";
+T1 1 0 2 0 Z0=50 TD=1n
+.ends
+.subckt Clamp in out
+B1 out 0 V=limit(V(in), -1, 1)
+.ends
+.model J2N3819 NJF(VTO=-3 BETA=1.3m)";
 
     #[test]
     fn imports_subcircuits_and_device_models() {
         let d = design();
         let defs = definitions(LIB);
-        assert_eq!(defs.len(), 4);
+        assert_eq!(defs.len(), 6);
         let diode = import(&d, &defs[0], &[]).unwrap();
         assert_eq!(diode.def.name, "m1N4001");
         assert_eq!(diode.def.folder, IMPORTED);
@@ -251,6 +260,11 @@ B1 1 2 V=1
         let weird = import(&d, &defs[3], &[]).unwrap();
         assert_eq!(weird.def.cell.ports[0].name, "pin1");
         assert!(weird.warning.as_deref().is_some_and(|w| w.contains("not supported")));
+        // Behavioural sources and JFETs run.
+        assert_eq!(import(&d, &defs[4], &[]).unwrap().warning, None);
+        let jfet = import(&d, &defs[5], &[]).unwrap();
+        assert_eq!(jfet.warning, None);
+        assert_eq!(jfet.def.cell.ports.len(), 3);
     }
 
     #[test]

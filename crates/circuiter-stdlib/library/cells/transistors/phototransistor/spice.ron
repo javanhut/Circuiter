@@ -1,0 +1,4 @@
+(
+    template: "Q${inst} ${node.c} ${inst}_b ${node.e} ${model}\nI${inst} ${node.c} ${inst}_b DC {${param.lux}*${param.sens}}\nR${inst} ${inst}_b ${node.e} 100meg",
+    models: [".model ${model} NPN(IS=1e-14 BF=200 VAF=80 CJE=10p CJC=8p TF=5n TR=1u)"],
+)

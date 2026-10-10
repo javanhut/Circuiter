@@ -1,0 +1,22 @@
+(
+    graphics: [
+        Circle(center: (-2.032, 0.0), radius: 0.508),
+        Circle(center: (2.032, -2.54), radius: 0.508),
+        Circle(center: (2.032, 2.54), radius: 0.508),
+        Polyline(points: [(-5.08, 0.0), (-2.54, 0.0)]),
+        Polyline(points: [(2.54, -2.54), (5.08, -2.54)]),
+        Polyline(points: [(2.54, 2.54), (5.08, 2.54)]),
+        Text(at: (0.0, -4.064), text: "${name}", anchor: Center),
+        Text(at: (3.556, -3.556), text: "a"),
+        Text(at: (3.556, 4.064), text: "b"),
+    ],
+    pins: [
+        (port: "com", at: (-7.62, 0.0), direction: Right),
+        (port: "a", at: (7.62, -2.54), direction: Left),
+        (port: "b", at: (7.62, 2.54), direction: Left),
+    ],
+    states: [
+        (when: "thrown=false", graphics: [Polyline(points: [(-1.524, -0.254), (1.524, -2.286)])]),
+        (when: "thrown=true", graphics: [Polyline(points: [(-1.524, 0.254), (1.524, 2.286)])]),
+    ],
+)
