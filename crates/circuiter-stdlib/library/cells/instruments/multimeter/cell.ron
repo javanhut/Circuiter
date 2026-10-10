@@ -1,0 +1,17 @@
+(
+    description: "Multimeter: volts, amps or ohms between its leads. Volts: across a part (10 MΩ). Amps: in series, in place of a wire (0 Ω). Ohms: across an unpowered part (1 mA test current). Its leads clip onto any wire",
+    prefix: "DMM",
+    ports: [
+        (name: "p", description: "Red lead: V, Ω and A"),
+        (name: "com", description: "Black lead: common"),
+    ],
+    params: [
+        (
+            name: "mode",
+            kind: Choice(["V", "A", "Ω"]),
+            default: "V",
+            description: "What it measures",
+        ),
+    ],
+    probe: true,
+)

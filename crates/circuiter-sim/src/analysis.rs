@@ -71,6 +71,54 @@ pub struct Options {
     pub power_on: bool,
     /// Progress reporting and cancellation, for running on another thread.
     pub control: Option<Arc<Control>>,
+    /// Values set from outside while a run goes on: switches, knobs, the outputs of
+    /// digital parts.
+    pub inputs: Option<Arc<Inputs>>,
+}
+
+/// Values set from outside a running simulation, by device name. A voltage or current
+/// source takes the value as its level (volts or amps, replacing its waveform); a
+/// resistor takes it as its resistance (ohms). Change them at any time; call
+/// [`Transient::discontinuity`] after a jump so the solver restarts cleanly.
+#[derive(Debug, Default)]
+pub struct Inputs {
+    names: Vec<String>,
+    values: Vec<std::sync::atomic::AtomicU64>,
+}
+
+impl Inputs {
+    /// Inputs for these devices, each starting at its value.
+    pub fn new(initial: &[(&str, f64)]) -> Self {
+        Inputs {
+            names: initial.iter().map(|(n, _)| n.to_ascii_lowercase()).collect(),
+            values: initial
+                .iter()
+                .map(|(_, v)| std::sync::atomic::AtomicU64::new(v.to_bits()))
+                .collect(),
+        }
+    }
+
+    /// The input for device `name`, if there is one.
+    pub fn index(&self, name: &str) -> Option<usize> {
+        let name = name.to_ascii_lowercase();
+        self.names.iter().position(|n| *n == name)
+    }
+
+    pub fn set(&self, k: usize, value: f64) {
+        self.values[k].store(value.to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn get(&self, k: usize) -> f64 {
+        f64::from_bits(self.values[k].load(Ordering::Relaxed))
+    }
+
+    pub fn len(&self) -> usize {
+        self.names.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.names.is_empty()
+    }
 }
 
 impl Options {
@@ -104,6 +152,7 @@ impl Default for Options {
             max_points: 2_000_000,
             power_on: false,
             control: None,
+            inputs: None,
         }
     }
 }
@@ -239,6 +288,8 @@ struct Engine<'c> {
     /// times when sources are evaluated outside the stepping loop.
     tstep: std::cell::Cell<f64>,
     tstop: std::cell::Cell<f64>,
+    /// For each device, its external input, if it has one.
+    inputs: Vec<Option<usize>>,
 }
 
 struct Solver {
@@ -274,7 +325,18 @@ impl<'c> Engine<'c> {
             solver: RefCell::new(None),
             tstep: std::cell::Cell::new(1.0),
             tstop: std::cell::Cell::new(1.0),
+            inputs: c
+                .devices
+                .iter()
+                .map(|d| o.inputs.as_ref().and_then(|i| i.index(&d.name)))
+                .collect(),
         }
+    }
+
+    /// Device `di`'s external input value, if it has one.
+    fn input(&self, di: usize) -> Option<f64> {
+        let k = self.inputs.get(di).copied().flatten()?;
+        Some(self.o.inputs.as_ref()?.get(k))
     }
 
     /// An empty system in the current sparse structure, which is first taken from
@@ -385,7 +447,10 @@ impl<'c> Engine<'c> {
         let dev = &self.c.devices[di];
         let mut limited = false;
         match &dev.element {
-            Element::Resistor { a, b, g } => conductance(s, l, *a, *b, *g),
+            Element::Resistor { a, b, g } => {
+                let g = self.input(di).map_or(*g, |r| 1.0 / r.max(1e-9));
+                conductance(s, l, *a, *b, g)
+            }
             Element::Capacitor { a, b, c } => {
                 let vd = v(*a) - v(*b);
                 let q = c * vd;
@@ -434,10 +499,16 @@ impl<'c> Engine<'c> {
                     s.a(rn, br, -1.0);
                     s.a(br, rn, -1.0);
                 }
-                s.b(br, Self::source_value(ctx, source));
+                let value = self
+                    .input(di)
+                    .map_or_else(|| Self::source_value(ctx, source), |v| v * ctx.scale);
+                s.b(br, value);
             }
             Element::Isource { p, n, source } => {
-                current(s, l, *p, *n, Self::source_value(ctx, source), &[]);
+                let value = self
+                    .input(di)
+                    .map_or_else(|| Self::source_value(ctx, source), |v| v * ctx.scale);
+                current(s, l, *p, *n, value, &[]);
             }
             Element::Vccs { p, n, cp, cn, gm } => {
                 current(s, l, *p, *n, 0.0, &[(*cp, *cn, *gm, 0.0)]);
@@ -1206,6 +1277,17 @@ pub trait Observer {
     /// Called after the operating point and after every accepted time point. Returns
     /// devices to replace: each `(index, element)` takes effect from this time on.
     fn step(&mut self, step: &Step<'_>) -> Vec<(usize, Element)>;
+
+    /// The next time after `t` at which something outside changes the circuit (a
+    /// digital edge driving an input): the solver lands a step on it.
+    fn next_event(&self, _t: f64) -> Option<f64> {
+        None
+    }
+
+    /// Whether inputs jumped since the last step (the solver then restarts gently).
+    fn take_discontinuity(&mut self) -> bool {
+        false
+    }
 }
 
 /// An observer that only watches.
@@ -1266,219 +1348,359 @@ pub fn tran_observed(
     o: &Options,
     observer: &mut dyn Observer,
 ) -> Result<(TranResult, Circuit), SimError> {
-    if !(tstop > 0.0 && tstep > 0.0) {
-        return Err(SimError {
-            message: "the stop time and step must be positive".into(),
-            nodes: Vec::new(),
-            devices: Vec::new(),
-        });
+    let mut run = Transient::start(c, tstep, tstop, o, observer)?;
+    run.advance(tstop, observer)?;
+    Ok((run.result, run.circuit))
+}
+
+/// A transient run that can be advanced a stretch at a time: for running circuits
+/// live, and for stepping in lockstep with other simulators. Its results accumulate in
+/// [`Transient::result`] (take them out with [`Transient::take_points`] to keep memory
+/// bounded on a long run).
+pub struct Transient {
+    circuit: Circuit,
+    o: Options,
+    solver: Option<Solver>,
+    tstep: f64,
+    tstop: f64,
+    hmax: f64,
+    hmin: f64,
+    t: f64,
+    h: f64,
+    order: usize,
+    x: Vec<f64>,
+    lim: Limits,
+    hist: Vec<Slot>,
+    qhist: Vec<[f64; 3]>,
+    thist: [f64; 3],
+    valid: usize,
+    pub result: TranResult,
+}
+
+impl std::fmt::Debug for Transient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Transient")
+            .field("t", &self.t)
+            .field("points", &self.result.time.len())
+            .finish()
     }
-    let mut circuit = c.clone();
-    let mut e = Engine::new(&circuit, o);
-    e.tstep.set(tstep);
-    e.tstop.set(tstop);
-    let (mut x, mut lim, now0) = if o.power_on {
-        // Everything off: zero voltages, no stored charge.
-        let x = vec![0.0; e.n];
-        let lim = e.limits_at(&x);
-        (x, lim, vec![Slot::default(); circuit.slots])
-    } else {
-        e.operating_point(Some(0.0), tstep, tstop, None)?
-    };
-    let nodes = c.nodes.len();
-    let hmax = tstep.min(tstop / 50.0);
-    let hmin = hmax * 1e-9;
+}
 
-    // Corners of the source waveforms, where the step must land.
-    let mut bps: Vec<f64> = c
-        .devices
-        .iter()
-        .flat_map(|d| match &d.element {
-            Element::Vsource { source, .. } | Element::Isource { source, .. } => {
-                source.breakpoints(tstep, tstop)
+fn error(message: impl Into<String>) -> SimError {
+    SimError { message: message.into(), nodes: Vec::new(), devices: Vec::new() }
+}
+
+impl Transient {
+    /// Sets up a run to `tstop` (infinite for one that goes on until stopped), with
+    /// steps no longer than `tstep`: from power-on or from the operating point.
+    pub fn start(
+        c: &Circuit,
+        tstep: f64,
+        tstop: f64,
+        o: &Options,
+        observer: &mut dyn Observer,
+    ) -> Result<Transient, SimError> {
+        if !(tstop > 0.0 && tstep > 0.0) {
+            return Err(error("the stop time and step must be positive"));
+        }
+        let mut circuit = c.clone();
+        let (mut x, mut lim, now0) = {
+            let e = Engine::new(&circuit, o);
+            e.tstep.set(tstep);
+            e.tstop.set(tstop.min(1e30));
+            if o.power_on {
+                // Everything off: zero voltages, no stored charge.
+                let x = vec![0.0; e.n];
+                let lim = e.limits_at(&x);
+                (x, lim, vec![Slot::default(); circuit.slots])
+            } else {
+                e.operating_point(Some(0.0), tstep, tstop.min(1e30), None)?
             }
-            _ => Vec::new(),
-        })
-        .filter(|&t| t > 0.0 && t < tstop)
-        .collect();
-    bps.push(tstop);
-    bps.sort_by(f64::total_cmp);
-    bps.dedup_by(|a, b| (*a - *b).abs() <= hmin);
-
-    let charges = c.charge_slots();
-    let mut hist = now0;
-    let mut qhist: Vec<[f64; 3]> = hist.iter().map(|s| [s.q, 0.0, 0.0]).collect();
-    let mut thist = [0.0; 3];
-    let mut valid = 1;
-
-    let mut result = TranResult { time: vec![0.0], values: vec![x.clone()], nodes, rejected: 0 };
-    // The operating point: parts may already be beyond saving.
-    let changes = observer.step(&Step { engine: &e, x: &x, lim: &lim, time: 0.0, dt: 0.0 });
-    if !changes.is_empty() {
-        for (d, element) in changes {
-            circuit.devices[d].element = element;
-        }
-        e = Engine::new(&circuit, o);
-        e.tstep.set(tstep);
-        e.tstop.set(tstop);
-        lim = e.limits_at(&x);
-    }
-
-    let mut t = 0.0;
-    let mut h = (tstop / 100.0).min(tstep) / 10.0;
-    let mut order = 1;
-    let mut bi = 0;
-    while t < tstop - hmin {
-        while bi < bps.len() && bps[bi] <= t + hmin {
-            bi += 1;
-        }
-        let next_bp = bps.get(bi).copied().unwrap_or(tstop);
-        let mut step = h.min(hmax);
-        let mut hit = false;
-        if t + step > next_bp - 0.1 * step {
-            step = next_bp - t;
-            hit = true;
-        }
-        let ag0 = if order == 1 { 1.0 / step } else { 2.0 / step };
-        let mut ctx = Ctx {
-            time: Some(t + step),
-            tstep,
-            tstop,
-            scale: 1.0,
-            ag0,
-            trap: order == 2,
-            hist: &hist,
-            init: false,
-            gmin: o.gmin,
         };
-        let mut x_new = x.clone();
-        let mut lim_new = lim.clone();
-        let mut now = hist.clone();
-        if e.newton(&mut x_new, &mut ctx, &mut lim_new, &mut now, o.itl4, 0.0).is_err() {
-            result.rejected += 1;
-            h = step / 8.0;
-            order = 1;
-            if h < hmin {
-                return Err(SimError {
-                    message: format!(
-                        "transient: the time step became too small at t = {:.4e} s; \
-                         the circuit changes faster than it can be followed",
-                        t
-                    ),
-                    nodes: Vec::new(),
-                    devices: Vec::new(),
-                });
-            }
-            continue;
-        }
-
-        // A switch changed state: narrow the step until the change is pinned down,
-        // then treat it as a corner.
-        let switched =
-            now.iter().zip(&hist).enumerate().any(|(k, (a, b))| !charges[k] && a.q != b.q);
-        if switched && step > hmax * 0.01 {
-            result.rejected += 1;
-            h = (step / 4.0).max(hmin);
-            order = 1;
-            continue;
-        }
-
-        // Truncation error, from divided differences of each charge's history.
-        let t1 = t + step;
-        let mut ratio = f64::INFINITY;
-        if valid > order {
-            for (k, s) in now.iter().enumerate().filter(|(k, _)| charges[*k]) {
-                let q = [s.q, qhist[k][0], qhist[k][1], qhist[k][2]];
-                let ts = [t1, thist[0], thist[1], thist[2]];
-                let dd1 = |i: usize| (q[i] - q[i + 1]) / (ts[i] - ts[i + 1]);
-                let dd2 = |i: usize| (dd1(i) - dd1(i + 1)) / (ts[i] - ts[i + 2]);
-                let lte = if order == 1 {
-                    step * step * dd2(0).abs()
-                } else {
-                    let dd3 = (dd2(0) - dd2(1)) / (ts[0] - ts[3]);
-                    step * step * step / 2.0 * dd3.abs()
-                };
-                if lte > 0.0 && lte.is_finite() {
-                    let tol = o.trtol
-                        * (o.reltol * s.q.abs().max(q[1].abs()) + o.chgtol)
-                            .max((o.reltol * s.i.abs().max(hist[k].i.abs()) + o.abstol) * step);
-                    ratio = ratio.min(tol / lte);
-                }
-            }
-        }
-        let h_new = if ratio.is_finite() {
-            step * ratio.powf(1.0 / (order as f64 + 1.0))
-        } else {
-            2.0 * step
+        let nodes = c.nodes.len();
+        let hmax = tstep.min(tstop / 50.0);
+        let qhist: Vec<[f64; 3]> = now0.iter().map(|s| [s.q, 0.0, 0.0]).collect();
+        let result = TranResult { time: vec![0.0], values: vec![x.clone()], nodes, rejected: 0 };
+        // The operating point: parts may already be beyond saving.
+        let changes = {
+            let e = Engine::new(&circuit, o);
+            observer.step(&Step { engine: &e, x: &x, lim: &lim, time: 0.0, dt: 0.0 })
         };
-        if h_new < 0.9 * step && step > 2.0 * hmin {
-            result.rejected += 1;
-            h = h_new.max(step / 8.0).max(hmin);
-            continue;
-        }
-
-        // The observer would change the circuit here: narrow the step to place the
-        // change within a hundredth of the largest step, as for a switch.
-        if step > hmax * 0.01
-            && observer.fails(&Step { engine: &e, x: &x_new, lim: &lim_new, time: t1, dt: step })
-        {
-            result.rejected += 1;
-            h = (step / 4.0).max(hmin);
-            order = 1;
-            continue;
-        }
-
-        // Accept.
-        o.progress(t1 / tstop)?;
-        t = t1;
-        x = x_new;
-        lim = lim_new;
-        for (k, s) in now.iter().enumerate() {
-            qhist[k] = [s.q, qhist[k][0], qhist[k][1]];
-        }
-        thist = [t, thist[0], thist[1]];
-        valid = (valid + 1).min(3);
-        hist = now;
-        result.time.push(t);
-        result.values.push(x.clone());
-        if result.time.len() > o.max_points {
-            return Err(SimError {
-                message: format!("transient: more than {} time points", o.max_points),
-                nodes: Vec::new(),
-                devices: Vec::new(),
-            });
-        }
-
-        h = h_new.min(2.0 * step);
-        if switched {
-            order = 1;
-            h = h.min(step.max(hmax * 0.01));
-        } else if hit {
-            // Restart gently after a corner: first order, small step.
-            order = 1;
-            let after = bps.get(bi + 1).copied().unwrap_or(tstop);
-            h = h.min(0.1 * step.min(after - t)).min(hmax);
-        } else {
-            order = 2;
-        }
-        h = h.clamp(hmin, hmax);
-
-        // The observer may destroy parts: rebuild around their replacements and restart
-        // gently, as after a corner.
-        let changes = observer.step(&Step { engine: &e, x: &x, lim: &lim, time: t, dt: step });
         if !changes.is_empty() {
             for (d, element) in changes {
                 circuit.devices[d].element = element;
             }
-            e = Engine::new(&circuit, o);
-            e.tstep.set(tstep);
-            e.tstop.set(tstop);
-            lim = e.limits_at(&x);
-            order = 1;
-            h = h.min(hmax * 0.01).max(hmin);
+            lim = Engine::new(&circuit, o).limits_at(&x);
         }
+        x.shrink_to_fit();
+        Ok(Transient {
+            circuit,
+            o: o.clone(),
+            solver: None,
+            tstep,
+            tstop,
+            hmax,
+            hmin: hmax * 1e-9,
+            t: 0.0,
+            h: (tstop.min(1e30) / 100.0).min(tstep) / 10.0,
+            order: 1,
+            x,
+            lim,
+            hist: now0,
+            qhist,
+            thist: [0.0; 3],
+            valid: 1,
+            result,
+        })
     }
-    Ok((result, circuit))
+
+    /// The time reached.
+    pub fn time(&self) -> f64 {
+        self.t
+    }
+
+    /// The circuit as it stands (destroyed parts replaced by their failure modes).
+    pub fn circuit(&self) -> &Circuit {
+        &self.circuit
+    }
+
+    /// The voltage of node `node` now.
+    pub fn voltage(&self, node: usize) -> f64 {
+        if node == 0 { 0.0 } else { self.x[node - 1] }
+    }
+
+    /// The current through voltage source or inductor `branch` (its branch row) now.
+    pub fn solution(&self) -> &[f64] {
+        &self.x
+    }
+
+    /// Something outside changed with a jump (an input): restart gently from here.
+    pub fn discontinuity(&mut self) {
+        self.order = 1;
+        self.h = self.h.min(self.hmax * 0.01).max(self.hmin);
+    }
+
+    /// Takes the accumulated time points out, keeping the latest so the run goes on
+    /// from it.
+    pub fn take_points(&mut self) -> TranResult {
+        let keep_t = *self.result.time.last().expect("a point");
+        let keep_x = self.result.values.last().expect("a point").clone();
+        let nodes = self.result.nodes;
+        let rejected = self.result.rejected;
+        std::mem::replace(
+            &mut self.result,
+            TranResult { time: vec![keep_t], values: vec![keep_x], nodes, rejected },
+        )
+    }
+
+    /// Runs on to `until` (or the stop time, if sooner).
+    pub fn advance(&mut self, until: f64, observer: &mut dyn Observer) -> Result<(), SimError> {
+        let until = until.min(self.tstop);
+        let o = self.o.clone();
+        let (tstep, tstop, hmax, hmin) = (self.tstep, self.tstop, self.hmax, self.hmin);
+        let tstop_eval = tstop.min(1e30);
+        let mut e = Engine::new(&self.circuit, &o);
+        *e.solver.borrow_mut() = self.solver.take();
+        e.tstep.set(tstep);
+        e.tstop.set(tstop_eval);
+
+        // Corners of the source waveforms between here and `until`, where steps land.
+        let mut bps: Vec<f64> = self
+            .circuit
+            .devices
+            .iter()
+            .enumerate()
+            .filter(|(di, _)| e.input(*di).is_none())
+            .flat_map(|(_, d)| match &d.element {
+                Element::Vsource { source, .. } | Element::Isource { source, .. } => {
+                    source.breakpoints(tstep, until)
+                }
+                _ => Vec::new(),
+            })
+            .filter(|&t| t > self.t && t < until)
+            .collect();
+        bps.push(until);
+        bps.sort_by(f64::total_cmp);
+        bps.dedup_by(|a, b| (*a - *b).abs() <= hmin);
+        let charges = self.circuit.charge_slots();
+        let mut bi = 0;
+        let mut result = Ok(());
+        while self.t < until - hmin {
+            let t = self.t;
+            while bi < bps.len() && bps[bi] <= t + hmin {
+                bi += 1;
+            }
+            let mut next_bp = bps.get(bi).copied().unwrap_or(until);
+            // Events elsewhere (a digital edge) are corners too.
+            if let Some(ev) = observer.next_event(t) {
+                if ev > t + hmin && ev < next_bp {
+                    next_bp = ev;
+                }
+            }
+            let mut step = self.h.min(hmax);
+            let mut hit = false;
+            if t + step > next_bp - 0.1 * step {
+                step = next_bp - t;
+                hit = true;
+            }
+            let ag0 = if self.order == 1 { 1.0 / step } else { 2.0 / step };
+            let mut ctx = Ctx {
+                time: Some(t + step),
+                tstep,
+                tstop: tstop_eval,
+                scale: 1.0,
+                ag0,
+                trap: self.order == 2,
+                hist: &self.hist,
+                init: false,
+                gmin: o.gmin,
+            };
+            let mut x_new = self.x.clone();
+            let mut lim_new = self.lim.clone();
+            let mut now = self.hist.clone();
+            if e.newton(&mut x_new, &mut ctx, &mut lim_new, &mut now, o.itl4, 0.0).is_err() {
+                self.result.rejected += 1;
+                self.h = step / 8.0;
+                self.order = 1;
+                if self.h < hmin {
+                    result = Err(error(format!(
+                        "transient: the time step became too small at t = {t:.4e} s; \
+                         the circuit changes faster than it can be followed"
+                    )));
+                    break;
+                }
+                continue;
+            }
+
+            // A switch changed state: narrow the step until the change is pinned down,
+            // then treat it as a corner.
+            let switched =
+                now.iter().zip(&self.hist).enumerate().any(|(k, (a, b))| !charges[k] && a.q != b.q);
+            if switched && step > hmax * 0.01 {
+                self.result.rejected += 1;
+                self.h = (step / 4.0).max(hmin);
+                self.order = 1;
+                continue;
+            }
+
+            // Truncation error, from divided differences of each charge's history.
+            let t1 = t + step;
+            let mut ratio = f64::INFINITY;
+            if self.valid > self.order {
+                for (k, s) in now.iter().enumerate().filter(|(k, _)| charges[*k]) {
+                    let q = [s.q, self.qhist[k][0], self.qhist[k][1], self.qhist[k][2]];
+                    let ts = [t1, self.thist[0], self.thist[1], self.thist[2]];
+                    let dd1 = |i: usize| (q[i] - q[i + 1]) / (ts[i] - ts[i + 1]);
+                    let dd2 = |i: usize| (dd1(i) - dd1(i + 1)) / (ts[i] - ts[i + 2]);
+                    let lte = if self.order == 1 {
+                        step * step * dd2(0).abs()
+                    } else {
+                        let dd3 = (dd2(0) - dd2(1)) / (ts[0] - ts[3]);
+                        step * step * step / 2.0 * dd3.abs()
+                    };
+                    if lte > 0.0 && lte.is_finite() {
+                        let tol = o.trtol
+                            * (o.reltol * s.q.abs().max(q[1].abs()) + o.chgtol).max(
+                                (o.reltol * s.i.abs().max(self.hist[k].i.abs()) + o.abstol) * step,
+                            );
+                        ratio = ratio.min(tol / lte);
+                    }
+                }
+            }
+            let h_new = if ratio.is_finite() {
+                step * ratio.powf(1.0 / (self.order as f64 + 1.0))
+            } else {
+                2.0 * step
+            };
+            if h_new < 0.9 * step && step > 2.0 * hmin {
+                self.result.rejected += 1;
+                self.h = h_new.max(step / 8.0).max(hmin);
+                continue;
+            }
+
+            // The observer would change the circuit here: narrow the step to place the
+            // change within a hundredth of the largest step, as for a switch.
+            if step > hmax * 0.01
+                && observer.fails(&Step {
+                    engine: &e,
+                    x: &x_new,
+                    lim: &lim_new,
+                    time: t1,
+                    dt: step,
+                })
+            {
+                self.result.rejected += 1;
+                self.h = (step / 4.0).max(hmin);
+                self.order = 1;
+                continue;
+            }
+
+            // Accept.
+            if tstop.is_finite() {
+                if let Err(err) = o.progress(t1 / tstop) {
+                    result = Err(err);
+                    break;
+                }
+            } else if o.control.as_ref().is_some_and(|c| c.is_cancelled()) {
+                result = Err(error("cancelled"));
+                break;
+            }
+            self.t = t1;
+            self.x = x_new;
+            self.lim = lim_new;
+            for (k, s) in now.iter().enumerate() {
+                self.qhist[k] = [s.q, self.qhist[k][0], self.qhist[k][1]];
+            }
+            self.thist = [t1, self.thist[0], self.thist[1]];
+            self.valid = (self.valid + 1).min(3);
+            self.hist = now;
+            self.result.time.push(t1);
+            self.result.values.push(self.x.clone());
+            if self.result.time.len() > o.max_points {
+                result = Err(error(format!("transient: more than {} time points", o.max_points)));
+                break;
+            }
+
+            self.h = h_new.min(2.0 * step);
+            if switched {
+                self.order = 1;
+                self.h = self.h.min(step.max(hmax * 0.01));
+            } else if hit {
+                // Restart gently after a corner: first order, small step.
+                self.order = 1;
+                let after = bps.get(bi + 1).copied().unwrap_or(until).max(t1 + hmin);
+                self.h = self.h.min(0.1 * step.min(after - t1)).min(hmax);
+            } else {
+                self.order = 2;
+            }
+            self.h = self.h.clamp(hmin, hmax);
+
+            // The observer may destroy parts (rebuild around their replacements) or set
+            // inputs (restart gently, as after a corner).
+            let (changes, jumped) = {
+                let step_view = Step { engine: &e, x: &self.x, lim: &self.lim, time: t1, dt: step };
+                let changes = observer.step(&step_view);
+                (changes, observer.take_discontinuity())
+            };
+            if !changes.is_empty() {
+                drop(e);
+                for (d, element) in changes {
+                    self.circuit.devices[d].element = element;
+                }
+                e = Engine::new(&self.circuit, &o);
+                e.tstep.set(tstep);
+                e.tstop.set(tstop_eval);
+                self.lim = e.limits_at(&self.x);
+                self.order = 1;
+                self.h = self.h.min(hmax * 0.01).max(hmin);
+            } else if jumped {
+                self.order = 1;
+                self.h = self.h.min(hmax * 0.01).max(hmin);
+            }
+        }
+        self.solver = e.solver.into_inner();
+        result
+    }
 }
 
 /// A complex number, for AC analysis.

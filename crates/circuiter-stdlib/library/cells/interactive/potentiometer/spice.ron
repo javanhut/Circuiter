@@ -1,0 +1,3 @@
+(
+    template: "R${inst}a ${node.a} ${node.w} {${param.R}*${param.position}+0.001}\nR${inst}b ${node.w} ${node.b} {${param.R}*(1-${param.position})+0.001}",
+)

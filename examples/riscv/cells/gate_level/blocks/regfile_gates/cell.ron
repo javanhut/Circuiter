@@ -1,0 +1,14 @@
+(
+    description: "Register file from gates: x0 wired to zero, x1 to x31 each 32 enabled flip-flops (992 in all), a decoder choosing which one a write loads, and two read ports",
+    prefix: "RF",
+    ports: [
+        (name: "ra1", kind: Input, description: "Read address 1", width: 5),
+        (name: "ra2", kind: Input, description: "Read address 2", width: 5),
+        (name: "wa", kind: Input, description: "Write address", width: 5),
+        (name: "wd", kind: Input, description: "Write data", width: 32),
+        (name: "we", kind: Input, description: "Write enable"),
+        (name: "clk", kind: Input, description: "Clock"),
+        (name: "rd1", kind: Output, description: "x[ra1]", width: 32),
+        (name: "rd2", kind: Output, description: "x[ra2]", width: 32),
+    ],
+)

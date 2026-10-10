@@ -1,0 +1,11 @@
+(
+    description: "32-bit ripple-carry adder of full adders, with its carry out",
+    prefix: "ADD",
+    ports: [
+        (name: "a", kind: Input, width: 32),
+        (name: "b", kind: Input, width: 32),
+        (name: "cin", kind: Input, description: "Carry in"),
+        (name: "y", kind: Output, description: "a + b + cin", width: 32),
+        (name: "cout", kind: Output, description: "Carry out"),
+    ],
+)

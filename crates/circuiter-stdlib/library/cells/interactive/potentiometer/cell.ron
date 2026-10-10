@@ -1,0 +1,18 @@
+(
+    description: "Potentiometer: a resistor with a sliding tap. While the circuit runs live, drag its knob in Properties",
+    prefix: "RV",
+    ports: [
+        (name: "a", description: "One end"),
+        (name: "w", description: "Wiper"),
+        (name: "b", description: "Other end"),
+    ],
+    params: [
+        (name: "R", kind: Real(unit: "Ω"), default: "10k", description: "End-to-end resistance"),
+        (
+            name: "position",
+            kind: Real(unit: ""),
+            default: "0.5",
+            description: "Wiper position, 0 (at a) to 1 (at b)",
+        ),
+    ],
+)

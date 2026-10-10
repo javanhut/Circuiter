@@ -1,0 +1,10 @@
+(
+    description: "Barrel shifter, right: fills with zeros, or with the sign bit when arith is high",
+    prefix: "SH",
+    ports: [
+        (name: "a", kind: Input, width: 32),
+        (name: "sh", kind: Input, description: "Places", width: 5),
+        (name: "arith", kind: Input, description: "Copy the sign bit in (SRA)"),
+        (name: "y", kind: Output, description: "a >> sh", width: 32),
+    ],
+)

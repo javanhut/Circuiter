@@ -1,0 +1,9 @@
+(
+    description: "Barrel shifter, left: five stages of multiplexers shift by 1, 2, 4, 8 and 16",
+    prefix: "SH",
+    ports: [
+        (name: "a", kind: Input, width: 32),
+        (name: "sh", kind: Input, description: "Places", width: 5),
+        (name: "y", kind: Output, description: "a << sh", width: 32),
+    ],
+)

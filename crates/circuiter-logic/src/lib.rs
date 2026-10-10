@@ -181,6 +181,8 @@ enum Event {
     /// Element, port, value.
     Drive(usize, usize, Value),
     Wake(usize),
+    /// Evaluate now, whatever it was waiting for.
+    Poke(usize),
 }
 
 /// An event in the queue, in time order, then in the order it was scheduled.
@@ -301,6 +303,59 @@ impl Simulator {
         self.halted
     }
 
+    /// Evaluates element `e` again now: after something outside changed what it
+    /// drives (an [`prims::Input`]'s value).
+    pub fn poke(&mut self, e: usize) {
+        if !self.started {
+            return;
+        }
+        self.push(self.now, Event::Poke(e));
+    }
+
+    /// Moves time forward to `t` without anything happening (when nothing is queued
+    /// before it), so that pokes land at `t`.
+    pub fn skip_to(&mut self, t: Time) {
+        if self.queue.peek().is_none_or(|Reverse(s)| s.time >= t) && t > self.now {
+            self.now = t;
+        }
+    }
+
+    /// When the next change already scheduled for any of `nets` is due (a gate's output
+    /// on its way): what an analog simulator in lockstep must land on.
+    pub fn next_drive_on(&self, nets: &[bool]) -> Option<Time> {
+        self.queue
+            .iter()
+            .filter_map(|Reverse(s)| match s.event {
+                Event::Drive(e, port, _) => {
+                    let net = self.circuit.elements[e].nets[port];
+                    nets.get(net).copied().unwrap_or(false).then_some(s.time)
+                }
+                _ => None,
+            })
+            .min()
+    }
+
+    /// When the next event is due, if any.
+    pub fn next_event(&self) -> Option<Time> {
+        self.queue.peek().map(|Reverse(s)| s.time)
+    }
+
+    /// The element at `index`.
+    pub fn element_at(&self, index: usize) -> &Element {
+        &self.circuit.elements[index]
+    }
+
+    /// Drops the history of every net before `t` (keeping each net's value then), to
+    /// bound memory on a long run.
+    pub fn forget_before(&mut self, t: Time) {
+        for h in &mut self.history {
+            let keep = h.partition_point(|(ht, _)| *ht <= t).saturating_sub(1);
+            if keep > 0 {
+                h.drain(..keep);
+            }
+        }
+    }
+
     fn push(&mut self, time: Time, event: Event) {
         self.seq += 1;
         self.queue.push(Reverse(Scheduled { time, seq: self.seq, event }));
@@ -391,6 +446,7 @@ impl Simulator {
                                 woken.push(e);
                             }
                         }
+                        Event::Poke(e) => woken.push(e),
                     }
                 }
                 let mut to_eval = woken;
@@ -424,5 +480,30 @@ impl Simulator {
             self.now = end;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inputs_set_from_outside_while_running() {
+        let mut c = Circuit::new();
+        let (a, y) = (c.net("a", 1), c.net("y", 1));
+        let (input, handle) = prims::Input::with_handle(1, 0);
+        let k = c.add("SW", input, &[a]).unwrap();
+        c.add("U1", prims::create("not", &prims::Params::new(), None).unwrap(), &[a, y]).unwrap();
+        let mut sim = Simulator::new(c);
+        sim.run_until(ns(10.0)).unwrap();
+        assert_eq!(sim.value(y), Value::bit(true));
+        assert_eq!(sim.next_event(), None, "settled");
+        // Flip the switch at 50 ns.
+        sim.skip_to(ns(50.0));
+        handle.store(1, std::sync::atomic::Ordering::Relaxed);
+        sim.poke(k);
+        sim.run_until(ns(100.0)).unwrap();
+        assert_eq!(sim.value(y), Value::bit(false));
+        assert_eq!(sim.history(y).last().unwrap().0, ns(51.0), "after the gate's 1 ns");
     }
 }

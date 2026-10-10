@@ -1,0 +1,15 @@
+(
+    graphics: [
+        Circle(center: (-2.032, 0.0), radius: 0.508),
+        Circle(center: (2.032, 0.0), radius: 0.508),
+        Text(at: (0.0, -3.302), text: "${name}", anchor: Center),
+    ],
+    pins: [
+        (port: "a", at: (-5.08, 0.0), direction: Right),
+        (port: "b", at: (5.08, 0.0), direction: Left),
+    ],
+    states: [
+        (when: "closed=false", graphics: [Polyline(points: [(-1.524, -0.254), (2.286, -2.286)])]),
+        (when: "closed=true", graphics: [Polyline(points: [(-1.524, -0.508), (2.54, -0.508)])]),
+    ],
+)

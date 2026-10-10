@@ -192,8 +192,9 @@ fn draw(
     if response.double_clicked() {
         (u0, u1) = full;
     }
-    let span = (u1 - u0).clamp((full.1 - full.0).abs() * 1e-9, full.1 - full.0);
-    u0 = u0.clamp(full.0, full.1 - span);
+    let width = (full.1 - full.0).max(f64::MIN_POSITIVE);
+    let span = (u1 - u0).clamp((width * 1e-9).min(width), width);
+    u0 = u0.clamp(full.0, (full.1 - span).max(full.0));
     u1 = u0 + span;
     state.window = (u0 > full.0 || u1 < full.1).then_some((u0, u1));
 
@@ -413,8 +414,8 @@ pub fn show_logic(
     if response.double_clicked() {
         (u0, u1) = full;
     }
-    let span = (u1 - u0).clamp(1e-12, full.1);
-    u0 = u0.clamp(0.0, full.1 - span);
+    let span = (u1 - u0).clamp(1e-12f64.min(full.1), full.1.max(1e-12));
+    u0 = u0.clamp(0.0, (full.1 - span).max(0.0));
     u1 = u0 + span;
     state.window = (u0 > full.0 || u1 < full.1).then_some((u0, u1));
     let px = |t: f64| plot.left() + ((t - u0) / (u1 - u0)) as f32 * plot.width();

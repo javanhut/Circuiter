@@ -33,6 +33,8 @@ fn open(project: PathBuf) -> Harness<'static, CircuiterApp> {
         simulate: None,
         heat: false,
         program: None,
+        live: false,
+        results: None,
         screenshot: None,
     };
     let mut h = Harness::builder()
@@ -481,4 +483,53 @@ fn a_program_runs_on_the_cpu_from_its_editor() {
     };
     assert!(run.halted);
     assert_eq!(run.memories["RF"][10].known(), Some(34));
+}
+
+/// Running live, a click on a switch flips it (and doesn't select it).
+#[test]
+fn clicking_a_switch_while_running_live_flips_it() {
+    let tmp = example_copy("bench");
+    let mut h = open(tmp.path().to_path_buf());
+    h.get_by_label_contains("Run Live").click();
+    h.run_steps(4);
+    assert!(h.state().workspace().unwrap().live.is_some(), "running live");
+    let body = {
+        let ws = h.state().workspace().unwrap();
+        let i = ws.schematic().unwrap().instances.iter().position(|i| i.name == "SW1").unwrap();
+        ws.scene.instance_bodies[i].center()
+    };
+    let at = screen(&h, body);
+    h.hover_at(at);
+    h.run_steps(2);
+    h.drag_at(at);
+    h.step();
+    h.event(egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run_steps(3);
+    let mut flipped = false;
+    for _ in 0..100 {
+        h.step();
+        let ws = h.state().workspace().unwrap();
+        if ws.live_states().get("SW1").map(String::as_str) == Some("true") {
+            flipped = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(flipped, "the switch closed");
+    let ws = h.state().workspace().unwrap();
+    assert!(ws.selection.is_empty(), "operating a part doesn't select it");
+    // Under load a frame can go by before the click lands: try a few times.
+    for _ in 0..5 {
+        h.get_by_label_contains("Stop Live").click();
+        h.run_steps(3);
+        if h.state().workspace().unwrap().live.is_none() {
+            break;
+        }
+    }
+    assert!(h.state().workspace().unwrap().live.is_none(), "stopped");
 }

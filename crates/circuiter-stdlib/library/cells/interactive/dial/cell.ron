@@ -1,0 +1,13 @@
+(
+    description: "Adjustable DC supply: a voltage you can turn. While the circuit runs live, drag its knob in Properties",
+    prefix: "V",
+    ports: [
+        (name: "p", kind: PowerOut, description: "Positive terminal"),
+        (name: "n", kind: PowerOut, description: "Negative terminal"),
+    ],
+    params: [
+        (name: "value", kind: Real(unit: "V"), default: "5", description: "Output voltage"),
+        (name: "min", kind: Real(unit: "V"), default: "0", description: "Lowest setting"),
+        (name: "max", kind: Real(unit: "V"), default: "10", description: "Highest setting"),
+    ],
+)

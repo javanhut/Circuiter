@@ -14,9 +14,11 @@ to manufacture it.
 > desktop app: an editor for schematics, symbols and component interfaces, with a
 > built-in circuit simulator (operating point, DC sweep, transient, AC), a physics
 > engine in which overstressed parts heat up and fail, a digital simulator with the
-> parts to build processors (and an example RISC-V CPU), and programs in RISC-V
-> assembly, C, Rust and SystemVerilog. Mixed analog and digital circuits are next. See
-> [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design and roadmap.
+> parts to build processors (and an example RISC-V CPU, also made entirely of gates),
+> mixed analog and digital circuits, live runs you can operate with switches, buttons
+> and knobs while multimeters and an oscilloscope watch, and programs in RISC-V
+> assembly, C, Rust and SystemVerilog. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+> for the design and roadmap.
 
 ## Building
 
@@ -35,13 +37,16 @@ Circuiter is a single desktop app, `circuiter`:
 cargo run --release -p circuiter-app -- examples/cmos_inverter
 cargo run --release -p circuiter-app -- examples/ce_amplifier
 cargo run --release -p circuiter-app -- examples/riscv
+cargo run --release -p circuiter-app -- examples/bench
 ```
 
 The examples are a CMOS inverter built from two MOSFETs and driven by a clock, a
 one-transistor audio amplifier (a 2N3904 common-emitter stage, about 44 dB of gain)
 with a power LED, a half adder built from logic gates, an overstress lab where an
-LED, a fuse and a resistor are pushed past their limits, and a RISC-V processor built
-from digital parts that runs programs in assembly, C and Rust.
+LED, a fuse and a resistor are pushed past their limits, a RISC-V processor that runs
+programs in assembly, C and Rust (built from digital parts, and again from gates
+alone), and an electronics bench to run live: a supply to turn, switches, a button,
+LEDs, a counter, multimeters and an oscilloscope.
 
 Start your own with File → New Project… (or the welcome screen): pick an empty folder
 and the project is named after it.
@@ -57,8 +62,8 @@ and the project is named after it.
   the sheet works like Components.
 - Right: **Properties** of what's selected (or the cell), **Simulation** (run, results,
   plotted signals) and **Physics** (ratings, temperatures, what failed).
-- Bottom: **Waveforms**, **Thermal** and **Problems**. Hide it with its ×; Run brings
-  it back.
+- Bottom: **Waveforms**, **Thermal**, **Problems** and **Oscilloscope**. Hide it with
+  its ×; Run brings it back.
 - Help → Keyboard Shortcuts lists every key.
 
 **Viewing**
@@ -128,7 +133,8 @@ nothing to install. It speaks SPICE and is checked against ngspice.
 
 | Action | How |
 |---|---|
-| Run | **▶ Run** (`Ctrl+R`) switches the circuit on (everything starts off, as with a real power switch) and watches it for a sensible time: three cycles of the slowest clock or signal, or 10 ms. Waveforms appear below the sheet, each wire is tagged with its final voltage, and overheated parts are marked |
+| Run | **▶ Run** (`Ctrl+R`) switches the circuit on (everything starts off, as with a real power switch) and watches it for a sensible time: three cycles of the slowest clock or signal, or 10 ms; a processor runs until its program ends (the toolbar's Time then reads "until ECALL"). Click Time to choose another length. Waveforms appear below the sheet, each wire is tagged with its final voltage, and overheated parts are marked |
+| Run Live | Keeps the circuit running until you press Stop, so you can operate it as it runs; see below |
 | Operating point | `F9`, or Analyses → Operating Point. Every net is tagged with its voltage; select a part to see the current into each pin and the power it dissipates (or the total for a sub-circuit) |
 | Transient | `F10`, or Analyses → Transient…: the stop time and resolution, and whether to start from power-on or from the steady state (SPICE's usual start) |
 | AC sweep | Analyses → AC Sweep…: gain and phase over frequency (a Bode plot), driven by each source's AC value; a sine source's `ac` parameter is 1 V by default |
@@ -138,6 +144,60 @@ nothing to install. It speaks SPICE and is checked against ngspice.
 | Problems | No ground, nets with no DC path to ground and shorted voltage sources are reported under Problems. A circuit without ground still simulates, as a real one would, against board leakage |
 
 Results go stale when you edit the circuit; run the analysis again to refresh them.
+
+**Running live**
+
+**Run Live** (beside Run) switches the circuit on and keeps it running, like a circuit
+on the bench, until you press Stop. A bar above the sheet shows the simulated time,
+Pause/Resume, Stop and the **speed**: simulated time per real second, from 1 ns/s (to
+watch a fast processor step) up to 2 s/s; 1 s/s is real time. It starts at a speed
+that shows the design's activity. If the circuit needs more computing than a speed
+allows, the bar says so. While it runs, wires show their voltages (or logic values) as
+they change, LEDs light, meters read and the oscilloscope sweeps. Edit the circuit and
+the bar offers Restart.
+
+Parts you can operate (folder `interactive/`):
+
+| Part | What it is | Live |
+|---|---|---|
+| `switch` | Switch (SPST), open or closed | Click it to flip it |
+| `pushbutton` | Closed only while held | Hold the mouse on it |
+| `dial` | Adjustable DC supply between min and max | Drag its knob in Properties |
+| `potentiometer` | A resistor with a sliding tap | Drag its knob in Properties |
+| `toggle` | Logic switch: a steady 0 or 1 | Click it to flip it |
+| `button` | Logic button: 1 while held | Hold the mouse on it |
+| `high`, `low` | Steady logic 1 and 0 | |
+
+Outside a live run, their parameters (closed, pressed, on, value, position) set how
+they start.
+
+**Instruments**
+
+Instruments are parts (folder `instruments/`) with leads that clip onto any wire: drop
+one on the sheet and drag its leads to the wires to measure. They change nothing in
+the circuit except what a real one would.
+
+| Instrument | Use |
+|---|---|
+| `multimeter` | Mode V, A or Ω in Properties. **V**: red lead and COM across a part (10 MΩ input). **A**: in series, in place of a wire (0 Ω): break the wire and put the leads on its ends. **Ω**: across an unpowered part (1 mA test current). The reading shows on the meter on the sheet and in Properties, live or after a run |
+| `oscilloscope` | Four channels, each the voltage at its probe against COM (or ground when COM is left open). The Oscilloscope tab shows the traces with a front panel: channels on and off, volts per division for each, time per division, trigger (channel, level, rising or falling, auto), Run/Stop, Autoscale, and measurements per channel (peak-to-peak, mean, frequency). Live it sweeps continuously; after a Run it shows the recorded run |
+
+**Mixed analog and digital circuits**
+
+A circuit can mix analog parts (resistors, LEDs, transistors, sources) with digital
+ones (gates, counters, processors). The two simulators run together on one timeline:
+where a digital output drives an analog net it becomes a voltage source (0 V or the
+supply, VDD if the design has one, else 5 V) behind 50 Ω, opened when the output is
+undriven; where a digital input reads an analog net, the voltage is read through
+thresholds at 30 % and 70 % of the supply (with hysteresis between them), and the time
+it crosses is found between the analog steps. So a counter can blink an LED through
+a resistor, or a sine wave can clock a counter. Only single wires can join the two
+worlds, not buses.
+
+Parts with both a digital and a transistor-level model (the gates, for instance) run
+digitally in digital and mixed designs and at transistor level in analog ones. To
+choose for one part, select it and set **Simulate as** in Properties: Automatic,
+Digital model (fast), Transistor level (SPICE), or its schematic.
 
 **Logic gates**
 
@@ -170,12 +230,25 @@ The digital parts in the standard library:
 | `memory/` | regfile (32 × 32, x0 is zero), rom (instruction memory), dmem (RISC-V loads and stores) |
 | `riscv/` | immgen, control (the RV32I decoder), halt (ECALL ends the run) |
 | `sources/` | clock (also analog), reset |
+| `interactive/` | toggle, button, high, low (and the analog switch, pushbutton, dial, potentiometer) |
 
-`examples/riscv` is a single-cycle RV32I processor built from these parts on one sheet,
-with its branch unit as a component of its own (a comparator, a multiplexer and gates),
-and a 4-bit adder made from gate-level full adders. Press Run: the program in its
-instruction memory runs until ECALL; the register file and data memory are checked
-against a reference instruction-set simulator in the tests.
+`examples/riscv` is a single-cycle RV32I processor built from these parts on one sheet
+(`cpu`), with its branch unit as a component of its own (a comparator, a multiplexer
+and gates), and a 4-bit adder made from gate-level full adders. Press Run: the program
+in its instruction memory runs until ECALL; the register file and data memory are
+checked against a reference instruction-set simulator in the tests.
+
+`cpu_gates` is the same processor with every block made of logic gates, which you can
+open level by level: the register file is 31 registers of 32 flip-flops, a decoder and
+two trees of multiplexers; each flip-flop is two latches of NAND gates; the ALU is a
+ripple-carry adder of full adders, two barrel shifters and rows of AND, OR and XOR
+gates; the control unit and immediate generator decode the opcode with AND gates. The
+gates themselves open to their CMOS transistors. About 40,000 gates in all; only the
+program ROM and data RAM are memory arrays, as they would be on a chip, and bus parts
+(slice, concat, extend, const) only route bits. Its clock is 2 MHz, since a cycle has
+to cover the gate delays of 32-bit ripple-carry addition; it runs the same programs
+with the same results, though a run takes seconds (in a release build) where `cpu`'s
+takes a fraction of one.
 
 **Programs**
 
@@ -202,9 +275,13 @@ under `programs/`, open it, and press Make Part. Its ports (with their widths) b
 the part's pins, and it runs in the digital simulator from the source file, so editing
 the file changes the part. The synthesizable subset is supported: `assign`,
 `always_comb`, `always_ff @(posedge clk or posedge rst)`, non-blocking assignments,
-`if`/`case`/`casez`, every operator, parameters, `$signed`/`$clog2`. Not yet: module
-instances inside modules, loops, functions. `examples/riscv/programs/control.sv` is the
-processor's control unit in SystemVerilog.
+`if`/`case`/`casez`, every operator, parameters, `$signed`/`$clog2`; instances of other
+modules in the file (connections by name or position, `#(...)` parameters); `for`
+loops in always blocks and `generate for`/`if` (unrolled, so their bounds must be
+constants); and functions, with `return` or by assigning the function's name. A file
+with several modules makes a part of its last one (the top). Not supported: tasks,
+`while`/`repeat`, `initial`, inout ports of instances.
+`examples/riscv/programs/control.sv` is the processor's control unit in SystemVerilog.
 
 **Heat and failure**
 

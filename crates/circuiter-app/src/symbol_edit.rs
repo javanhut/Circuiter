@@ -116,6 +116,7 @@ fn pivot(def: &CellDef, targets: &BTreeSet<Owner>) -> Option<Point> {
     let symbol = def.symbol.as_ref()?;
     let picked = Symbol {
         generated: false,
+        states: Vec::new(),
         graphics: targets
             .iter()
             .filter_map(|t| match t {

@@ -136,8 +136,11 @@ mod tests {
             ports: vec![SchematicPort { port: "a".into(), at: Point::ORIGIN }],
             ..Schematic::default()
         });
-        def.spice =
-            Some(SpiceView { template: "X${inst} ${node.a} ${node.y} buf".into(), models: vec![] });
+        def.spice = Some(SpiceView {
+            template: "X${inst} ${node.a} ${node.y} buf".into(),
+            models: vec![],
+            choose: None,
+        });
         def
     }
 

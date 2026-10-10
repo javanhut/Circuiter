@@ -4,6 +4,15 @@
 use super::*;
 use crate::style::{self, icon, icon_button, toolbar_gap};
 
+/// What the live controls asked for.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum LiveAction {
+    Start,
+    Stop,
+    Pause(bool),
+    Speed(f64),
+}
+
 /// Pixels per millimetre shown as 100 % zoom.
 const ZOOM_100: f32 = 6.0;
 
@@ -66,6 +75,7 @@ impl CircuiterApp {
         let mut prompt = None;
         let mut save = false;
         let mut error = None;
+        let mut live_action = None;
         ui.horizontal(|ui| {
             ui.set_height(40.0);
             ui.spacing_mut().item_spacing.x = 2.0;
@@ -193,13 +203,28 @@ impl CircuiterApp {
                 .on_hover_text("Settings");
                 ui.add_space(6.0);
                 let running = ws.sim.as_ref().is_some_and(|s| s.job.is_some());
-                let (tstop, _) = ws.default_tran();
+                let plan = ws.run_plan();
+                let tstop = plan.tstop;
+                let (text, tip) = if plan.until_halt {
+                    (
+                        "Time: until ECALL".to_owned(),
+                        format!(
+                            "Run goes until the program ends (ECALL), or {} at most. \
+                             Click to run for a set time instead",
+                            show(tstop, "s")
+                        ),
+                    )
+                } else {
+                    (
+                        format!("Time: {}", show(tstop, "s")),
+                        "How long Run watches the circuit. Click to change it".to_owned(),
+                    )
+                };
                 let time = egui::Button::new(
-                    RichText::new(format!("Time: {}  {}", show(tstop, "s"), icon::CARET_DOWN))
-                        .color(p.text),
+                    RichText::new(format!("{text}  {}", icon::CARET_DOWN)).color(p.text),
                 )
                 .min_size(egui::vec2(120.0, 28.0));
-                if ui.add(time).on_hover_text("How long Run watches the circuit").clicked() {
+                if ui.add(time).on_hover_text(tip).clicked() {
                     transient = true;
                 }
                 ui.add_space(4.0);
@@ -264,6 +289,40 @@ impl CircuiterApp {
                 if ui.add_enabled(!running, run).on_hover_text(tip).clicked() {
                     simulate = Some(ws.run_analysis());
                 }
+                ui.add_space(8.0);
+                // Live: the circuit keeps running until stopped, and can be operated.
+                match &ws.live {
+                    Some(_) => {
+                        ui.label(
+                            RichText::new(format!("{}  LIVE", icon::BROADCAST))
+                                .color(p.error)
+                                .strong(),
+                        )
+                        .on_hover_text(
+                            "The circuit is running live: its controls are above the sheet",
+                        );
+                    }
+                    None => {
+                        let live = egui::Button::new(
+                            RichText::new(format!("{}  Run Live", icon::BROADCAST))
+                                .color(p.accent)
+                                .strong(),
+                        )
+                        .stroke(egui::Stroke::new(1.0, p.accent.gamma_multiply(0.6)))
+                        .min_size(egui::vec2(120.0, 28.0));
+                        if ui
+                            .add(live)
+                            .on_hover_text(
+                                "Keep the circuit running until you stop it: flip switches, hold \
+                                 buttons and turn knobs while it runs, and watch the meters and \
+                                 the oscilloscope",
+                            )
+                            .clicked()
+                        {
+                            live_action = Some(LiveAction::Start);
+                        }
+                    }
+                }
             });
         });
         if prompt.is_some() {
@@ -278,6 +337,9 @@ impl CircuiterApp {
         if let Some(a) = simulate {
             self.show_bottom = true;
             self.simulate(a);
+        }
+        if let Some(action) = live_action {
+            self.live_action(action);
         }
         if transient {
             self.transient_prompt();
@@ -630,4 +692,131 @@ fn doc_tab(
         closed |= xr.clicked();
     }
     (r.clicked(), closed)
+}
+
+impl CircuiterApp {
+    pub(super) fn live_action(&mut self, action: LiveAction) {
+        // Programs are read from disk when a run starts.
+        if matches!(action, LiveAction::Start) {
+            self.save_code();
+        }
+        let Some(ws) = &mut self.workspace else { return };
+        match action {
+            LiveAction::Start => {
+                let speed = self
+                    .live_speed
+                    .unwrap_or_else(|| crate::live::default_speed(ws.run_plan().tstop));
+                match ws.start_live(speed) {
+                    Ok(()) => self.show_bottom = true,
+                    Err(e) => self.error = Some(format!("can't run live: {e}")),
+                }
+            }
+            LiveAction::Stop => ws.stop_live(),
+            LiveAction::Pause(p) => {
+                if let Some(live) = &ws.live {
+                    live.send(crate::live::Command::Pause(p));
+                    if let Ok(mut s) = live.shared.lock() {
+                        s.paused = p;
+                    }
+                }
+            }
+            LiveAction::Speed(s) => {
+                self.live_speed = Some(s);
+                if let Some(live) = &ws.live {
+                    live.send(crate::live::Command::Speed(s));
+                }
+            }
+        }
+    }
+}
+
+impl CircuiterApp {
+    /// While running live: a strip above the sheet with the run's controls.
+    pub(super) fn live_bar(&mut self, ui: &mut egui::Ui) {
+        let Some(ws) = &self.workspace else { return };
+        let Some(live) = &ws.live else { return };
+        let p = style::palette(ui);
+        let (time, speed, load, paused) = live
+            .shared
+            .lock()
+            .map(|s| (s.time, s.speed, s.load, s.paused))
+            .unwrap_or((0.0, 1.0, 0.0, false));
+        let stale = ws.revision != ws.live_revision;
+        let mut action = None;
+        ui.horizontal(|ui| {
+            ui.set_height(34.0);
+            ui.add_space(10.0);
+            // A dot that pulses while running.
+            let pulse = if paused {
+                0.4
+            } else {
+                0.55 + 0.45 * ((ui.input(|i| i.time) * 3.0).sin() as f32).abs()
+            };
+            ui.label(RichText::new("●").color(p.error.gamma_multiply(pulse)).size(16.0));
+            ui.label(RichText::new(if paused { "PAUSED" } else { "LIVE" }).strong().color(p.text));
+            ui.add_space(6.0);
+            ui.label(RichText::new(format!("t = {}", show(time, "s"))).monospace().color(p.text))
+                .on_hover_text("Simulated time since the live run started");
+            if load > 1.05 && !paused {
+                ui.label(
+                    RichText::new(format!("{}  can't keep up: slower than set", icon::WARNING))
+                        .color(p.warning),
+                )
+                .on_hover_text(
+                    "The circuit needs more computing than this speed allows; choose a lower speed",
+                );
+            }
+            ui.add_space(8.0);
+            let (glyph, tip) = if paused { (icon::PLAY, "Resume") } else { (icon::PAUSE, "Pause") };
+            if icon_button(ui, glyph, tip, true, paused).clicked() {
+                action = Some(LiveAction::Pause(!paused));
+            }
+            ui.label(RichText::new("Speed").color(p.weak));
+            egui::ComboBox::from_id_salt("live-speed")
+                .selected_text(format!("{}/s", show(speed, "s")))
+                .width(90.0)
+                .show_ui(ui, |ui| {
+                    for s in crate::live::SPEEDS {
+                        let label = format!("{}/s", show(s, "s"));
+                        if ui.selectable_label((s - speed).abs() < s * 1e-6, label).clicked() {
+                            action = Some(LiveAction::Speed(s));
+                        }
+                    }
+                })
+                .response
+                .on_hover_text("Simulated time per real second: 1 s/s is real time");
+            if stale {
+                let restart = egui::Button::new(
+                    RichText::new(format!("{}  Restart with changes", icon::ARROWS_CLOCKWISE))
+                        .color(p.warning),
+                );
+                if ui
+                    .add(restart)
+                    .on_hover_text("The design changed since the run started")
+                    .clicked()
+                {
+                    action = Some(LiveAction::Start);
+                }
+            }
+            style::trailing(ui, |ui| {
+                ui.add_space(10.0);
+                let stop = egui::Button::new(
+                    RichText::new(format!("{}  Stop Live", icon::STOP)).color(p.error).strong(),
+                );
+                if ui.add(stop).clicked() {
+                    action = Some(LiveAction::Stop);
+                }
+                ui.add(
+                    egui::Label::new(
+                        RichText::new("Click switches · hold buttons · knobs in Properties")
+                            .color(p.weak),
+                    )
+                    .truncate(),
+                );
+            });
+        });
+        if let Some(a) = action {
+            self.live_action(a);
+        }
+    }
 }

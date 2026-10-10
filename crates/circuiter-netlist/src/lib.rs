@@ -112,6 +112,61 @@ impl Netlist {
         Ok(b.finish())
     }
 
+    /// Flattens a design with both analog and digital parts: parts with a digital view
+    /// become [`DigitalElement`]s (unless an instance asks for its SPICE or schematic
+    /// view), the rest SPICE elements, all sharing one set of nets. Where the two meet,
+    /// the simulators join through converters (see the app's co-simulation).
+    pub fn build_mixed(design: &Design, top: &CellId) -> Result<Netlist, String> {
+        let def = design.cell(top).ok_or_else(|| format!("cell {top} not found"))?;
+        if def.schematic.is_none() {
+            return Err(format!("{top} has no schematic to simulate"));
+        }
+        let mut b = Builder::new(design, top);
+        b.mixed = true;
+        b.sheet(top, def, "", 0, &BTreeMap::new(), &mut vec![top.clone()]);
+        Ok(b.finish())
+    }
+
+    /// Whether the design needs both simulators: some part can only run digitally (or
+    /// is set to), and some part only in the analog simulator.
+    pub fn is_mixed(design: &Design, top: &CellId) -> bool {
+        fn walk(design: &Design, id: &CellId, depth: usize, found: &mut (bool, bool)) {
+            let Some(s) = design.cell(id).and_then(|d| d.schematic.as_ref()) else { return };
+            for inst in &s.instances {
+                let Some((child_id, child)) = design.resolve(&inst.cell, &id.library) else {
+                    continue;
+                };
+                if child.cell.global_net.is_some() {
+                    continue;
+                }
+                let digital_only = child.digital.is_some()
+                    && (inst.view == Some(ViewKind::Digital)
+                        || (child.spice.is_none() && child.schematic.is_none()));
+                if digital_only {
+                    found.0 = true;
+                    continue;
+                }
+                match pick_digital(child, inst.view) {
+                    Some(ViewKind::Schematic) if depth < 64 => {
+                        walk(design, &child_id, depth + 1, found)
+                    }
+                    Some(ViewKind::Spice) | None => found.1 = true,
+                    Some(ViewKind::Digital) if inst.view == Some(ViewKind::Spice) => found.1 = true,
+                    _ => {}
+                }
+                if inst.view == Some(ViewKind::Spice) {
+                    found.1 = true;
+                }
+            }
+        }
+        if Netlist::is_digital(design, top) {
+            return false;
+        }
+        let mut found = (false, false);
+        walk(design, top, 0, &mut found);
+        found.0 && found.1
+    }
+
     /// Whether every part of the design under `top` can run in the digital simulator.
     pub fn is_digital(design: &Design, top: &CellId) -> bool {
         fn walk(design: &Design, id: &CellId, depth: usize) -> Option<bool> {
@@ -206,6 +261,10 @@ struct Builder<'a> {
     hidden: BTreeSet<(String, String)>,
     /// Flattening for the digital simulator.
     digital: bool,
+    /// Flattening for both simulators together.
+    mixed: bool,
+    /// Instruments, whose spare probes may hang free.
+    probes: BTreeSet<String>,
     digital_elements: Vec<PendingDigital>,
     /// The width of each port's net, as (net, width), for every element.
     widths: Vec<(usize, u32)>,
@@ -260,6 +319,8 @@ impl<'a> Builder<'a> {
                 .collect(),
             hidden: BTreeSet::new(),
             digital: false,
+            mixed: false,
+            probes: BTreeSet::new(),
             digital_elements: Vec::new(),
             widths: Vec::new(),
         };
@@ -373,13 +434,13 @@ impl<'a> Builder<'a> {
                     self.hidden.insert((inst_path.clone(), port.name.clone()));
                 }
             }
-            let view = if self.digital {
+            let view = if self.digital || self.mixed {
                 pick_digital(child, inst.view)
             } else {
                 self.design.select_view(child, inst.view)
             };
             match view {
-                Some(ViewKind::Digital) if self.digital => {
+                Some(ViewKind::Digital) if self.digital || self.mixed => {
                     self.digital_element(&inst_path, &child_id, child, inst, &pins)
                 }
                 Some(ViewKind::Spice) if self.digital => self.report(
@@ -483,6 +544,9 @@ impl<'a> Builder<'a> {
     ) {
         let spice = def.spice.as_ref().expect("caller checked the view");
         let inst_name = spice_name(path);
+        if def.cell.probe {
+            self.probes.insert(path.to_owned());
+        }
         // A pin with no symbol pin (or none at all) still needs a node; give it its own.
         let mut ports = Vec::new();
         for port in &def.cell.ports {
@@ -547,7 +611,29 @@ impl<'a> Builder<'a> {
 
         let node_of = |port: &str| ports.iter().find(|(p, _)| p == port).map(|(_, n)| *n);
         let mut parts = Vec::new();
-        let segments = match parse_template(&spice.template) {
+        // A template chosen by a parameter (a multimeter's mode), or the one template.
+        let template = match &spice.choose {
+            Some(choose) => {
+                let value = inst
+                    .params
+                    .get(&choose.param)
+                    .cloned()
+                    .or_else(|| def.cell.param(&choose.param)?.default.clone())
+                    .unwrap_or_default();
+                match choose.templates.get(value.trim()) {
+                    Some(t) => t.clone(),
+                    None => {
+                        self.report(
+                            Severity::Error,
+                            format!("{path}: {} `{value}` isn't one of its settings", choose.param),
+                        );
+                        return;
+                    }
+                }
+            }
+            None => spice.template.clone(),
+        };
+        let segments = match parse_template(&template) {
             Ok(s) => s,
             Err(e) => {
                 self.report(Severity::Error, format!("{path}: {e}"));
@@ -749,6 +835,9 @@ impl<'a> Builder<'a> {
         }
         for net in nets.iter().skip(1) {
             if let [(path, port)] = net.pins.as_slice() {
+                if self.probes.contains(path) {
+                    continue;
+                }
                 let msg = format!("net {} reaches only one pin, {path} {port}", net.name);
                 self.report(Severity::Warning, msg);
             }

@@ -129,6 +129,7 @@ fn subcircuit(
         ports: ports.iter().map(|p| Port::new(p, PortKind::Passive)).collect(),
         params,
         global_net: None,
+        probe: false,
         physics: None,
     };
     let symbol = builder::generate(name, &cell);
@@ -142,7 +143,7 @@ fn subcircuit(
         cell,
         symbol: Some(symbol),
         schematic: None,
-        spice: Some(SpiceView { template, models: vec![lines.join("\n")] }),
+        spice: Some(SpiceView { template, models: vec![lines.join("\n")], choose: None }),
         digital: None,
     };
     Ok((def, trial))
@@ -187,7 +188,7 @@ fn device(
         cell,
         symbol: std.symbol.clone(),
         schematic: None,
-        spice: Some(SpiceView { template: template.to_owned(), models: vec![card] }),
+        spice: Some(SpiceView { template: template.to_owned(), models: vec![card], choose: None }),
         digital: None,
     };
     Ok((def, format!("{trial_line}\n{text}")))

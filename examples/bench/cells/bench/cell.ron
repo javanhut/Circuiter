@@ -1,0 +1,5 @@
+(
+    description: "Run it live: turn VS and RV1, flip SW1 and EN, hold BTN, and watch the meters, the LEDs and the oscilloscope",
+    prefix: "X",
+    ports: [],
+)

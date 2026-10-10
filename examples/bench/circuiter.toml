@@ -1,0 +1,4 @@
+[project]
+name = "bench"
+top = "bench"
+description = "An electronics bench: run it live and operate switches, knobs and buttons while meters and an oscilloscope watch"

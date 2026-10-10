@@ -1,0 +1,10 @@
+(
+    template: "",
+    choose: (
+        param: "closed",
+        templates: {
+            "false": "R${inst} ${node.a} ${node.b} 1g",
+            "true": "R${inst} ${node.a} ${node.b} 0.05",
+        },
+    ),
+)

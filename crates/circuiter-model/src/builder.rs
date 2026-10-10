@@ -185,7 +185,7 @@ pub fn generate(name: &str, cell: &Cell) -> Symbol {
         text(place(&top, 5, y0 - TEXT_SIZE), "${name}"),
         text(place(&bottom, name.chars().count() as i64, y1 + TEXT_SIZE), name),
     ];
-    Symbol { generated: true, graphics, pins }
+    Symbol { generated: true, graphics, pins, states: Vec::new() }
 }
 
 /// Whether `def`'s symbol was made by [`generate`] and not edited since.

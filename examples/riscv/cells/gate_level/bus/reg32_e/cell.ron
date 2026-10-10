@@ -1,0 +1,10 @@
+(
+    description: "32-bit register of flip-flops, loaded at a clock edge while en is high",
+    prefix: "REG",
+    ports: [
+        (name: "d", kind: Input, width: 32),
+        (name: "clk", kind: Input, description: "Clock"),
+        (name: "en", kind: Input, description: "Enable"),
+        (name: "q", kind: Output, width: 32),
+    ],
+)

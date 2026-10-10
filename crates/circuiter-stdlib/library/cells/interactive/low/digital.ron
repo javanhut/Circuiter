@@ -1,0 +1,4 @@
+(
+    model: "const",
+    params: {"value": "0"},
+)

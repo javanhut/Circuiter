@@ -1,6 +1,7 @@
 //! Writes the example RISC-V processor project: a single-cycle RV32I CPU built from the
 //! standard library's digital parts, with a branch unit and a gate-level adder as
-//! components of its own.
+//! components of its own; and the same processor with every block made of logic gates
+//! (`cpu_gates`, see `common/gate_level.rs`).
 //!
 //! ```text
 //! cargo run -p circuiter-stdlib --example riscv_cpu -- examples/riscv
@@ -9,82 +10,20 @@
 //! Each pin gets a short wire ending in a net label; same-named labels are connected.
 
 use circuiter_model::builder;
-use circuiter_model::cell::{Cell, CellDef, CellRef, Port, PortKind};
-use circuiter_model::geom::{Length, Point, Rotation, Transform};
-use circuiter_model::schematic::{Instance, NetLabel, Schematic, SchematicPort, Wire};
-use circuiter_model::symbol::PinDirection;
+use circuiter_model::cell::{Cell, CellDef, Port, PortKind};
+use circuiter_model::geom::Point;
+use circuiter_model::schematic::{NetLabel, Schematic, SchematicPort, Wire};
 use circuiter_model::{Design, Library, Project};
 use std::path::PathBuf;
 
-const GRID: f64 = 2.54;
 const PROJECT: &str = "riscv";
 
-struct Sheet<'a> {
-    design: &'a Design,
-    s: Schematic,
-}
+#[path = "common/sheet.rs"]
+mod sheet;
+use sheet::{GRID, Sheet};
 
-impl<'a> Sheet<'a> {
-    fn new(design: &'a Design) -> Self {
-        Sheet { design, s: Schematic::default() }
-    }
-
-    fn cell(&self, cell: &str) -> (CellRef, &'a CellDef) {
-        let r: CellRef = cell.parse().expect("cell reference");
-        let (_, def) = self.design.resolve(&r, PROJECT).unwrap_or_else(|| panic!("no cell {cell}"));
-        (r, def)
-    }
-
-    /// Places `cell` with its top-left corner near (x, y) in grid steps.
-    fn part(&mut self, cell: &str, name: &str, x: i64, y: i64, params: &[(&str, &str)]) -> usize {
-        let (r, def) = self.cell(cell);
-        let sym = def.symbol.as_ref().unwrap_or_else(|| panic!("{cell} has no symbol"));
-        // Shift so the symbol's top-left pin row starts at (x, y).
-        let top = sym.pins.iter().map(|p| p.at.y.nm()).min().unwrap_or(0);
-        let left = sym.pins.iter().map(|p| p.at.x.nm()).min().unwrap_or(0);
-        let g = Length::from_mm(GRID).nm();
-        let at = Point::new(Length(x * g - left), Length(y * g - top));
-        self.s.instances.push(Instance {
-            name: name.into(),
-            cell: r,
-            placement: Transform { position: at, rotation: Rotation::R0, mirror: false },
-            params: params.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
-            view: None,
-        });
-        self.s.instances.len() - 1
-    }
-
-    /// Where a pin is and which way is out of the part.
-    fn pin(&self, inst: usize, port: &str) -> (Point, (i64, i64)) {
-        let i = &self.s.instances[inst];
-        let (_, def) = self.cell(&i.cell.to_string());
-        let p = def.symbol.as_ref().unwrap().pins.iter().find(|p| p.port == port);
-        let p = p.unwrap_or_else(|| panic!("{} has no pin {port}", i.name));
-        let out = match p.direction {
-            PinDirection::Left => (1, 0),
-            PinDirection::Right => (-1, 0),
-            PinDirection::Up => (0, 1),
-            PinDirection::Down => (0, -1),
-        };
-        (i.placement.apply(p.at), out)
-    }
-
-    fn stub(&mut self, inst: usize, port: &str, steps: i64) -> Point {
-        let (at, (dx, dy)) = self.pin(inst, port);
-        let g = Length::from_mm(GRID).nm() * steps;
-        let end = Point::new(Length(at.x.nm() + dx * g), Length(at.y.nm() + dy * g));
-        self.s.wires.push(Wire { points: vec![at, end] });
-        end
-    }
-
-    /// Connects pins to nets by name: `[("a", "pc"), …]`.
-    fn nets(&mut self, inst: usize, pairs: &[(&str, &str)]) {
-        for (port, net) in pairs {
-            let end = self.stub(inst, port, 2);
-            self.s.labels.push(NetLabel { net: net.to_string(), at: end });
-        }
-    }
-}
+#[path = "common/gate_level.rs"]
+mod gate_level;
 
 /// The cell's ports in a column at the left of its sheet, each on a short wire ending
 /// in a label for the net inside: `(port, net)`.
@@ -127,7 +66,7 @@ fn add(design: &mut Design, def: CellDef) {
 }
 
 fn full_adder(design: &Design) -> CellDef {
-    let mut sh = Sheet::new(design);
+    let mut sh = Sheet::new(design, PROJECT);
     let x1 = sh.part("std:xor", "X1", 0, 0, &[]);
     let x2 = sh.part("std:xor", "X2", 18, 0, &[]);
     let a1 = sh.part("std:and", "A1", 0, 12, &[]);
@@ -155,7 +94,7 @@ fn full_adder(design: &Design) -> CellDef {
 }
 
 fn adder4(design: &Design) -> CellDef {
-    let mut sh = Sheet::new(design);
+    let mut sh = Sheet::new(design, PROJECT);
     let mut col = 0;
     for bit in 0..4 {
         let sa = sh.part(
@@ -207,7 +146,7 @@ fn adder4(design: &Design) -> CellDef {
 }
 
 fn adder4_test(design: &Design) -> CellDef {
-    let mut sh = Sheet::new(design);
+    let mut sh = Sheet::new(design, PROJECT);
     let ka = sh.part("std:const", "KA", 0, 0, &[("width", "4"), ("value", "5")]);
     let kb = sh.part("std:const", "KB", 0, 8, &[("width", "4"), ("value", "6")]);
     let kc = sh.part("std:const", "KC", 0, 16, &[("width", "1"), ("value", "0")]);
@@ -228,7 +167,7 @@ fn adder4_test(design: &Design) -> CellDef {
 }
 
 fn branch_unit(design: &Design) -> CellDef {
-    let mut sh = Sheet::new(design);
+    let mut sh = Sheet::new(design, PROJECT);
     let cmp = sh.part("std:compare", "CMP", 0, 0, &[("width", "32")]);
     let n1 = sh.part("std:not", "N1", 28, 0, &[]);
     let n2 = sh.part("std:not", "N2", 28, 8, &[]);
@@ -288,7 +227,7 @@ fn branch_unit(design: &Design) -> CellDef {
 }
 
 fn cpu(design: &Design) -> CellDef {
-    let mut sh = Sheet::new(design);
+    let mut sh = Sheet::new(design, PROJECT);
     let prog = "programs/fib.s";
     // Column 1: clock, reset, program counter.
     let clk = sh.part("std:clock", "CLK", 0, 0, &[("frequency", "20meg")]);
@@ -444,16 +383,24 @@ fn main() {
     add(&mut design, bu);
     let c = cpu(&design);
     add(&mut design, c);
-
-    let mut library = design.library(PROJECT).expect("project").clone();
-    for (name, folder) in [
+    let mut folders: Vec<(String, &str)> = [
         ("full_adder", "arithmetic"),
         ("adder4", "arithmetic"),
         ("adder4_test", "arithmetic"),
         ("branch_unit", "cpu"),
         ("cpu", "cpu"),
-    ] {
-        library.cells.get_mut(name).expect("made").folder = folder.into();
+    ]
+    .map(|(n, f)| (n.to_owned(), f))
+    .into();
+    for (make, folder) in gate_level::cells() {
+        let def = make(&design);
+        folders.push((def.name.clone(), folder));
+        add(&mut design, def);
+    }
+
+    let mut library = design.library(PROJECT).expect("project").clone();
+    for (name, folder) in folders {
+        library.cells.get_mut(&name).expect("made").folder = folder.into();
     }
     let manifest_path = dir.join(circuiter_model::project::MANIFEST_FILE);
     let project = if manifest_path.is_file() {

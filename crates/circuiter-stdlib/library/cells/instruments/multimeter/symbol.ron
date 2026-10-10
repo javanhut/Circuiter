@@ -1,0 +1,13 @@
+(
+    graphics: [
+        Rect(a: (-5.08, -10.16), b: (5.08, 2.54)),
+        Rect(a: (-3.81, -8.89), b: (3.81, -4.572)),
+        Circle(center: (0.0, -1.524), radius: 1.524),
+        Text(at: (0.0, -1.524), text: "${param.mode}", anchor: Center),
+        Text(at: (0.0, -11.43), text: "${name}", anchor: Center),
+    ],
+    pins: [
+        (port: "p", at: (-2.54, 5.08), direction: Up),
+        (port: "com", at: (2.54, 5.08), direction: Up),
+    ],
+)

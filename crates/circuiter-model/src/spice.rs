@@ -21,6 +21,17 @@ pub struct SpiceView {
     /// are emitted once per distinct expansion.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<String>,
+    /// A template that depends on a parameter's value instead: a multimeter is a
+    /// resistor, a zero-volt source or a current source depending on its mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choose: Option<Choose>,
+}
+
+/// Templates by the value of one parameter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Choose {
+    pub param: String,
+    pub templates: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

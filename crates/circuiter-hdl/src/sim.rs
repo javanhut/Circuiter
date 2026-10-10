@@ -3,9 +3,15 @@
 //! clocked blocks (non-blocking assignments take effect together) as a part of the
 //! digital simulator.
 
-use crate::parse::{Dir, Expr, HdlError, Item, LValue, Module, Stmt, err};
+use crate::parse::{Connection, Dir, Expr, Function, HdlError, Item, LValue, Module, Stmt, err};
 use circuiter_logic::{Eval, PortSpec, Primitive, Time, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+
+/// How deep instances may nest (a module containing itself would never end).
+const MAX_DEPTH: usize = 32;
+/// How many times a loop may run when it's unrolled.
+const MAX_ITERATIONS: i64 = 4096;
 
 #[derive(Debug, Clone)]
 struct Signal {
@@ -37,6 +43,18 @@ enum Kind {
     Cast(Box<CExpr>),
     /// `'0`, `'1`, `'x`: every bit of the context.
     Fill(char),
+    /// A call of one of the module's functions, with its arguments.
+    Func(Arc<CFunc>, Vec<CExpr>),
+}
+
+/// A compiled function. It runs on values of its own: its result, inputs and locals.
+#[derive(Debug)]
+struct CFunc {
+    widths: Vec<u32>,
+    /// Slot, width.
+    inputs: Vec<(usize, u32)>,
+    result: usize,
+    body: CStmt,
 }
 
 #[derive(Debug, Clone)]
@@ -64,6 +82,8 @@ enum CStmt {
     Assign(CLValue, CExpr, bool),
     If(CExpr, Box<CStmt>, Option<Box<CStmt>>),
     Case(CExpr, Vec<(Vec<CExpr>, CStmt)>, Option<Box<CStmt>>, bool),
+    /// A function's result, and the end of it.
+    Return(CLValue, CExpr),
     Null,
 }
 
@@ -71,14 +91,46 @@ fn mask(w: u32) -> u64 {
     if w >= 64 { u64::MAX } else { (1 << w) - 1 }
 }
 
-struct Compiler<'m> {
-    module: &'m Module,
-    params: BTreeMap<String, i64>,
-    signals: Vec<Signal>,
-    names: BTreeMap<String, usize>,
+/// What a module (with everything inside it) compiles to: continuous assignments,
+/// combinational blocks, and clocked blocks with their edges.
+#[derive(Default)]
+struct Body {
+    assigns: Vec<(CLValue, CExpr)>,
+    combs: Vec<CStmt>,
+    seqs: Vec<(Vec<(bool, usize)>, CStmt)>,
 }
 
-impl Compiler<'_> {
+struct Compiler<'m> {
+    /// Every module in the file, for instances.
+    modules: &'m [Module],
+    module: &'m Module,
+    params: BTreeMap<String, i64>,
+    /// Signals of the whole design: instances add theirs to their parent's.
+    signals: Vec<Signal>,
+    names: BTreeMap<String, usize>,
+    /// Names declared in the current scope (each pass of a generate loop has one).
+    scope: BTreeSet<String>,
+    functions: BTreeMap<String, Arc<CFunc>>,
+    /// Inside a function: where `return` puts its result.
+    result: Option<usize>,
+    depth: usize,
+}
+
+impl<'m> Compiler<'m> {
+    fn new(modules: &'m [Module], module: &'m Module, signals: Vec<Signal>, depth: usize) -> Self {
+        Compiler {
+            modules,
+            module,
+            params: BTreeMap::new(),
+            signals,
+            names: BTreeMap::new(),
+            scope: BTreeSet::new(),
+            functions: BTreeMap::new(),
+            result: None,
+            depth,
+        }
+    }
+
     fn constant(&self, e: &Expr) -> Result<i64, HdlError> {
         let line = expr_line(e).unwrap_or(self.module.line);
         let c = self.expr(e)?;
@@ -112,15 +164,16 @@ impl Compiler<'_> {
         signed: bool,
         line: usize,
     ) -> Result<usize, HdlError> {
-        if let Some(&k) = self.names.get(name) {
+        if let Some(&k) = self.names.get(name).filter(|_| self.scope.contains(name)) {
             // A port declared again in the body (`output reg q; reg q;`) is the same signal.
             return Ok(k);
         }
-        if self.params.contains_key(name) {
+        if self.params.contains_key(name) && self.scope.contains(name) {
             return err(line, format!("`{name}` is already a parameter"));
         }
         self.signals.push(Signal { width, signed });
         self.names.insert(name.to_owned(), self.signals.len() - 1);
+        self.scope.insert(name.to_owned());
         Ok(self.signals.len() - 1)
     }
 
@@ -246,7 +299,34 @@ impl Compiler<'_> {
                 }
                 _ => return err(*line, format!("`${name}` isn't supported")),
             },
+            Expr::Apply(name, args, line) => {
+                let Some(f) = self.functions.get(name) else {
+                    return err(*line, format!("there's no function `{name}`"));
+                };
+                if args.len() != f.inputs.len() {
+                    return err(
+                        *line,
+                        format!(
+                            "`{name}` takes {} argument(s), not {}",
+                            f.inputs.len(),
+                            args.len()
+                        ),
+                    );
+                }
+                let args = args.iter().map(|a| self.expr(a)).collect::<Result<_, _>>()?;
+                let width = f.widths[f.result];
+                let signed = self.function_signed(name);
+                CExpr { kind: Kind::Func(f.clone(), args), width, signed }
+            }
         })
+    }
+
+    /// Whether function `name` returns a signed value.
+    fn function_signed(&self, name: &str) -> bool {
+        self.module
+            .items
+            .iter()
+            .any(|i| matches!(i, Item::Function(f) if f.name == name && f.signed))
     }
 
     fn lvalue(&self, l: &LValue) -> Result<CLValue, HdlError> {
@@ -281,7 +361,7 @@ impl Compiler<'_> {
         })
     }
 
-    fn stmt(&self, s: &Stmt) -> Result<CStmt, HdlError> {
+    fn stmt(&mut self, s: &Stmt) -> Result<CStmt, HdlError> {
         Ok(match s {
             Stmt::Block(v) => {
                 CStmt::Block(v.iter().map(|s| self.stmt(s)).collect::<Result<_, _>>()?)
@@ -307,14 +387,267 @@ impl Compiler<'_> {
                 default.as_ref().map(|d| self.stmt(d)).transpose()?.map(Box::new),
                 *wild,
             ),
+            Stmt::For { var, init, cond, step, body, line } => {
+                let mut out = Vec::new();
+                self.unroll(var, init, cond, step, *line, |c| {
+                    out.push(c.stmt(body)?);
+                    Ok(())
+                })?;
+                CStmt::Block(out)
+            }
+            Stmt::Return(e, line) => {
+                let Some(r) = self.result else {
+                    return err(*line, "`return` is only allowed inside a function");
+                };
+                let w = self.signals[r].width;
+                CStmt::Return(CLValue::Part(r, 0, w), self.expr(e)?)
+            }
             Stmt::Null => CStmt::Null,
         })
     }
+
+    /// Runs `each` once for every value of a loop variable, bound as a constant.
+    fn unroll(
+        &mut self,
+        var: &str,
+        init: &Expr,
+        cond: &Expr,
+        step: &Expr,
+        line: usize,
+        mut each: impl FnMut(&mut Self) -> Result<(), HdlError>,
+    ) -> Result<(), HdlError> {
+        let constant = |c: &Self, e: &Expr| {
+            c.constant(e).map_err(|_| HdlError {
+                line,
+                message: "a loop's start, end and step must be constants".into(),
+            })
+        };
+        let saved = self.params.get(var).copied();
+        let mut v = constant(self, init)?;
+        let mut n = 0;
+        let result = loop {
+            self.params.insert(var.to_owned(), v);
+            match constant(self, cond) {
+                Ok(0) => break Ok(()),
+                Ok(_) => {}
+                Err(e) => break Err(e),
+            }
+            if let Err(e) = each(self) {
+                break Err(e);
+            }
+            match constant(self, step) {
+                Ok(next) => v = next,
+                Err(e) => break Err(e),
+            }
+            n += 1;
+            if n > MAX_ITERATIONS {
+                break err(line, format!("the loop runs more than {MAX_ITERATIONS} times"));
+            }
+        };
+        match saved {
+            Some(s) => self.params.insert(var.to_owned(), s),
+            None => self.params.remove(var),
+        };
+        result
+    }
+
+    /// The module's items: parameters, declarations and functions first, so items may
+    /// use names declared after them; then everything else.
+    fn items(&mut self, items: &[Item], body: &mut Body) -> Result<(), HdlError> {
+        for item in items {
+            match item {
+                Item::Param(n, e) => {
+                    let v = self.constant(e)?;
+                    self.params.insert(n.clone(), v);
+                }
+                Item::Decl { names, range, signed, line, .. } => {
+                    let w = self.width(range, *line)?;
+                    for n in names {
+                        self.declare(n, w, *signed, *line)?;
+                    }
+                }
+                Item::Function(f) => self.function(f)?,
+                _ => {}
+            }
+        }
+        for item in items {
+            match item {
+                Item::Decl { names, init: Some(e), line, .. } => {
+                    for n in names {
+                        let lhs = self.lvalue(&LValue::Var(n.clone(), *line))?;
+                        body.assigns.push((lhs, self.expr(e)?));
+                    }
+                }
+                Item::Assign(l, e, _) => body.assigns.push((self.lvalue(l)?, self.expr(e)?)),
+                Item::Comb(s) => body.combs.push(self.stmt(s)?),
+                Item::Seq(edges, s) => {
+                    let mut bound = Vec::new();
+                    for (rising, name) in edges {
+                        let k = self.names.get(name).copied().ok_or(HdlError {
+                            line: self.module.line,
+                            message: format!("`{name}` isn't declared"),
+                        })?;
+                        bound.push((*rising, k));
+                    }
+                    body.seqs.push((bound, self.stmt(s)?));
+                }
+                Item::Instance { module, params, name, conns, line } => {
+                    self.instance(module, params, name, conns, *line, body)?;
+                }
+                Item::GenFor { var, init, cond, step, items, line } => {
+                    self.unroll(var, init, cond, step, *line, |c| c.scoped(items, body))?;
+                }
+                Item::GenIf(cond, then, other) => {
+                    let pick = if self.constant(cond)? != 0 { then } else { other };
+                    self.scoped(pick, body)?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Items in a scope of their own: what they declare is gone after them.
+    fn scoped(&mut self, items: &[Item], body: &mut Body) -> Result<(), HdlError> {
+        let names = self.names.clone();
+        let scope = std::mem::take(&mut self.scope);
+        let functions = self.functions.clone();
+        let result = self.items(items, body);
+        self.names = names;
+        self.scope = scope;
+        self.functions = functions;
+        result
+    }
+
+    /// Compiles a function. It sees the module's parameters and the functions declared
+    /// before it, and runs on values of its own.
+    fn function(&mut self, f: &Function) -> Result<(), HdlError> {
+        let mut c = Compiler::new(self.modules, self.module, Vec::new(), self.depth);
+        c.params = self.params.clone();
+        c.functions = self.functions.clone();
+        let w = c.width(&f.range, f.line)?;
+        let result = c.declare(&f.name, w, f.signed, f.line)?;
+        let mut inputs = Vec::new();
+        for (n, r, s) in &f.inputs {
+            let w = c.width(r, f.line)?;
+            inputs.push((c.declare(n, w, *s, f.line)?, w));
+        }
+        for (n, r, s) in &f.locals {
+            let w = c.width(r, f.line)?;
+            c.declare(n, w, *s, f.line)?;
+        }
+        c.result = Some(result);
+        let body = c.stmt(&f.body)?;
+        let widths = c.signals.iter().map(|s| s.width).collect();
+        self.functions.insert(f.name.clone(), Arc::new(CFunc { widths, inputs, result, body }));
+        Ok(())
+    }
+
+    /// An instance of another module: compiled into this one, its ports joined to the
+    /// connections by continuous assignments.
+    fn instance(
+        &mut self,
+        module: &str,
+        params: &[(Option<String>, Expr)],
+        name: &str,
+        conns: &[Connection],
+        line: usize,
+        body: &mut Body,
+    ) -> Result<(), HdlError> {
+        if self.depth >= MAX_DEPTH {
+            return err(
+                line,
+                format!(
+                    "instances nest more than {MAX_DEPTH} deep: does `{module}` contain itself?"
+                ),
+            );
+        }
+        let Some(m) = self.modules.iter().find(|m| m.name == module) else {
+            return err(line, format!("there's no module `{module}` in this file"));
+        };
+        let mut overrides = BTreeMap::new();
+        for (k, (n, e)) in params.iter().enumerate() {
+            let p = match n {
+                Some(n) if m.params.iter().any(|(p, _)| p == n) => n.clone(),
+                Some(n) => return err(line, format!("`{module}` has no parameter `{n}`")),
+                None => match m.params.get(k) {
+                    Some((p, _)) => p.clone(),
+                    None => return err(line, format!("`{module}` has fewer parameters")),
+                },
+            };
+            overrides.insert(p, self.constant(e)?);
+        }
+        let signals = std::mem::take(&mut self.signals);
+        let child = compile(self.modules, m, &overrides, signals, self.depth + 1, body)?;
+        self.signals = child.signals;
+        for (k, (n, e)) in conns.iter().enumerate() {
+            let port = match n {
+                Some(n) => m.ports.iter().find(|p| p.name == *n),
+                None => m.ports.get(k),
+            };
+            let Some(port) = port else {
+                return match n {
+                    Some(n) => err(line, format!("`{module}` has no port `{n}`")),
+                    None => err(
+                        line,
+                        format!("`{name}` has more connections than `{module}` has ports"),
+                    ),
+                };
+            };
+            let Some(e) = e else { continue };
+            let slot = child.names[&port.name];
+            let s = &self.signals[slot];
+            let inner = CExpr { kind: Kind::Sig(slot), width: s.width, signed: s.signed };
+            match port.dir {
+                Dir::Input => body.assigns.push((CLValue::Part(slot, 0, s.width), self.expr(e)?)),
+                Dir::Output => {
+                    let Some(l) = to_lvalue(e) else {
+                        return err(
+                            line,
+                            format!(
+                                "output `{}` of `{name}` must go to a signal, a bit, a part \
+                                 or a concatenation of them",
+                                port.name
+                            ),
+                        );
+                    };
+                    body.assigns.push((self.lvalue(&l)?, inner));
+                }
+                Dir::Inout => {
+                    return err(
+                        line,
+                        format!(
+                            "`{}` of `{name}`: inout ports of instances aren't supported",
+                            port.name
+                        ),
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// What an output port connects to, as something it can be assigned to.
+fn to_lvalue(e: &Expr) -> Option<LValue> {
+    Some(match e {
+        Expr::Ident(n, line) => LValue::Var(n.clone(), *line),
+        Expr::Index(a, i) => match &**a {
+            Expr::Ident(n, line) => LValue::Bit(n.clone(), (**i).clone(), *line),
+            _ => return None,
+        },
+        Expr::Slice(a, m, l) => match &**a {
+            Expr::Ident(n, line) => LValue::Part(n.clone(), (**m).clone(), (**l).clone(), *line),
+            _ => return None,
+        },
+        Expr::Concat(parts) => LValue::Concat(parts.iter().map(to_lvalue).collect::<Option<_>>()?),
+        _ => return None,
+    })
 }
 
 fn expr_line(e: &Expr) -> Option<usize> {
     match e {
-        Expr::Ident(_, l) | Expr::Call(_, _, l) => Some(*l),
+        Expr::Ident(_, l) | Expr::Call(_, _, l) | Expr::Apply(_, _, l) => Some(*l),
         Expr::Index(a, _) | Expr::Slice(a, ..) | Expr::IndexedPart(a, ..) | Expr::Unary(_, a) => {
             expr_line(a)
         }
@@ -344,7 +677,10 @@ fn eval(e: &CExpr, values: &[Value], ctx: u32) -> Value {
     let w = e.width.max(ctx).min(64);
     match &e.kind {
         Kind::Const(v) => extend(*v, w, e.signed),
-        Kind::Sig(k) => extend(values[*k].as_input(), w, e.signed),
+        // No values: working out a constant, which a signal isn't.
+        Kind::Sig(k) => {
+            values.get(*k).map_or(Value::unknown(w), |v| extend(v.as_input(), w, e.signed))
+        }
         Kind::Index(a, i) => {
             let v = eval(a, values, a.width);
             match eval(i, values, i.width).known() {
@@ -388,6 +724,14 @@ fn eval(e: &CExpr, values: &[Value], ctx: u32) -> Value {
             }
         }
         Kind::Binary(op, a, b) => binary(op, a, b, values, w),
+        Kind::Func(f, args) => {
+            let mut local: Vec<Value> = f.widths.iter().map(|&w| Value::unknown(w)).collect();
+            for (&(slot, iw), a) in f.inputs.iter().zip(args) {
+                local[slot] = eval(a, values, iw).resize(iw);
+            }
+            run(&f.body, &mut local, &mut Vec::new());
+            extend(local[f.result], w, e.signed)
+        }
         Kind::Ternary(c, a, b) => {
             let cv = eval(c, values, c.width);
             match logical(cv) {
@@ -578,19 +922,28 @@ fn put(old: Value, lo: u32, v: Value) -> Value {
     Value::from_planes(w, (ob & !m) | sh(vb), (ox & !m) | sh(vx), (oz & !m) | sh(vz))
 }
 
-fn run(s: &CStmt, values: &mut [Value], writes: &mut Vec<(usize, u32, Value)>) {
+/// Runs a statement; true if it reached a `return`.
+fn run(s: &CStmt, values: &mut [Value], writes: &mut Vec<(usize, u32, Value)>) -> bool {
     match s {
-        CStmt::Block(v) => v.iter().for_each(|s| run(s, values, writes)),
+        CStmt::Block(v) => v.iter().any(|s| run(s, values, writes)),
         CStmt::Assign(lhs, rhs, nonblocking) => {
             let v = eval(rhs, values, lhs.width());
             store(lhs, v, values, writes, *nonblocking);
+            false
+        }
+        CStmt::Return(lhs, rhs) => {
+            let v = eval(rhs, values, lhs.width());
+            store(lhs, v, values, writes, false);
+            true
         }
         CStmt::If(c, a, b) => {
             // An unknown condition takes the else branch, as Verilog does.
             if logical(eval(c, values, c.width)) == Some(true) {
-                run(a, values, writes);
+                run(a, values, writes)
             } else if let Some(b) = b {
-                run(b, values, writes);
+                run(b, values, writes)
+            } else {
+                false
             }
         }
         CStmt::Case(subject, arms, default, wild) => {
@@ -606,16 +959,13 @@ fn run(s: &CStmt, values: &mut [Value], writes: &mut Vec<(usize, u32, Value)>) {
                         s.is_known() && s == lv
                     };
                     if hit {
-                        run(body, values, writes);
-                        return;
+                        return run(body, values, writes);
                     }
                 }
             }
-            if let Some(d) = default {
-                run(d, values, writes);
-            }
+            default.as_ref().is_some_and(|d| run(d, values, writes))
         }
-        CStmt::Null => {}
+        CStmt::Null => false,
     }
 }
 
@@ -670,40 +1020,51 @@ impl Primitive for HdlPart {
                 self.values[self.slots[p]] = cx.raw(p);
             }
         }
-        // Clocked blocks whose edge just came, all seeing the values from before.
-        let mut writes = Vec::new();
-        let snapshot = self.values.clone();
-        for (k, (edges, body)) in self.seqs.iter().enumerate() {
-            let mut fire = false;
-            for (e, (rising, slot)) in edges.iter().enumerate() {
-                let (was, now) =
-                    (self.last_edges[k][e].known(), snapshot[*slot].as_input().known());
-                if (*rising && was == Some(0) && now == Some(1))
-                    || (!*rising && was == Some(1) && now == Some(0))
-                {
-                    fire = true;
+        // The inputs through to everything they feed: a clock reaches the flip-flops of
+        // instances inside through their ports.
+        self.settle();
+        // Clocked blocks whose edge just came, all seeing the values from before. A
+        // clock made inside (a divider) can bring more edges: those come next round.
+        for _ in 0..64 {
+            let mut writes = Vec::new();
+            let snapshot = self.values.clone();
+            let mut any = false;
+            for (k, (edges, body)) in self.seqs.iter().enumerate() {
+                let mut fire = false;
+                for (e, (rising, slot)) in edges.iter().enumerate() {
+                    let (was, now) =
+                        (self.last_edges[k][e].known(), snapshot[*slot].as_input().known());
+                    if (*rising && was == Some(0) && now == Some(1))
+                        || (!*rising && was == Some(1) && now == Some(0))
+                    {
+                        fire = true;
+                    }
+                    self.last_edges[k][e] = snapshot[*slot].as_input();
                 }
-                self.last_edges[k][e] = snapshot[*slot].as_input();
-            }
-            if fire {
-                let mut values = snapshot.clone();
-                run(body, &mut values, &mut writes);
-                // Blocking assignments inside clocked blocks take effect too.
-                for (slot, (new, old)) in values.iter().zip(&snapshot).enumerate() {
-                    if new != old {
-                        writes.push((slot, 0, *new));
+                if fire {
+                    any = true;
+                    let mut values = snapshot.clone();
+                    run(body, &mut values, &mut writes);
+                    // Blocking assignments inside clocked blocks take effect too.
+                    for (slot, (new, old)) in values.iter().zip(&snapshot).enumerate() {
+                        if new != old {
+                            writes.push((slot, 0, *new));
+                        }
                     }
                 }
             }
+            if !any {
+                break;
+            }
+            for (k, lo, v) in writes {
+                self.values[k] = if lo == 0 && v.width() == self.values[k].width() {
+                    v
+                } else {
+                    put(self.values[k], lo, v)
+                };
+            }
+            self.settle();
         }
-        for (k, lo, v) in writes {
-            self.values[k] = if lo == 0 && v.width() == self.values[k].width() {
-                v
-            } else {
-                put(self.values[k], lo, v)
-            };
-        }
-        self.settle();
         for (p, spec) in self.ports.iter().enumerate() {
             if spec.dir == circuiter_logic::Dir::In {
                 continue;
@@ -733,27 +1094,20 @@ fn pick<'a>(modules: &'a [Module], name: Option<&str>) -> Result<&'a Module, Str
     }
 }
 
-/// A compiled module: its names and signals, continuous assignments, combinational
-/// blocks, and clocked blocks with their edges.
-type Compiled<'m> =
-    (Compiler<'m>, Vec<(CLValue, CExpr)>, Vec<CStmt>, Vec<(Vec<(bool, usize)>, CStmt)>);
-
+/// Compiles `module` with the given parameter values into `body`, adding its signals
+/// to `signals`; returns the compiler, which holds its names.
 fn compile<'m>(
+    modules: &'m [Module],
     module: &'m Module,
-    overrides: &BTreeMap<String, String>,
-) -> Result<Compiled<'m>, HdlError> {
-    let mut c =
-        Compiler { module, params: BTreeMap::new(), signals: Vec::new(), names: BTreeMap::new() };
+    overrides: &BTreeMap<String, i64>,
+    signals: Vec<Signal>,
+    depth: usize,
+    body: &mut Body,
+) -> Result<Compiler<'m>, HdlError> {
+    let mut c = Compiler::new(modules, module, signals, depth);
     for (name, default) in &module.params {
         let v = match overrides.get(name) {
-            Some(text) => text
-                .trim()
-                .parse::<i64>()
-                .or_else(|_| i64::from_str_radix(text.trim().trim_start_matches("0x"), 16))
-                .map_err(|_| HdlError {
-                    line: module.line,
-                    message: format!("parameter {name}: `{text}` isn't a number"),
-                })?,
+            Some(&v) => v,
             None => c.constant(default)?,
         };
         c.params.insert(name.clone(), v);
@@ -762,50 +1116,42 @@ fn compile<'m>(
         let w = c.width(&p.range, p.line)?;
         c.declare(&p.name, w, p.signed, p.line)?;
     }
-    let mut assigns = Vec::new();
-    let mut combs = Vec::new();
-    let mut seqs = Vec::new();
-    // Declarations and parameters first, so items may use names declared later.
-    for item in &module.items {
-        match item {
-            Item::Param(n, e) => {
-                let v = c.constant(e)?;
-                c.params.insert(n.clone(), v);
-            }
-            Item::Decl { names, range, signed, line, .. } => {
-                let w = c.width(range, *line)?;
-                for n in names {
-                    c.declare(n, w, *signed, *line)?;
-                }
-            }
-            _ => {}
+    c.items(&module.items, body)?;
+    Ok(c)
+}
+
+/// Parameter values given as text, for the module's own parameters.
+fn parse_overrides(
+    module: &Module,
+    given: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, i64>, String> {
+    let mut out = BTreeMap::new();
+    for (name, _) in &module.params {
+        if let Some(text) = given.get(name) {
+            let t = text.trim();
+            let v = t
+                .parse::<i64>()
+                .or_else(|_| i64::from_str_radix(t.trim_start_matches("0x"), 16))
+                .map_err(|_| {
+                    format!("line {}: parameter {name}: `{text}` isn't a number", module.line)
+                })?;
+            out.insert(name.clone(), v);
         }
     }
-    for item in &module.items {
-        match item {
-            Item::Decl { names, init: Some(e), line, .. } => {
-                for n in names {
-                    let lhs = c.lvalue(&LValue::Var(n.clone(), *line))?;
-                    assigns.push((lhs, c.expr(e)?));
-                }
-            }
-            Item::Assign(l, e, _) => assigns.push((c.lvalue(l)?, c.expr(e)?)),
-            Item::Comb(s) => combs.push(c.stmt(s)?),
-            Item::Seq(edges, s) => {
-                let mut bound = Vec::new();
-                for (rising, name) in edges {
-                    let k = c.names.get(name).copied().ok_or(HdlError {
-                        line: module.line,
-                        message: format!("`{name}` isn't declared"),
-                    })?;
-                    bound.push((*rising, k));
-                }
-                seqs.push((bound, c.stmt(s)?));
-            }
-            _ => {}
-        }
-    }
-    Ok((c, assigns, combs, seqs))
+    Ok(out)
+}
+
+/// Compiles the top module `name` (or the file's last one).
+fn top<'m>(
+    modules: &'m [Module],
+    name: Option<&str>,
+    params: &BTreeMap<String, String>,
+) -> Result<(Compiler<'m>, Body), String> {
+    let m = pick(modules, name)?;
+    let overrides = parse_overrides(m, params)?;
+    let mut body = Body::default();
+    let c = compile(modules, m, &overrides, Vec::new(), 0, &mut body).map_err(|e| e.to_string())?;
+    Ok((c, body))
 }
 
 /// The ports of module `name` (or the file's only module), with widths for the given
@@ -816,8 +1162,8 @@ pub fn interface(
     params: &BTreeMap<String, String>,
 ) -> Result<Vec<PortInfo>, String> {
     let modules = crate::parse::modules(src).map_err(|e| e.to_string())?;
-    let m = pick(&modules, name)?;
-    let (c, ..) = compile(m, params).map_err(|e| e.to_string())?;
+    let (c, _) = top(&modules, name, params)?;
+    let m = c.module;
     Ok(m.ports
         .iter()
         .map(|p| PortInfo {
@@ -836,8 +1182,8 @@ pub fn create(
     delay: Time,
 ) -> Result<Box<dyn Primitive>, String> {
     let modules = crate::parse::modules(src).map_err(|e| e.to_string())?;
-    let m = pick(&modules, name)?;
-    let (c, assigns, combs, seqs) = compile(m, params).map_err(|e| e.to_string())?;
+    let (c, Body { assigns, combs, seqs }) = top(&modules, name, params)?;
+    let m = c.module;
     let mut ports = Vec::new();
     let mut slots = Vec::new();
     for p in &m.ports {

@@ -1,0 +1,16 @@
+(
+    description: "One-bit eight-way multiplexer: a tree of seven two-way ones",
+    prefix: "MUX",
+    ports: [
+        (name: "d0", kind: Input),
+        (name: "d1", kind: Input),
+        (name: "d2", kind: Input),
+        (name: "d3", kind: Input),
+        (name: "d4", kind: Input),
+        (name: "d5", kind: Input),
+        (name: "d6", kind: Input),
+        (name: "d7", kind: Input),
+        (name: "sel", kind: Input, description: "Which input", width: 3),
+        (name: "y", kind: Output),
+    ],
+)

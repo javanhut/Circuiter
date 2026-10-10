@@ -464,6 +464,50 @@ fn rising(last: &mut Value, now: Value) -> bool {
     rose
 }
 
+/// A value set from outside the simulation: a switch, a button, or an analog level
+/// read into the digital world. Change it with the handle, then
+/// [`crate::Simulator::poke`] the element.
+#[derive(Debug)]
+pub struct Input {
+    ports: Vec<PortSpec>,
+    value: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Bit planes are packed as value bits, with all-ones meaning unknown.
+    last: Option<u64>,
+}
+
+/// The unknown marker for [`Input`] values.
+pub const INPUT_UNKNOWN: u64 = u64::MAX;
+
+impl Input {
+    /// An input `width` bits wide starting at `initial` ([`INPUT_UNKNOWN`] for X), and
+    /// the handle that sets it.
+    pub fn with_handle(
+        width: u32,
+        initial: u64,
+    ) -> (Box<dyn Primitive>, std::sync::Arc<std::sync::atomic::AtomicU64>) {
+        let value = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(initial));
+        let part =
+            Input { ports: vec![PortSpec::output("y", width)], value: value.clone(), last: None };
+        (Box::new(part), value)
+    }
+}
+
+impl Primitive for Input {
+    fn ports(&self) -> &[PortSpec] {
+        &self.ports
+    }
+
+    fn eval(&mut self, cx: &mut Eval<'_>) {
+        let v = self.value.load(std::sync::atomic::Ordering::Relaxed);
+        if self.last != Some(v) {
+            self.last = Some(v);
+            let w = self.ports[0].width;
+            let value = if v == INPUT_UNKNOWN { Value::unknown(w) } else { Value::new(w, v) };
+            cx.drive(0, value, 0);
+        }
+    }
+}
+
 #[derive(Debug)]
 struct Const {
     ports: Vec<PortSpec>,

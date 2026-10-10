@@ -1,0 +1,5 @@
+(
+    description: "The single-cycle RV32I processor with every block made of logic gates (about 40,000 of them, flip-flops included); only the program ROM and data RAM are arrays. Slower to simulate than cpu, and its clock is 2 MHz: a cycle must cover the ripple-carry adders\' gate delays",
+    prefix: "CPU",
+    ports: [],
+)

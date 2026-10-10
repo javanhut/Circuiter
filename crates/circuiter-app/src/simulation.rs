@@ -60,6 +60,14 @@ pub enum Results {
     },
     /// A run of the digital simulator.
     Logic(LogicRun),
+    /// Both simulators together: the analog side's waveforms and the digital side's
+    /// history.
+    Mixed {
+        result: TranResult,
+        logic: LogicRun,
+        tstop: f64,
+        tstep: f64,
+    },
 }
 
 #[derive(Debug)]
@@ -85,6 +93,8 @@ pub struct Simulation {
     pub assessments: Vec<Assessment>,
     /// Every part is digital: this runs in the digital simulator.
     pub digital: bool,
+    /// Analog and digital parts together: both simulators, joined.
+    pub mixed: bool,
     /// The project directory, where programs for memories are found.
     pub root: PathBuf,
 }
@@ -129,13 +139,31 @@ impl Simulation {
                 monitor: None,
                 assessments: Vec::new(),
                 digital: true,
+                mixed: false,
                 root: root.to_path_buf(),
             });
         }
-        let netlist = Netlist::build(design, top)?;
+        let mixed = Netlist::is_mixed(design, top);
+        let netlist =
+            if mixed { Netlist::build_mixed(design, top)? } else { Netlist::build(design, top)? };
         let mut diagnostics = netlist.diagnostics.clone();
         let location = format!("{top}/simulation");
-        let circuit = Circuit::parse(&netlist.to_spice()).map_err(|e| format!("netlist: {e}"))?;
+        let mut circuit = None;
+        if mixed && !diagnostics.iter().any(|d| d.severity == Severity::Error) {
+            // The analog half with its converters, built now so problems show early.
+            match crate::cosim::prepare(&netlist, root, &[]) {
+                Ok(p) => circuit = Some(p.circuit),
+                Err(message) => diagnostics.push(Diagnostic {
+                    severity: Severity::Error,
+                    location: location.clone(),
+                    message,
+                }),
+            }
+        }
+        let circuit = match circuit {
+            Some(c) => c,
+            None => Circuit::parse(&netlist.to_spice()).map_err(|e| format!("netlist: {e}"))?,
+        };
         for problem in circuit.topology_problems() {
             let message = match problem {
                 Problem::Floating { nodes } => {
@@ -180,17 +208,35 @@ impl Simulation {
             monitor: None,
             assessments: Vec::new(),
             digital: false,
+            mixed,
             root: root.to_path_buf(),
         })
     }
 
-    /// A sensible run: (stop time, step) in seconds.
-    pub fn default_run(&self) -> (f64, f64) {
-        if self.digital {
-            let t = digital::default_stop(&self.netlist);
-            (t, t / 1000.0)
-        } else {
-            default_tran(&self.circuit)
+    /// What multimeter `m` reads at the operating point, or at the end of a run.
+    pub fn meter(&self, m: &crate::live::Meter) -> Option<crate::live::Reading> {
+        let volts = |net: usize| match &self.results {
+            Some(Results::Op(_)) => self.voltage(net),
+            _ => self.waveform(net).and_then(|(_, v)| v.last().copied()),
+        };
+        let amps = |name: &str| match &self.results {
+            Some(Results::Op(op)) => op.device(name).and_then(|d| d.currents.first().copied()),
+            Some(Results::Tran { result, .. } | Results::Mixed { result, .. }) => {
+                result.current(&self.circuit, name).and_then(|c| c.last().copied())
+            }
+            _ => None,
+        };
+        m.read(&volts, &amps)
+    }
+
+    /// The digital history of flat net `net`, after a digital or mixed run.
+    #[cfg(test)]
+    pub fn logic(&self, net: usize) -> Option<&[(circuiter_logic::Time, circuiter_logic::Value)]> {
+        match &self.results {
+            Some(Results::Logic(run) | Results::Mixed { logic: run, .. }) => {
+                run.history.get(net).map(Vec::as_slice)
+            }
+            _ => None,
         }
     }
 
@@ -209,6 +255,8 @@ impl Simulation {
         }
         let outcome = if self.digital {
             execute_digital(&self.netlist, &self.root, analysis, &Control::default())
+        } else if self.mixed {
+            execute_mixed(&self.netlist, &self.root, analysis, Options::default())
         } else {
             execute(&self.circuit, &self.netlist, analysis, Options::default())
         };
@@ -228,10 +276,13 @@ impl Simulation {
         let circuit = self.circuit.clone();
         let netlist = self.netlist.clone();
         let (tx, rx) = channel();
-        let (is_digital, root, c) = (self.digital, self.root.clone(), control.clone());
+        let (is_digital, is_mixed, root, c) =
+            (self.digital, self.mixed, self.root.clone(), control.clone());
         std::thread::spawn(move || {
             let outcome = if is_digital {
                 execute_digital(&netlist, &root, analysis, &c)
+            } else if is_mixed {
+                execute_mixed(&netlist, &root, analysis, options)
             } else {
                 execute(&circuit, &netlist, analysis, options)
             };
@@ -325,7 +376,7 @@ impl Simulation {
     /// The waveform of flat net `net`.
     pub fn waveform(&self, net: usize) -> Option<(&[f64], Vec<f64>)> {
         match &self.results {
-            Some(Results::Tran { result, .. }) => {
+            Some(Results::Tran { result, .. } | Results::Mixed { result, .. }) => {
                 let node = &self.netlist.nets.get(net)?.node;
                 Some((&result.time, result.voltage(&self.circuit, node)?))
             }
@@ -370,6 +421,75 @@ impl Simulation {
         }
         Some(total)
     }
+}
+
+/// What Run will do: how long, how finely, and whether the design ends the run itself
+/// (a processor's ECALL) before then.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RunPlan {
+    pub tstop: f64,
+    pub tstep: f64,
+    pub until_halt: bool,
+}
+
+/// The run plan for `top`, from its netlist alone: nothing is built or compiled, so this
+/// is cheap enough to show in the toolbar.
+pub fn plan(design: &Design, top: &CellId) -> Option<RunPlan> {
+    if Netlist::is_digital(design, top) {
+        let n = Netlist::build_digital(design, top).ok()?;
+        let tstop = digital::default_stop(&n);
+        let until_halt = n.digital.iter().any(|e| e.model == "stop");
+        return Some(RunPlan { tstop, tstep: tstop / 1000.0, until_halt });
+    }
+    let mixed = Netlist::is_mixed(design, top);
+    let n = if mixed {
+        Netlist::build_mixed(design, top).ok()?
+    } else {
+        Netlist::build(design, top).ok()?
+    };
+    let circuit = Circuit::parse(&n.to_spice()).ok()?;
+    let (tstop, tstep) = if mixed { mixed_run(&circuit, &n) } else { default_tran(&circuit) };
+    Some(RunPlan { tstop, tstep, until_halt: false })
+}
+
+/// How long and how finely to run a mixed design: three periods of the slowest analog
+/// source, or 64 cycles of the slowest clock, whichever is longer.
+fn mixed_run(circuit: &Circuit, netlist: &Netlist) -> (f64, f64) {
+    let (ta, sa) = default_tran(circuit);
+    let clocks = digital::clock_periods(netlist);
+    match clocks.iter().copied().reduce(f64::max) {
+        Some(slow) => {
+            let fast = clocks.iter().copied().fold(f64::INFINITY, f64::min);
+            let periodic = circuit.devices.iter().any(|d| {
+                matches!(&d.element, circuiter_sim::Element::Vsource { source, .. } if source.spec.tran.is_some())
+            });
+            let tstop = if periodic { ta.max(64.0 * slow) } else { 64.0 * slow };
+            (tstop, sa.min(fast / 20.0).min(tstop / 500.0))
+        }
+        None => (ta, sa),
+    }
+}
+
+/// A mixed run: the analog transient with the digital simulator joined to it.
+fn execute_mixed(netlist: &Netlist, root: &Path, analysis: Analysis, o: Options) -> Outcome {
+    let prepared = crate::cosim::prepare(netlist, root, &[])?;
+    let (tstop, tstep, power_on) = match analysis {
+        Analysis::Tran { tstop, tstep, power_on } => (tstop, tstep, power_on),
+        _ => {
+            let (a, b) = mixed_run(&prepared.circuit, netlist);
+            (a, b, true)
+        }
+    };
+    let crate::cosim::Prepared { circuit, inputs, mut cosim, .. } = prepared;
+    cosim.monitor = Monitor::new(netlist, &circuit, AMBIENT).ok();
+    let o = Options { power_on, inputs: Some(inputs), ..o };
+    let mut run = circuiter_sim::Transient::start(&circuit, tstep, tstop, &o, &mut cosim)
+        .map_err(|e| e.message)?;
+    run.advance(tstop, &mut cosim).map_err(|e| e.message)?;
+    let end = run.time();
+    let logic = cosim.logic_run(tstop, end);
+    let monitor = cosim.monitor.take();
+    Ok((Results::Mixed { result: run.result, logic, tstop, tstep }, monitor))
 }
 
 /// A digital run: any analysis means "run for a while" (a transient run's stop time,
@@ -436,13 +556,23 @@ fn element_path(netlist: &Netlist, element: &str) -> Option<String> {
 }
 
 /// Named top-level nets, which are usually the ones worth plotting first.
-fn default_probes(netlist: &Netlist) -> Vec<usize> {
+pub fn default_probes(netlist: &Netlist) -> Vec<usize> {
+    // Constants are flat lines: not worth a lane.
+    let constant: std::collections::BTreeSet<usize> = netlist
+        .digital
+        .iter()
+        .filter(|e| e.model == "const")
+        .flat_map(|e| e.ports.iter().map(|(_, n)| *n))
+        .collect();
+    // In an all-digital design VDD is only a constant 1.
+    let all_digital = netlist.elements.is_empty() && !netlist.digital.is_empty();
     netlist
         .nets
         .iter()
         .enumerate()
         .skip(1)
         .filter(|(_, n)| !n.name.contains('$') && !n.name.contains('.'))
+        .filter(|(i, n)| !constant.contains(i) && !(all_digital && n.name == "VDD"))
         .map(|(i, _)| i)
         .take(6)
         .collect()
@@ -676,6 +806,7 @@ mod digital_tests {
     use super::*;
     use circuiter_model::Project;
     use circuiter_riscv::iss;
+    use std::collections::BTreeSet;
 
     fn riscv() -> (Design, PathBuf) {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/riscv");
@@ -686,8 +817,13 @@ mod digital_tests {
 
     /// Runs the example processor on `program` and returns its run.
     fn run_cpu(program: &str) -> (LogicRun, Simulation) {
+        run_processor("cpu", program)
+    }
+
+    /// Runs processor `cell` of the example on `program`.
+    fn run_processor(cell: &str, program: &str) -> (LogicRun, Simulation) {
         let (mut design, root) = riscv();
-        let cpu = CellId::new("riscv", "cpu");
+        let cpu = CellId::new("riscv", cell);
         let def = design.cell_mut(&cpu).unwrap();
         for inst in def.schematic.as_mut().unwrap().instances.iter_mut() {
             if inst.name == "IMEM" || inst.name == "DMEM" {
@@ -738,6 +874,38 @@ mod digital_tests {
         assert!(run.history[pc].len() > 50);
     }
 
+    /// The processor made of gates: no part in it is more than a gate, a flip-flop's
+    /// NAND latch, wiring or a memory array, and it runs the program as the reference does.
+    #[test]
+    fn the_gate_level_cpu_runs_like_the_reference() {
+        let (run, sim) = run_processor("cpu_gates", "programs/fib.s");
+        assert!(sim.diagnostics.is_empty(), "{:#?}", sim.diagnostics);
+        let models: BTreeSet<&str> = sim.netlist.digital.iter().map(|e| e.model.as_str()).collect();
+        let allowed = [
+            "not", "and", "or", "nand", "xor", // gates
+            "slice", "concat", "extend", "const", // wiring
+            "rom", "dmem", // memories
+            "clock", "pulse", "stop", // clock, reset and the end of the program
+        ];
+        assert!(models.iter().all(|m| allowed.contains(m)), "{models:?}");
+        let gates = sim.netlist.digital.iter().filter(|e| e.model == "nand").count();
+        assert_eq!(gates, 8 * (31 * 32 + 32), "NAND latches of every flip-flop");
+        assert!(run.halted, "the program ran to its ECALL");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/riscv");
+        let p = crate::digital::load_program(&root.join("programs/fib.s")).unwrap();
+        let mut golden = iss::Cpu::new(&p, 1024);
+        golden.run(1_000_000).unwrap();
+        for k in 1..32 {
+            let net = sim.netlist.net(&format!("RF.x{k}")).unwrap_or_else(|| panic!("x{k}"));
+            match run.last(net).and_then(|v| v.known()) {
+                Some(v) => assert_eq!(v as u32, golden.regs[k], "x{k}"),
+                None => assert_eq!(golden.regs[k], 0, "x{k} unwritten on the gates"),
+            }
+        }
+        let fib: Vec<u64> = run.memories["DMEM"][..12].iter().map(|v| v.known().unwrap()).collect();
+        assert_eq!(fib, [0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89]);
+    }
+
     #[test]
     fn the_cpu_runs_c() {
         if std::process::Command::new("clang").arg("--version").output().is_err() {
@@ -747,9 +915,22 @@ mod digital_tests {
         check_against_iss("programs/sum.c", 285);
     }
 
+    /// The first build compiles Rust's `core` for RV32I (several seconds); later ones
+    /// reuse it.
     #[test]
-    #[ignore = "builds Rust's core for RV32I the first time (slow)"]
     fn the_cpu_runs_rust() {
+        let sysroot = std::process::Command::new("rustc").args(["--print", "sysroot"]).output();
+        let Ok(out) = sysroot else {
+            eprintln!("rustc isn't installed; skipping");
+            return;
+        };
+        let lib = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()).join("lib/rustlib");
+        let usable = lib.join("riscv32i-unknown-none-elf").is_dir()
+            || lib.join("src/rust/library/core").is_dir();
+        if !usable {
+            eprintln!("neither the riscv32i target nor Rust's sources are installed; skipping");
+            return;
+        }
         check_against_iss("programs/collatz.rs", 111);
     }
 }
@@ -811,5 +992,163 @@ mod hdl_tests {
         assert_eq!(run.memories["RF"][10].known(), Some(89));
         let fib: Vec<u64> = run.memories["DMEM"][..12].iter().map(|v| v.known().unwrap()).collect();
         assert_eq!(fib, [0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89]);
+    }
+}
+
+/// Building sheets in tests: parts placed apart, each pin on a short wire ending in a
+/// label for its net.
+#[cfg(test)]
+pub mod sheet_builder {
+    use circuiter_model::geom::{Length, Point, Rotation, Transform};
+    use circuiter_model::schematic::{Instance, NetLabel, Schematic, Wire};
+    use circuiter_model::symbol::PinDirection;
+    use circuiter_model::{CellDef, CellId, Design, Library};
+
+    /// `(name, cell, params, [(port, net)])` for each part.
+    pub type Part<'a> = (&'a str, &'a str, &'a [(&'a str, &'a str)], &'a [(&'a str, &'a str)]);
+
+    /// A design with the standard library and a project `t` whose cell `top` holds
+    /// `parts`.
+    pub fn design(parts: &[Part<'_>]) -> (Design, CellId) {
+        let mut design = Design::new();
+        design.add_library(circuiter_stdlib::library()).unwrap();
+        design.add_library(Library::new("t")).unwrap();
+        let mut s = Schematic::default();
+        for (k, (name, cell, params, nets)) in parts.iter().enumerate() {
+            let r: circuiter_model::CellRef = cell.parse().unwrap();
+            let def = design.resolve(&r, "t").unwrap().1.clone();
+            let at = Point::mm(100.0 * k as f64, 0.0);
+            let placement = Transform { position: at, rotation: Rotation::R0, mirror: false };
+            let inst = Instance {
+                name: name.to_string(),
+                cell: r,
+                placement,
+                params: params.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect(),
+                view: None,
+            };
+            let sym = def.symbol.as_ref().unwrap();
+            for (port, net) in nets.iter() {
+                let pin = sym.pins.iter().find(|p| p.port == *port).unwrap();
+                let (dx, dy) = match pin.direction {
+                    PinDirection::Left => (1, 0),
+                    PinDirection::Right => (-1, 0),
+                    PinDirection::Up => (0, 1),
+                    PinDirection::Down => (0, -1),
+                };
+                let p = placement.apply(pin.at);
+                let g = Length::from_mm(5.08).nm();
+                let end = Point::new(Length(p.x.nm() + dx * g), Length(p.y.nm() + dy * g));
+                s.wires.push(Wire { points: vec![p, end] });
+                s.labels.push(NetLabel { net: net.to_string(), at: end });
+            }
+            s.instances.push(inst);
+        }
+        let top = CellDef { name: "top".into(), schematic: Some(s), ..CellDef::default() };
+        design.library_mut("t").unwrap().insert(top);
+        (design, CellId::new("t", "top"))
+    }
+}
+
+#[cfg(test)]
+mod mixed_tests {
+    use super::sheet_builder::design;
+    use super::*;
+
+    fn run(design: &Design, top: &CellId, tstop: f64, tstep: f64) -> Simulation {
+        let mut sim = Simulation::prepare_in(design, top, Path::new(".")).unwrap();
+        assert!(sim.mixed, "both simulators");
+        assert!(!sim.has_errors(), "{:#?}", sim.diagnostics);
+        sim.run(Analysis::Tran { tstop, tstep, power_on: true });
+        assert_eq!(sim.error, None);
+        sim
+    }
+
+    /// A digital counter lights an LED through a resistor: digital into analog.
+    #[test]
+    fn a_counter_blinks_an_led() {
+        let (d, top) = design(&[
+            ("CLK", "std:clock", &[("frequency", "1k")], &[("p", "clk"), ("n", "GND")]),
+            ("K1", "std:const", &[("value", "1")], &[("y", "one")]),
+            // Reset synchronously: across the first clock edge, at 0.5 ms.
+            ("RST", "std:reset", &[("length", "600u")], &[("rst", "rst")]),
+            (
+                "CNT",
+                "std:counter",
+                &[("width", "1")],
+                &[("clk", "clk"), ("rst", "rst"), ("en", "one"), ("q", "drive")],
+            ),
+            ("R1", "std:resistor", &[("R", "220")], &[("a", "drive"), ("b", "anode")]),
+            ("D1", "std:led", &[], &[("a", "anode"), ("k", "GND")]),
+        ]);
+        let sim = run(&d, &top, 6e-3, 10e-6);
+        let Some(Results::Mixed { result, logic, .. }) = &sim.results else { panic!() };
+        // The counter starts unknown: it never resets here, so give it a clean start.
+        let _ = logic;
+        let anode = sim.netlist.net("anode").unwrap();
+        let (t, v) = sim.waveform(anode).unwrap();
+        let drive = sim.netlist.net("drive").unwrap();
+        let q = |time: f64| {
+            let h = sim.logic(drive).unwrap();
+            let i = h.partition_point(|(ht, _)| circuiter_logic::seconds(*ht) <= time);
+            h[i.saturating_sub(1)].1.known()
+        };
+        // Wherever the counter's output is known and has settled, the LED follows it.
+        let mut lit = 0;
+        let mut dark = 0;
+        for (time, volts) in t.iter().zip(&v) {
+            match q(*time - 50e-6).zip(q(*time)) {
+                Some((1, 1)) => {
+                    assert!(*volts > 1.6, "{time}: LED on, {volts} V");
+                    lit += 1;
+                }
+                Some((0, 0)) => {
+                    assert!(*volts < 0.5, "{time}: LED off, {volts} V");
+                    dark += 1;
+                }
+                _ => {}
+            }
+        }
+        let _ = result;
+        assert!(lit > 10 && dark > 10, "it blinked: {lit} lit, {dark} dark");
+    }
+
+    /// A sine wave clocks a counter through a gate: analog into digital.
+    #[test]
+    fn a_sine_wave_clocks_a_counter() {
+        let (d, top) = design(&[
+            (
+                "V1",
+                "std:vsine",
+                &[("offset", "2.5"), ("amplitude", "2.5"), ("frequency", "1k")],
+                &[("p", "sine"), ("n", "GND")],
+            ),
+            ("U1", "std:not", &[], &[("a", "sine"), ("y", "edge")]),
+            ("RST", "std:reset", &[("length", "700u")], &[("rst", "rst")]),
+            ("K1", "std:const", &[("value", "1")], &[("y", "one")]),
+            (
+                "CNT",
+                "std:counter",
+                &[("width", "8")],
+                &[("clk", "edge"), ("rst", "rst"), ("en", "one"), ("q", "count")],
+            ),
+        ]);
+        let sim = run(&d, &top, 5.2e-3, 5e-6);
+        let Some(Results::Mixed { logic, .. }) = &sim.results else { panic!() };
+        let count = sim.netlist.net("count").unwrap();
+        // The inverter rises as the sine falls through 30 % of 5 V (1.5 V), once a
+        // cycle: at 0.566, 1.566, … 4.566 ms. The first edge resets the counter (the
+        // reset lasts 0.7 ms); the next four count.
+        assert_eq!(logic.last(count).and_then(|v| v.known()), Some(4));
+        let edge = sim.netlist.net("edge").unwrap();
+        let h = &logic.history[edge];
+        let first_rise = h
+            .windows(2)
+            .find(|w| w[0].1.known() == Some(0) && w[1].1.known() == Some(1))
+            .map(|w| w[1].0)
+            .unwrap();
+        let pi = std::f64::consts::PI;
+        let expect = (pi + 0.4f64.asin()) / (2.0 * pi) * 1e-3 + 1e-9;
+        let got = circuiter_logic::seconds(first_rise);
+        assert!((got - expect).abs() < 5e-6, "rose at {got}, expected {expect}");
     }
 }

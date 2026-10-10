@@ -1,0 +1,5 @@
+(
+    description: "Logic 1: a steady high level",
+    prefix: "K",
+    ports: [(name: "y", kind: Output)],
+)

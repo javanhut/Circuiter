@@ -1,0 +1,11 @@
+(
+    graphics: [
+        Rect(a: (-3.81, -1.905), b: (2.54, 1.905)),
+        Text(at: (-0.635, -3.302), text: "${name}", anchor: Center),
+    ],
+    pins: [(port: "y", at: (5.08, 0.0), direction: Left)],
+    states: [
+        (when: "pressed=false", graphics: [Text(at: (-0.635, 0.0), text: "0", anchor: Center)]),
+        (when: "pressed=true", graphics: [Text(at: (-0.635, 0.0), text: "1", anchor: Center)]),
+    ],
+)

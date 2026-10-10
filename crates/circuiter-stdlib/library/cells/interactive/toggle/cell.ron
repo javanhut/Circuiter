@@ -1,0 +1,6 @@
+(
+    description: "Logic switch: a steady 0 or 1. While the circuit runs live, click it to flip it",
+    prefix: "SW",
+    ports: [(name: "y", kind: Output, description: "0 or 1")],
+    params: [(name: "on", kind: Bool, default: "false", description: "On (output 1)")],
+)

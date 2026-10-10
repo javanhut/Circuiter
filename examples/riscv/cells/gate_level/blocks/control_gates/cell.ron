@@ -1,0 +1,17 @@
+(
+    description: "Control unit from gates: the opcode decoded by AND gates into the instruction\'s kind, and the control signals ORed from the kinds",
+    prefix: "CTRL",
+    ports: [
+        (name: "instr", kind: Input, width: 32),
+        (name: "reg_write", kind: Output),
+        (name: "alu_a", kind: Output, description: "0 rs1, 1 pc, 2 zero", width: 2),
+        (name: "alu_b", kind: Output, description: "0 rs2, 1 imm"),
+        (name: "alu_op", kind: Output, width: 4),
+        (name: "mem_write", kind: Output),
+        (name: "wb_sel", kind: Output, description: "0 ALU, 1 memory, 2 pc + 4", width: 2),
+        (name: "branch", kind: Output),
+        (name: "jump", kind: Output),
+        (name: "jalr", kind: Output),
+        (name: "halt", kind: Output, description: "ECALL"),
+    ],
+)

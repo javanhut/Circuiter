@@ -122,3 +122,48 @@ fn power_on_starts_with_everything_off() {
         assert!((got - expected).abs() < 0.02, "t = {t}: {got} vs {expected}");
     }
 }
+
+#[test]
+fn a_run_in_pieces_matches_one_run() {
+    use circuiter_sim::{NoObserver, Transient};
+    let c =
+        Circuit::parse("V1 in 0 PULSE(0 1 1u 1n 1n 5u 10u)\nR1 in out 1k\nC1 out 0 1n").unwrap();
+    let o = Options { power_on: true, ..Options::default() };
+    let whole = circuiter_sim::tran(&c, 30e-6, 50e-9, &o).unwrap();
+    let mut run = Transient::start(&c, 50e-9, 30e-6, &o, &mut NoObserver).unwrap();
+    for k in 1..=30 {
+        run.advance(k as f64 * 1e-6, &mut NoObserver).unwrap();
+    }
+    let out = c.node("out").unwrap();
+    let at = |r: &circuiter_sim::TranResult, t: f64| {
+        let v: Vec<f64> = r.values.iter().map(|x| x[out - 1]).collect();
+        r.sample(&v, t)
+    };
+    for t in [3e-6, 6e-6, 14.5e-6, 27e-6] {
+        assert!((at(&whole, t) - at(&run.result, t)).abs() < 2e-3, "t = {t}");
+    }
+}
+
+#[test]
+fn inputs_change_a_running_circuit() {
+    use circuiter_sim::{Inputs, NoObserver, Transient};
+    use std::sync::Arc;
+    // A switch (a resistor set from outside) between a supply and a load.
+    let c = Circuit::parse("V1 in 0 DC 5\nRSW in out 1g\nRL out 0 1k").unwrap();
+    let inputs = Arc::new(Inputs::new(&[("RSW", 1e9)]));
+    let o = Options { inputs: Some(inputs.clone()), ..Options::default() };
+    let mut run = Transient::start(&c, 1e-6, f64::INFINITY, &o, &mut NoObserver).unwrap();
+    run.advance(10e-6, &mut NoObserver).unwrap();
+    let out = c.node("out").unwrap();
+    assert!(run.voltage(out) < 1e-3, "open: nothing gets through");
+    inputs.set(0, 0.01);
+    run.discontinuity();
+    run.advance(20e-6, &mut NoObserver).unwrap();
+    assert!((run.voltage(out) - 5.0).abs() < 1e-3, "closed: {}", run.voltage(out));
+    // A run with no end keeps going, and its points can be taken out as it goes.
+    let taken = run.take_points();
+    assert!(taken.time.len() > 2);
+    assert_eq!(run.result.time.len(), 1);
+    run.advance(1e-3, &mut NoObserver).unwrap();
+    assert!((run.time() - 1e-3).abs() < 1e-12);
+}

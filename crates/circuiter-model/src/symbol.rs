@@ -13,6 +13,24 @@ pub struct Symbol {
     pub graphics: Vec<Graphic>,
     #[serde(default)]
     pub pins: Vec<SymbolPin>,
+    /// Drawings shown only in some states: a switch's lever, open or closed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub states: Vec<SymbolState>,
+}
+
+/// Graphics drawn when a parameter has a value: `when: "closed=true"`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SymbolState {
+    pub when: String,
+    pub graphics: Vec<Graphic>,
+}
+
+impl SymbolState {
+    /// Whether the state holds, given how to look parameters up.
+    pub fn holds(&self, param: &dyn Fn(&str) -> Option<String>) -> bool {
+        let Some((name, value)) = self.when.split_once('=') else { return false };
+        param(name.trim()).is_some_and(|v| v.trim().eq_ignore_ascii_case(value.trim()))
+    }
 }
 
 impl Symbol {

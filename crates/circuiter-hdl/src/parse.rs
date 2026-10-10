@@ -43,10 +43,10 @@ pub fn err<T>(line: usize, message: impl Into<String>) -> Result<T, HdlError> {
     Err(HdlError { line, message: message.into() })
 }
 
-const SYMBOLS: [&str; 46] = [
+const SYMBOLS: [&str; 50] = [
     "<<<", ">>>", "===", "!==", "<=", ">=", "==", "!=", "&&", "||", "<<", ">>", "~&", "~|", "~^",
-    "^~", "+:", "-:", "::", "(", ")", "[", "]", "{", "}", ";", ",", ":", "?", "=", "+", "-", "*",
-    "/", "%", "&", "|", "^", "~", "!", "<", ">", "@", "#", ".", "'",
+    "^~", "+:", "-:", "::", "++", "--", "+=", "-=", "(", ")", "[", "]", "{", "}", ";", ",", ":",
+    "?", "=", "+", "-", "*", "/", "%", "&", "|", "^", "~", "!", "<", ">", "@", "#", ".", "'",
 ];
 
 pub fn lex(src: &str) -> Result<Vec<Token>, HdlError> {
@@ -208,6 +208,10 @@ pub enum Dir {
 /// `[msb:lsb]`, as expressions until parameters are known.
 pub type Range = Option<(Expr, Expr)>;
 
+/// A connection to an instance's port: by name or position, and what it joins (none
+/// for `.a()`).
+pub type Connection = (Option<String>, Option<Expr>);
+
 #[derive(Debug, Clone)]
 pub struct PortDecl {
     pub name: String,
@@ -240,6 +244,39 @@ pub enum Item {
     Comb(Stmt),
     /// Edges: (rising, signal).
     Seq(Vec<(bool, String)>, Stmt),
+    /// An instance of another module: module, parameters, instance name and its
+    /// connections, by name (`.a(x)`) or by position.
+    Instance {
+        module: String,
+        params: Vec<(Option<String>, Expr)>,
+        name: String,
+        conns: Vec<Connection>,
+        line: usize,
+    },
+    /// `generate for`: the items, once for each value of the loop variable.
+    GenFor {
+        var: String,
+        init: Expr,
+        cond: Expr,
+        step: Expr,
+        items: Vec<Item>,
+        line: usize,
+    },
+    /// `generate if`.
+    GenIf(Expr, Vec<Item>, Vec<Item>),
+    Function(Function),
+}
+
+/// A function: its result's range, its inputs and locals, and its body.
+#[derive(Debug, Clone)]
+pub struct Function {
+    pub name: String,
+    pub range: Range,
+    pub signed: bool,
+    pub inputs: Vec<(String, Range, bool)>,
+    pub locals: Vec<(String, Range, bool)>,
+    pub body: Stmt,
+    pub line: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -254,6 +291,17 @@ pub enum Stmt {
     If(Expr, Box<Stmt>, Option<Box<Stmt>>),
     /// Subject, arms (labels, body), default, casez/casex (X and Z bits in labels match anything).
     Case(Expr, Vec<(Vec<Expr>, Stmt)>, Option<Box<Stmt>>, bool),
+    /// A loop with constant bounds, unrolled: variable, start, condition, next value.
+    For {
+        var: String,
+        init: Expr,
+        cond: Expr,
+        step: Expr,
+        body: Box<Stmt>,
+        line: usize,
+    },
+    /// Inside a function: its result, and the end of it.
+    Return(Expr, usize),
     Null,
 }
 
@@ -284,6 +332,8 @@ pub enum Expr {
     Binary(&'static str, Box<Expr>, Box<Expr>),
     Ternary(Box<Expr>, Box<Expr>, Box<Expr>),
     Call(String, Vec<Expr>, usize),
+    /// A call of a function the module declares.
+    Apply(String, Vec<Expr>, usize),
     Fill(char),
 }
 
@@ -542,13 +592,226 @@ impl Parser {
         if self.eat("initial") {
             return err(line, "`initial` blocks aren't simulated: give registers a reset instead");
         }
-        match self.peek() {
-            Some(Tok::Ident(w)) => err(
-                line,
-                format!("`{w}` isn't supported here (instances of other modules aren't yet)"),
-            ),
-            _ => err(line, "expected a declaration, `assign` or `always`"),
+        if self.eat("generate") || self.eat("endgenerate") {
+            return Ok(());
         }
+        if self.eat("genvar") {
+            loop {
+                self.ident()?;
+                if !self.eat(",") {
+                    break;
+                }
+            }
+            return self.expect(";");
+        }
+        if self.is("for") {
+            let (var, init, cond, step) = self.for_header()?;
+            let mut body = Vec::new();
+            self.gen_block(&mut body)?;
+            items.push(Item::GenFor { var, init, cond, step, items: body, line });
+            return Ok(());
+        }
+        if self.eat("if") {
+            self.expect("(")?;
+            let c = self.expr()?;
+            self.expect(")")?;
+            let mut then = Vec::new();
+            self.gen_block(&mut then)?;
+            let mut other = Vec::new();
+            if self.eat("else") {
+                self.gen_block(&mut other)?;
+            }
+            items.push(Item::GenIf(c, then, other));
+            return Ok(());
+        }
+        if self.eat("function") {
+            items.push(Item::Function(self.function(line)?));
+            return Ok(());
+        }
+        match self.peek() {
+            Some(Tok::Ident(w)) if !is_keyword(w) => {
+                let module = w.clone();
+                self.pos += 1;
+                let mut params = Vec::new();
+                if self.eat("#") {
+                    self.expect("(")?;
+                    params = self
+                        .connections()?
+                        .into_iter()
+                        .map(|(n, e)| {
+                            (n, e.unwrap_or(Expr::Num { width: None, bits: 0, x: 0, signed: true }))
+                        })
+                        .collect();
+                }
+                let name = self.ident()?;
+                self.expect("(")?;
+                let conns = self.connections()?;
+                self.expect(";")?;
+                items.push(Item::Instance { module, params, name, conns, line });
+                Ok(())
+            }
+            _ => err(line, "expected a declaration, `assign`, `always` or an instance"),
+        }
+    }
+
+    /// The items of a generate block: `begin [: name] … end`, or a single item.
+    fn gen_block(&mut self, out: &mut Vec<Item>) -> Result<(), HdlError> {
+        if self.eat("begin") {
+            if self.eat(":") {
+                self.ident()?;
+            }
+            while !self.eat("end") {
+                if self.peek().is_none() {
+                    return err(self.line(), "missing `end`");
+                }
+                self.item(out)?;
+            }
+            Ok(())
+        } else {
+            self.item(out)
+        }
+    }
+
+    /// `( .name(expr), … )` or `( expr, … )`, after the opening parenthesis.
+    fn connections(&mut self) -> Result<Vec<Connection>, HdlError> {
+        let mut out = Vec::new();
+        if self.eat(")") {
+            return Ok(out);
+        }
+        loop {
+            if self.eat(".") {
+                let n = self.ident()?;
+                self.expect("(")?;
+                let e = if self.eat(")") {
+                    None
+                } else {
+                    let e = self.expr()?;
+                    self.expect(")")?;
+                    Some(e)
+                };
+                out.push((Some(n), e));
+            } else {
+                out.push((None, Some(self.expr()?)));
+            }
+            if !self.eat(",") {
+                self.expect(")")?;
+                return Ok(out);
+            }
+        }
+    }
+
+    /// `for (i = 0; i < N; i++)`: the variable, its start, the condition, its next value.
+    fn for_header(&mut self) -> Result<(String, Expr, Expr, Expr), HdlError> {
+        self.expect("for")?;
+        self.expect("(")?;
+        let _ = self.eat("int") || self.eat("integer") || self.eat("genvar");
+        let var = self.ident()?;
+        self.expect("=")?;
+        let init = self.expr()?;
+        self.expect(";")?;
+        let cond = self.expr()?;
+        self.expect(";")?;
+        let line = self.line();
+        let step = if self.eat("++") || self.eat("--") {
+            let up = matches!(self.toks.get(self.pos - 1).map(|t| &t.tok), Some(Tok::Sym("++")));
+            let v = self.ident()?;
+            if v != var {
+                return err(line, "the loop must step its own variable");
+            }
+            next_of(&var, up, None)
+        } else {
+            let v = self.ident()?;
+            if v != var {
+                return err(line, "the loop must step its own variable");
+            }
+            if self.eat("++") {
+                next_of(&var, true, None)
+            } else if self.eat("--") {
+                next_of(&var, false, None)
+            } else if self.eat("+=") {
+                next_of(&var, true, Some(self.expr()?))
+            } else if self.eat("-=") {
+                next_of(&var, false, Some(self.expr()?))
+            } else {
+                self.expect("=")?;
+                self.expr()?
+            }
+        };
+        self.expect(")")?;
+        Ok((var, init, cond, step))
+    }
+
+    /// `function [automatic] [type] [range] name (inputs); locals; body endfunction`,
+    /// or the older form with the inputs declared inside.
+    fn function(&mut self, line: usize) -> Result<Function, HdlError> {
+        self.eat("automatic");
+        let signed = self.net_type();
+        let range = self.range()?;
+        let name = self.ident()?;
+        let mut inputs = Vec::new();
+        if self.eat("(") {
+            while !self.eat(")") {
+                self.eat("input");
+                let s = self.net_type();
+                let r = self.range()?;
+                loop {
+                    inputs.push((self.ident()?, r.clone(), s));
+                    if !self.eat(",") || self.is("input") {
+                        break;
+                    }
+                }
+                if self.is(")") {
+                    continue;
+                }
+                if !self.eat(",") && !self.is("input") {
+                    self.expect(")")?;
+                    break;
+                }
+            }
+        }
+        self.expect(";")?;
+        let mut locals = Vec::new();
+        let mut body = Vec::new();
+        while !self.eat("endfunction") {
+            if self.peek().is_none() {
+                return err(line, "missing `endfunction`");
+            }
+            if self.eat("input") {
+                let s = self.net_type();
+                let r = self.range()?;
+                loop {
+                    inputs.push((self.ident()?, r.clone(), s));
+                    if !self.eat(",") {
+                        break;
+                    }
+                }
+                self.expect(";")?;
+            } else if self.is("reg") || self.is("logic") || self.is("integer") || self.is("int") {
+                let integer = self.eat("integer") || self.eat("int");
+                let s = self.net_type() || integer;
+                let r = if integer {
+                    Some((
+                        Expr::Num { width: None, bits: 31, x: 0, signed: true },
+                        Expr::Num { width: None, bits: 0, x: 0, signed: true },
+                    ))
+                } else {
+                    self.range()?
+                };
+                loop {
+                    locals.push((self.ident()?, r.clone(), s));
+                    if !self.eat(",") {
+                        break;
+                    }
+                }
+                self.expect(";")?;
+            } else {
+                body.push(self.stmt()?);
+            }
+        }
+        if self.eat(":") {
+            self.ident()?;
+        }
+        Ok(Function { name, range, signed, inputs, locals, body: Stmt::Block(body), line })
     }
 
     fn stmt(&mut self) -> Result<Stmt, HdlError> {
@@ -610,8 +873,18 @@ impl Parser {
             }
             return Ok(Stmt::Case(subject, arms, default, wild));
         }
-        if self.is("for") || self.is("while") || self.is("repeat") {
-            return err(line, "loops aren't supported yet");
+        if self.is("for") {
+            let (var, init, cond, step) = self.for_header()?;
+            let body = self.stmt()?;
+            return Ok(Stmt::For { var, init, cond, step, body: Box::new(body), line });
+        }
+        if self.is("while") || self.is("repeat") {
+            return err(line, "only `for` loops with constant bounds are supported");
+        }
+        if self.eat("return") {
+            let e = self.expr()?;
+            self.expect(";")?;
+            return Ok(Stmt::Return(e, line));
         }
         let lhs = self.lvalue()?;
         let nonblocking = if self.eat("<=") {
@@ -722,7 +995,21 @@ impl Parser {
         match self.next() {
             Some(Tok::Num { width, bits, x, signed }) => Ok(Expr::Num { width, bits, x, signed }),
             Some(Tok::Fill(c)) => Ok(Expr::Fill(c)),
-            Some(Tok::Ident(w)) if !is_keyword(&w) => Ok(Expr::Ident(w, line)),
+            Some(Tok::Ident(w)) if !is_keyword(&w) => {
+                if !self.eat("(") {
+                    return Ok(Expr::Ident(w, line));
+                }
+                // A function call.
+                let mut args = Vec::new();
+                while !self.eat(")") {
+                    args.push(self.expr()?);
+                    if !self.eat(",") {
+                        self.expect(")")?;
+                        break;
+                    }
+                }
+                Ok(Expr::Apply(w, args, line))
+            }
             Some(Tok::System(name)) => {
                 self.expect("(")?;
                 let mut args = Vec::new();
@@ -765,6 +1052,12 @@ impl Parser {
             }
         }
     }
+}
+
+/// `var + 1`, `var - 1`, `var + by`, `var - by`.
+fn next_of(var: &str, up: bool, by: Option<Expr>) -> Expr {
+    let by = by.unwrap_or(Expr::Num { width: None, bits: 1, x: 0, signed: true });
+    Expr::Binary(if up { "+" } else { "-" }, Box::new(Expr::Ident(var.to_owned(), 0)), Box::new(by))
 }
 
 fn is_keyword(w: &str) -> bool {

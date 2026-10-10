@@ -1,0 +1,10 @@
+(
+    description: "32-bit multiplexer: 32 one-bit multiplexers sharing sel",
+    prefix: "MUX",
+    ports: [
+        (name: "d0", kind: Input, width: 32),
+        (name: "d1", kind: Input, width: 32),
+        (name: "sel", kind: Input),
+        (name: "y", kind: Output, width: 32),
+    ],
+)

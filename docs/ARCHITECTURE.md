@@ -131,13 +131,15 @@ runs on fast digital models.
 ```
 schematic hierarchy ──► netlister ──► flat netlist ──┬─► circuiter-sim (analog)
                        (view selection,              └─► circuiter-logic (digital)
-                        ERC, A/D bridges [next])              ▲ parts: built-in models,
-                                                              │ Verilog modules (circuiter-hdl),
+                        ERC, analog and                       ▲ parts: built-in models,
+                        digital halves)                       │ Verilog modules (circuiter-hdl),
                                                               │ memories loaded with programs
                                                               │ (circuiter-riscv: asm, C, Rust)
-                                     co-simulation scheduler (one timeline) [next]
+                     co-simulation (app/cosim.rs): one timeline, converters at the boundary
                                                           ▲
                               physics engine: power ► thermal RC ► stress ► failure
+                                                          ▲
+                     live sessions (app/live.rs): a run that goes on, operated as it runs
 ```
 
 - **Digital simulation** (done): a design whose every part has a digital view (or a
@@ -146,8 +148,32 @@ schematic hierarchy ──► netlister ──► flat netlist ──┬─► c
   delta cycles for zero-delay logic, GND and VDD as constant 0 and 1. Port widths may
   come from instance parameters (`width_of`). Memories load programs named by a
   parameter: assembled, compiled with the system's clang or cargo, or read from ELF.
-  A design with both analog and digital parts still runs analog (gates at transistor
-  level) until the bridges and the lockstep scheduler land.
+
+- **Mixed simulation** (done): `Netlist::build_mixed` splits a design into an analog
+  half (SPICE deck) and a digital half; an instance's view comes from its "Simulate
+  as" choice, else digital where a digital view exists. `cosim::Cosim` runs the logic
+  simulator as an observer of the analog transient. Digital outputs on analog nets
+  are voltage sources behind 50 Ω (opened to 1 GΩ for Z) whose levels are external
+  inputs of the analog solver (`Options::inputs`); analog nets read by digital parts
+  pass thresholds at 30 % and 70 % of VDD with hysteresis, the crossing time
+  interpolated between steps and injected as an input event. The observer's
+  `next_event` makes the analog solver land a step on each scheduled digital change
+  of a bridged net, and `take_discontinuity` restarts integration after it.
+
+- **Live sessions** (done): `live::Session` runs analog (`Transient::advance`, the
+  resumable transient), digital or mixed designs on a thread, paced to a chosen speed
+  (simulated seconds per real second), until stopped. Interactive parts are external
+  inputs: a switch or pushbutton is a resistance (closed or open), a dial a source
+  level, a potentiometer the two resistances of its wiper, a logic toggle or button
+  an input part poked in the logic simulator. The UI shares voltages, logic values,
+  meter readings, oscilloscope traces and the parts' states with the thread through
+  `live::Shared`; symbols draw the state they are in (`Symbol::states`).
+
+- **Instruments** (done): the multimeter and oscilloscope are cells marked `probe`,
+  whose pins join wire interiors, so leads clip anywhere. The multimeter's SPICE
+  template is chosen by its mode (`SpiceView::choose`): 10 MΩ across for volts, a
+  0 V source in series for amps, a 1 mA source for ohms. The oscilloscope adds
+  nothing to the circuit; its channels are read from the run (live or recorded).
 
 - **Netlister**: flattens the hierarchy, derives nets from wire geometry, runs ERC
   (floating nets, no DC path to ground, shorted sources), inserts A/D bridges at
@@ -193,7 +219,7 @@ schematic hierarchy ──► netlister ──► flat netlist ──┬─► c
 | `circuiter-render` | Custom wgpu renderer for very large sheets and 3D | when egui's painter runs out |
 | `circuiter-logic` | Digital simulator: four-state values up to 64 bits, event queue with delta cycles and propagation delays, net resolution of several drivers, history of every net; parts from gates to register files, memories and the RV32I control unit | done (first version) |
 | `circuiter-riscv` | RV32I assembler (matches LLVM's encodings), ELF loader, reference instruction-set simulator used to check processors built from parts | done for RV32I |
-| `circuiter-hdl` | Verilog/SystemVerilog: lexer, parser and an interpreter for the synthesizable subset, running each module as a digital part | done (first version; no module instances yet) |
+| `circuiter-hdl` | Verilog/SystemVerilog: lexer, parser and an interpreter for the synthesizable subset, running each module as a digital part. Instances of other modules are flattened into their parent when compiled (connected through continuous assignments), `for` and `generate` loops are unrolled, functions run on values of their own | done (no tasks, `while`, `initial`) |
 | `circuiter-pcb`, `circuiter-mfg` | Layout, DRC, Gerber/drill/BOM/pick-and-place | M3 |
 
 ## Roadmap
@@ -243,8 +269,9 @@ schematic hierarchy ──► netlister ──► flat netlist ──┬─► c
    at the failure; standard parts carry realistic data; a fuse part. Next: thermal
    coupling between parts and to a board, temperature-dependent device models,
    electrolytic capacitors (polarity, venting), visual effects (smoke, flash)
-7. Virtual bench: oscilloscope, DMM, function generator, bench supply, logic analyzer,
-   spectrum analyzer, thermal camera, listening to a node as audio
+7. Virtual bench: ~~oscilloscope, DMM, live runs with switches, buttons and knobs~~
+   (done); next a function generator, bench supply, logic analyzer, spectrum
+   analyzer, thermal camera, listening to a node as audio
 8. Characterization: transistor-level cell to digital model
 9. Printing and PDF export with title blocks and standard sheet sizes
 
@@ -252,7 +279,7 @@ schematic hierarchy ──► netlister ──► flat netlist ──┬─► c
 
 | Milestone | Scope |
 |---|---|
-| M2 | RISC-V ISS running Embedded C/assembly; SystemVerilog through Verilator; custom cores running the same firmware |
+| M2 | ~~RISC-V ISS running C, Rust and assembly; a processor built from parts, and from gates alone, running the same firmware; SystemVerilog parts~~ (done, RV32I); next: pipelined cores, interrupts, peripherals, SystemVerilog through Verilator for speed |
 | M3 | PCB layout, DRC, manufacturing outputs, 3D board view, B-rep CAD kernel, enclosures, STEP/STL/3MF |
 | M4 | Board and enclosure thermal simulation |
 | M5 | Mechanical and product simulation: rigid bodies, sensors, actuators |

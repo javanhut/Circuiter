@@ -2,12 +2,14 @@
 
 mod app;
 mod canvas;
+mod cosim;
 mod digital;
 mod edit;
 #[cfg(test)]
 mod gui_tests;
 mod import;
 mod interface;
+mod live;
 mod plot;
 mod simulation;
 mod style;
@@ -43,6 +45,12 @@ pub struct Args {
     /// After a transient run, plot part temperatures rather than signals.
     #[arg(long)]
     pub heat: bool,
+    /// Start the circuit running live after opening.
+    #[arg(long)]
+    pub live: bool,
+    /// Show this tab of the results panel: waveforms, thermal, problems or oscilloscope.
+    #[arg(long)]
+    pub results: Option<String>,
     /// Open a program (relative to the project) in the code editor.
     #[arg(long)]
     pub program: Option<PathBuf>,

@@ -58,12 +58,37 @@ pub fn load_program(path: &Path) -> Result<Program, String> {
 /// The logic circuit for a digital netlist: one logic net per flat net, in the same
 /// order. Programs named by memories are loaded relative to `root`.
 pub fn build(netlist: &Netlist, root: &Path) -> Result<Circuit, String> {
+    build_with_inputs(netlist, root).map(|(c, _)| c)
+}
+
+/// A switch or button on the digital side: its instance path, element, and the handle
+/// that sets its value.
+pub type InputHandle = (String, usize, std::sync::Arc<std::sync::atomic::AtomicU64>);
+
+/// As [`build`], also returning the handles of the interactive inputs.
+pub fn build_with_inputs(
+    netlist: &Netlist,
+    root: &Path,
+) -> Result<(Circuit, Vec<InputHandle>), String> {
+    let mut handles = Vec::new();
     let mut c = Circuit::new();
     for net in &netlist.nets {
         c.net(&net.name, net.width);
     }
     let mut programs: BTreeMap<String, Program> = BTreeMap::new();
     for e in &netlist.digital {
+        if e.model == "input" {
+            let on = e.params.get("value").is_some_and(|v| matches!(v.trim(), "1" | "true"));
+            let (part, handle) = prims::Input::with_handle(1, u64::from(on));
+            let net = e.ports.iter().find(|(p, _)| p == "y").map(|(_, n)| *n);
+            let net = match net {
+                Some(n) => n,
+                None => c.net(&format!("{}.y", e.path), 1),
+            };
+            let k = c.add(&e.path, part, &[net])?;
+            handles.push((e.path.clone(), k, handle));
+            continue;
+        }
         if e.model == "verilog" {
             let part = hdl_part(e, root)?;
             let mut nets = Vec::new();
@@ -103,7 +128,7 @@ pub fn build(netlist: &Netlist, root: &Path) -> Result<Circuit, String> {
         }
         c.add(&e.path, part, &nets)?;
     }
-    Ok(c)
+    Ok((c, handles))
 }
 
 /// A part described in Verilog: its module, from the source file it names.

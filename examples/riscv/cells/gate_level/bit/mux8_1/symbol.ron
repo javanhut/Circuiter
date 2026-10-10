@@ -1,0 +1,20 @@
+(
+    generated: true,
+    graphics: [
+        Rect(a: (-5.08, -12.7), b: (5.08, 12.7)),
+        Text(at: (-5.08, -13.97), text: "${name}"),
+        Text(at: (-5.08, 13.97), text: "mux8_1"),
+    ],
+    pins: [
+        (port: "d0", at: (-7.62, -10.16), direction: Right, show_name: true),
+        (port: "d1", at: (-7.62, -7.62), direction: Right, show_name: true),
+        (port: "d2", at: (-7.62, -5.08), direction: Right, show_name: true),
+        (port: "d3", at: (-7.62, -2.54), direction: Right, show_name: true),
+        (port: "d4", at: (-7.62, 0.0), direction: Right, show_name: true),
+        (port: "d5", at: (-7.62, 2.54), direction: Right, show_name: true),
+        (port: "d6", at: (-7.62, 5.08), direction: Right, show_name: true),
+        (port: "d7", at: (-7.62, 7.62), direction: Right, show_name: true),
+        (port: "sel", at: (-7.62, 10.16), direction: Right, show_name: true),
+        (port: "y", at: (7.62, 0.0), direction: Left, show_name: true),
+    ],
+)

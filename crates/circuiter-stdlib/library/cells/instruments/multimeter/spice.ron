@@ -1,0 +1,11 @@
+(
+    template: "",
+    choose: (
+        param: "mode",
+        templates: {
+            "A": "V${inst} ${node.p} ${node.com} DC 0",
+            "V": "R${inst} ${node.p} ${node.com} 10meg",
+            "Ω": "I${inst} ${node.com} ${node.p} DC 1m",
+        },
+    ),
+)

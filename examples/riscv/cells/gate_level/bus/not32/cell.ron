@@ -1,0 +1,5 @@
+(
+    description: "32 NOT gates side by side",
+    prefix: "G",
+    ports: [(name: "a", kind: Input, width: 32), (name: "y", kind: Output, width: 32)],
+)

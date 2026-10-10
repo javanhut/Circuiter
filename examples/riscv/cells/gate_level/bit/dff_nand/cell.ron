@@ -1,0 +1,9 @@
+(
+    description: "D flip-flop from NAND gates: a master latch open while the clock is low and a slave latch open while it\'s high, so q takes d as the clock rises",
+    prefix: "FF",
+    ports: [
+        (name: "d", kind: Input, description: "Data"),
+        (name: "clk", kind: Input, description: "Clock"),
+        (name: "q", kind: Output),
+    ],
+)

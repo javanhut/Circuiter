@@ -29,15 +29,14 @@ impl CircuiterApp {
         let mut ac = false;
         let mut remove = None;
         egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
-            let (tstop, _) = ws.default_tran();
+            let span = ws.run_span();
             let running = ws.sim.as_ref().is_some_and(|s| s.job.is_some());
             style::section(ui, "Run", |ui| {
                 ui.label(
                     RichText::new(format!(
-                        "Run switches {} on and watches it for {}: waveforms below, voltages \
+                        "Run switches {} on and watches it {span}: waveforms below, voltages \
                          on the wires, and parts that overheat marked.",
                         ws.sim_top(),
-                        show(tstop, "s")
                     ))
                     .color(p.weak),
                 );
@@ -265,8 +264,11 @@ impl CircuiterApp {
         let mut hide = false;
         if let Some(t) = style::strip(ui, |ui| {
             ui.horizontal(|ui| {
-                let t =
-                    style::tab_strip(ui, &["Waveforms", "Thermal", &problems_tab], self.bottom_tab);
+                let t = style::tab_strip(
+                    ui,
+                    &["Waveforms", "Thermal", &problems_tab, "Oscilloscope"],
+                    self.bottom_tab,
+                );
                 style::trailing(ui, |ui| {
                     hide = style::icon_button(ui, icon::X, "Hide the results panel", true, false)
                         .clicked();
@@ -283,9 +285,30 @@ impl CircuiterApp {
         }
         let Some(ws) = &self.workspace else { return };
         let has_results = ws.sim.as_ref().is_some_and(|s| {
-            matches!(s.results, Some(Results::Tran { .. } | Results::Ac { .. } | Results::Logic(_)))
+            matches!(
+                s.results,
+                Some(
+                    Results::Tran { .. }
+                        | Results::Ac { .. }
+                        | Results::Logic(_)
+                        | Results::Mixed { .. }
+                )
+            )
         });
+        let live = ws.live.is_some();
         match self.bottom_tab {
+            3 => {
+                egui::Frame::new().inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
+                    ui.set_min_size(ui.available_size());
+                    self.scope_view(ui);
+                });
+            }
+            0 if live => {
+                egui::Frame::new().inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
+                    let area = ui.available_rect_before_wrap();
+                    self.live_waveforms(ui, area);
+                });
+            }
             2 => {
                 egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
                     egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 8)).show(
@@ -495,6 +518,9 @@ pub(super) fn sim_status(
         }
         (Some(Results::Logic(run)), None, false) => {
             (format!("Digital · {} simulated", show(run.end, "s")), p.go)
+        }
+        (Some(Results::Mixed { result, .. }), None, false) => {
+            (format!("Mixed analog + digital · {} points", result.time.len()), p.go)
         }
         (None, None, _) => (String::new(), p.weak),
     }

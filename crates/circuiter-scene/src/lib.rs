@@ -307,7 +307,9 @@ impl Scene {
         })
     }
 
-    fn build_from(design: &Design, id: &CellId, cell: &Cell, schematic: &Schematic) -> Scene {
+    /// The scene for `schematic` as a view of cell `id` (which may differ from the stored
+    /// one: a running circuit shows its switches as they are now).
+    pub fn build_from(design: &Design, id: &CellId, cell: &Cell, schematic: &Schematic) -> Scene {
         let connectivity = Connectivity::analyze(design, &id.library, schematic);
         let mut b = Builder::default();
 
@@ -583,65 +585,81 @@ impl Builder {
 
     /// Draws a symbol as instance `index` of a sheet, or for editing when `index` is
     /// `None`, with each graphic and pin a separate object.
-    fn symbol(&mut self, index: Option<usize>, inst: &Instance, def: &CellDef, symbol: &Symbol) {
+    fn graphic(&mut self, g: &Graphic, owner: Owner, inst: &Instance, def: &CellDef) {
         let t = &inst.placement;
         let map = |p: Point| Pt::from(t.apply(p));
-        for (i, g) in symbol.graphics.iter().enumerate() {
-            let owner = index.map_or(Owner::Graphic(i), Owner::Instance);
-            match g {
-                Graphic::Polyline { points, fill } => {
-                    let closed = points.len() > 2 && points.first() == points.last();
-                    let mut points: Vec<Pt> = points.iter().map(|&p| map(p)).collect();
-                    if closed {
-                        points.pop();
-                    }
-                    self.push(Role::Body, owner, Shape::Polyline { points, closed, filled: *fill });
+        match g {
+            Graphic::Polyline { points, fill } => {
+                let closed = points.len() > 2 && points.first() == points.last();
+                let mut points: Vec<Pt> = points.iter().map(|&p| map(p)).collect();
+                if closed {
+                    points.pop();
                 }
-                Graphic::Rect { a, b, fill } => {
-                    let corners = [*a, Point::new(b.x, a.y), *b, Point::new(a.x, b.y)];
-                    let points = corners.iter().map(|&p| map(p)).collect();
-                    self.push(
-                        Role::Body,
-                        owner,
-                        Shape::Polyline { points, closed: true, filled: *fill },
-                    );
-                }
-                Graphic::Circle { center, radius, fill } => self.push(
+                self.push(Role::Body, owner, Shape::Polyline { points, closed, filled: *fill });
+            }
+            Graphic::Rect { a, b, fill } => {
+                let corners = [*a, Point::new(b.x, a.y), *b, Point::new(a.x, b.y)];
+                let points = corners.iter().map(|&p| map(p)).collect();
+                self.push(
                     Role::Body,
                     owner,
-                    Shape::Circle { center: map(*center), radius: radius.mm(), filled: *fill },
-                ),
-                Graphic::Arc { center, radius, start, end } => {
-                    let points =
-                        arc_points(*center, *radius, *start, *end).into_iter().map(&map).collect();
-                    self.push(
-                        Role::Body,
-                        owner,
-                        Shape::Polyline { points, closed: false, filled: false },
-                    );
-                }
-                Graphic::Text { at, text, size, anchor } => {
-                    let role = if text.contains("${name}") { Role::Reference } else { Role::Value };
-                    let halign = match (anchor, t.mirror) {
-                        (Anchor::Center, _) => HAlign::Center,
-                        (Anchor::Left, false) | (Anchor::Right, true) => HAlign::Left,
-                        (Anchor::Left, true) | (Anchor::Right, false) => HAlign::Right,
-                    };
-                    self.push(
-                        role,
-                        owner,
-                        Shape::Text {
-                            at: map(*at),
-                            text: substitute(text, inst, def),
-                            size: size.mm(),
-                            halign,
-                            valign: VAlign::Center,
-                            vertical: false,
-                        },
-                    );
-                }
+                    Shape::Polyline { points, closed: true, filled: *fill },
+                );
+            }
+            Graphic::Circle { center, radius, fill } => self.push(
+                Role::Body,
+                owner,
+                Shape::Circle { center: map(*center), radius: radius.mm(), filled: *fill },
+            ),
+            Graphic::Arc { center, radius, start, end } => {
+                let points =
+                    arc_points(*center, *radius, *start, *end).into_iter().map(&map).collect();
+                self.push(
+                    Role::Body,
+                    owner,
+                    Shape::Polyline { points, closed: false, filled: false },
+                );
+            }
+            Graphic::Text { at, text, size, anchor } => {
+                let role = if text.contains("${name}") { Role::Reference } else { Role::Value };
+                let halign = match (anchor, t.mirror) {
+                    (Anchor::Center, _) => HAlign::Center,
+                    (Anchor::Left, false) | (Anchor::Right, true) => HAlign::Left,
+                    (Anchor::Left, true) | (Anchor::Right, false) => HAlign::Right,
+                };
+                self.push(
+                    role,
+                    owner,
+                    Shape::Text {
+                        at: map(*at),
+                        text: substitute(text, inst, def),
+                        size: size.mm(),
+                        halign,
+                        valign: VAlign::Center,
+                        vertical: false,
+                    },
+                );
             }
         }
+    }
+
+    fn symbol(&mut self, index: Option<usize>, inst: &Instance, def: &CellDef, symbol: &Symbol) {
+        for (i, g) in symbol.graphics.iter().enumerate() {
+            let owner = index.map_or(Owner::Graphic(i), Owner::Instance);
+            self.graphic(g, owner, inst, def);
+        }
+        // Drawings for the state the part is in: a switch's lever, open or closed.
+        let param = |name: &str| {
+            inst.params.get(name).cloned().or_else(|| def.cell.param(name)?.default.clone())
+        };
+        for state in symbol.states.iter().filter(|s| s.holds(&param)) {
+            let owner = index.map_or(Owner::Derived, Owner::Instance);
+            for g in &state.graphics {
+                self.graphic(g, owner, inst, def);
+            }
+        }
+        let t = &inst.placement;
+        let map = |p: Point| Pt::from(t.apply(p));
         for (i, pin) in symbol.pins.iter().enumerate() {
             let owner = index.map_or(Owner::Pin(i), Owner::Instance);
             let (dx, dy) = match pin.direction {

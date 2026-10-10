@@ -1,0 +1,12 @@
+(
+    description: "Oscilloscope: four channels, each the voltage at its probe against COM (or ground if COM is left open). Its probes clip onto any wire; the traces show under Oscilloscope",
+    prefix: "SCOPE",
+    ports: [
+        (name: "ch1", description: "Channel 1 probe"),
+        (name: "ch2", description: "Channel 2 probe"),
+        (name: "ch3", description: "Channel 3 probe"),
+        (name: "ch4", description: "Channel 4 probe"),
+        (name: "com", description: "Ground clip"),
+    ],
+    probe: true,
+)

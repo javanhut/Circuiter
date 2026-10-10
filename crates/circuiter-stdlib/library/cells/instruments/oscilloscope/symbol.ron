@@ -1,0 +1,32 @@
+(
+    graphics: [
+        Rect(a: (-7.62, -10.16), b: (7.62, 5.08)),
+        Rect(a: (-6.35, -8.89), b: (6.35, -1.27)),
+        Polyline(
+            points: [
+                (-5.588, -5.08),
+                (-4.064, -7.366),
+                (-2.54, -5.08),
+                (-1.016, -2.794),
+                (0.508, -5.08),
+                (2.032, -7.366),
+                (3.556, -5.08),
+                (5.08, -2.794),
+                (5.588, -3.556),
+            ],
+        ),
+        Text(at: (-5.08, 3.302), text: "1", anchor: Center),
+        Text(at: (-2.54, 3.302), text: "2", anchor: Center),
+        Text(at: (0.0, 3.302), text: "3", anchor: Center),
+        Text(at: (2.54, 3.302), text: "4", anchor: Center),
+        Text(at: (5.08, 3.302), text: "C", anchor: Center),
+        Text(at: (0.0, -11.43), text: "${name}", anchor: Center),
+    ],
+    pins: [
+        (port: "ch1", at: (-5.08, 7.62), direction: Up),
+        (port: "ch2", at: (-2.54, 7.62), direction: Up),
+        (port: "ch3", at: (0.0, 7.62), direction: Up),
+        (port: "ch4", at: (2.54, 7.62), direction: Up),
+        (port: "com", at: (5.08, 7.62), direction: Up),
+    ],
+)

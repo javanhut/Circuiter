@@ -88,11 +88,13 @@ impl Connectivity {
     pub fn analyze(design: &Design, library: &str, schematic: &Schematic) -> Self {
         let mut pins = Vec::new();
         let mut global_of_pin: Vec<Option<String>> = Vec::new();
+        let mut probe_pin: Vec<bool> = Vec::new();
         for (index, inst) in schematic.instances.iter().enumerate() {
             let Some((_, def)) = design.resolve(&inst.cell, library) else { continue };
             for (at, port) in placed_pins(def, inst) {
                 pins.push(PlacedPin { instance: index, port, at });
                 global_of_pin.push(def.cell.global_net.clone());
+                probe_pin.push(def.cell.probe);
             }
         }
 
@@ -142,7 +144,7 @@ impl Connectivity {
         }
 
         // T connections: an anchor on the interior of another wire's segment.
-        // Pins only join wires at their vertices.
+        // Pins only join wires at their vertices, except instruments' probe tips.
         let mut on_interior: BTreeMap<Point, usize> = BTreeMap::new();
         let mut passes_over = Vec::new();
         for (&p, items) in &at_point {
@@ -152,7 +154,7 @@ impl Connectivity {
                 if hits == 0 {
                     continue;
                 }
-                match items.iter().find(|it| !matches!(it, Item::Pin(_))) {
+                match items.iter().find(|it| !matches!(it, Item::Pin(k) if !probe_pin[*k])) {
                     Some(&joining) => {
                         *on_interior.entry(p).or_default() += hits;
                         uf.union(id(joining), id(Item::Wire(w)));

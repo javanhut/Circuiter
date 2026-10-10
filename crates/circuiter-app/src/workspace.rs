@@ -168,6 +168,16 @@ pub struct Workspace {
     clipboard: Option<edit::Clip>,
     /// Counts changes to the design, so views derived from it know when to refresh.
     pub revision: u64,
+    /// The circuit running live, if one is.
+    pub live: Option<crate::live::Session>,
+    /// The design revision the live run started from: edits since make it out of date.
+    pub live_revision: u64,
+    /// The operated parts' states the scene was last drawn with.
+    live_drawn: BTreeMap<String, String>,
+    /// Flat nets of the running circuit shown in the live waveforms.
+    pub live_watch: Vec<usize>,
+    /// The last run plan worked out, for which revision and top cell.
+    plan_cache: std::cell::RefCell<Option<(u64, CellId, simulation::RunPlan)>>,
     /// Open tabs, each a cell and how it was left. The active tab's live state is
     /// `levels` and `mode`; its entry here is brought up to date when another is shown.
     tabs: Vec<View>,
@@ -246,6 +256,11 @@ impl Workspace {
             wire_from_pin: false,
             clipboard: None,
             revision: 0,
+            live: None,
+            live_revision: 0,
+            live_drawn: BTreeMap::new(),
+            live_watch: Vec::new(),
+            plan_cache: std::cell::RefCell::new(None),
             tabs: Vec::new(),
             active_tab: 0,
             back: Vec::new(),
@@ -337,6 +352,26 @@ impl Workspace {
     fn build_scene(&self) -> Option<Scene> {
         let id = &self.current().cell;
         match self.mode {
+            Mode::Schematic if self.live.is_some() => {
+                // Switches and buttons drawn as they are in the running circuit.
+                let def = self.design.cell(id)?;
+                let mut schematic = def.schematic.clone()?;
+                let states = self.live_states();
+                let sheet = self.sheet_path();
+                for inst in &mut schematic.instances {
+                    let path = if sheet.is_empty() {
+                        inst.name.clone()
+                    } else {
+                        format!("{sheet}.{}", inst.name)
+                    };
+                    if let (Some(value), Some(kind)) =
+                        (states.get(&path), self.live.as_ref().and_then(|l| l.control(&path)))
+                    {
+                        inst.params.insert(kind.param().to_owned(), value.clone());
+                    }
+                }
+                Some(Scene::build_from(&self.design, id, &def.cell, &schematic))
+            }
             Mode::Schematic => Scene::build(&self.design, id),
             Mode::Symbol => Scene::symbol_sheet(&self.design, id),
         }
@@ -941,6 +976,81 @@ impl Workspace {
         Ok(id)
     }
 
+    /// The operated parts' states in the running circuit, by instance path.
+    pub fn live_states(&self) -> BTreeMap<String, String> {
+        self.live
+            .as_ref()
+            .and_then(|l| l.shared.lock().ok().map(|s| s.states.clone()))
+            .unwrap_or_default()
+    }
+
+    /// Starts the design being viewed running live, at `speed` simulated seconds per
+    /// real second.
+    pub fn start_live(&mut self, speed: f64) -> Result<(), String> {
+        self.stop_live();
+        let top = self.sim_top().clone();
+        let session = crate::live::Session::start(&self.design, &top, &self.project.root, speed)?;
+        self.live_watch = simulation::default_probes(&session.netlist);
+        session.send(crate::live::Command::Watch(self.live_watch.clone()));
+        self.live = Some(session);
+        self.live_revision = self.revision;
+        self.live_drawn.clear();
+        self.refresh();
+        Ok(())
+    }
+
+    pub fn stop_live(&mut self) {
+        if self.live.take().is_some() {
+            self.live_drawn.clear();
+            self.refresh();
+        }
+    }
+
+    /// Redraws the sheet when a switch in the running circuit changed.
+    pub fn follow_live(&mut self) {
+        if self.live.is_none() {
+            return;
+        }
+        let states = self.live_states();
+        if states != self.live_drawn {
+            self.live_drawn = states;
+            if let Some(scene) = self.build_scene() {
+                self.scene = scene;
+            }
+        }
+    }
+
+    /// Shows or hides local net `net` in the live waveforms.
+    pub fn toggle_live_watch(&mut self, net: usize) {
+        let Some(flat) = self.live_nets().get(net).copied().flatten() else { return };
+        match self.live_watch.iter().position(|&n| n == flat) {
+            Some(k) => {
+                self.live_watch.remove(k);
+            }
+            None => self.live_watch.push(flat),
+        }
+        if let Some(live) = &self.live {
+            live.send(crate::live::Command::Watch(self.live_watch.clone()));
+        }
+    }
+
+    /// The instance path, from the run's top, of instance `index` on this sheet.
+    pub fn instance_path(&self, index: usize) -> Option<String> {
+        let inst = self.schematic()?.instances.get(index)?;
+        let sheet = self.sheet_path();
+        Some(if sheet.is_empty() { inst.name.clone() } else { format!("{sheet}.{}", inst.name) })
+    }
+
+    /// The flat net of each net on the sheet being viewed, in the running circuit.
+    pub fn live_nets(&self) -> Vec<Option<usize>> {
+        let Some(live) = &self.live else { return Vec::new() };
+        let sheet = self.sheet_path();
+        let flat = live.netlist.sheets.get(&sheet);
+        (0..self.scene.connectivity.nets.len())
+            .map(|k| flat.and_then(|f| f.get(k).copied()))
+            .collect()
+    }
+
     /// What the active tool does, for the status bar.
     pub fn hint(&self) -> &'static str {
         match (&self.tool, self.mode) {
@@ -1535,10 +1645,14 @@ impl Workspace {
     /// What to draw over the sheet for the current tool, given the cursor position.
     /// Operating-point voltages to tag nets with on the sheet being viewed.
     fn voltage_notes(&self) -> Vec<(Pt, String)> {
-        let (Some(sim), Some(schematic)) = (self.fresh_sim(), self.schematic()) else {
-            return Vec::new();
-        };
-        if !matches!(sim.results, Some(Results::Op(_) | Results::Tran { .. } | Results::Logic(_))) {
+        if self.live.is_some() {
+            return self.live_notes();
+        }
+        let Some(sim) = self.fresh_sim() else { return Vec::new() };
+        if !matches!(
+            sim.results,
+            Some(Results::Op(_) | Results::Tran { .. } | Results::Logic(_) | Results::Mixed { .. })
+        ) {
             return Vec::new();
         }
         // After a transient run, each net shows where it ended up; digital nets show
@@ -1546,21 +1660,71 @@ impl Workspace {
         let value = |flat: usize| -> Option<String> {
             match &sim.results {
                 Some(Results::Logic(run)) => run.last(flat).map(|v| v.hex()),
+                // Analog nets show volts; nets only digital parts are on show values.
+                Some(Results::Mixed { logic, .. }) => match sim.waveform(flat) {
+                    Some((_, v)) => v.last().copied().map(volts),
+                    None => logic.last(flat).map(|v| v.hex()),
+                },
                 Some(Results::Tran { .. }) => {
                     sim.waveform(flat).and_then(|(_, v)| v.last().copied()).map(volts)
                 }
                 _ => sim.voltage(flat).map(volts),
             }
         };
-        // Below a microvolt is numerical noise; call it zero.
-        fn volts(v: f64) -> String {
-            simulation::show(if v.abs() < 1e-6 { 0.0 } else { v }, "V")
+        let mut out = self.net_tags(&|k| self.flat_net(k).and_then(value));
+        let readings: BTreeMap<String, crate::live::Reading> =
+            crate::live::Meter::all(&sim.netlist)
+                .iter()
+                .filter_map(|m| Some((m.path.clone(), sim.meter(m)?)))
+                .collect();
+        out.extend(self.meter_tags(&readings));
+        out
+    }
+
+    /// Values on the wires of the running circuit, and its meters' readings.
+    fn live_notes(&self) -> Vec<(Pt, String)> {
+        let Some(live) = &self.live else { return Vec::new() };
+        let Ok(shared) = live.shared.lock() else { return Vec::new() };
+        let nets = self.live_nets();
+        let mut out = self.net_tags(&|k| {
+            let f = nets.get(k).copied().flatten()?;
+            shared
+                .voltages
+                .get(f)
+                .copied()
+                .flatten()
+                .map(volts)
+                .or_else(|| shared.logic.get(f).copied().flatten().map(|v| v.hex()))
+        });
+        out.extend(self.meter_tags(&shared.readings));
+        out
+    }
+
+    /// Multimeters' readings, over their bodies.
+    fn meter_tags(&self, readings: &BTreeMap<String, crate::live::Reading>) -> Vec<(Pt, String)> {
+        let Some(schematic) = self.schematic() else { return Vec::new() };
+        let sheet = self.sheet_path();
+        let mut out = Vec::new();
+        for (i, inst) in schematic.instances.iter().enumerate() {
+            let path =
+                if sheet.is_empty() { inst.name.clone() } else { format!("{sheet}.{}", inst.name) };
+            let (Some(r), Some(body)) = (readings.get(&path), self.scene.instance_bodies.get(i))
+            else {
+                continue;
+            };
+            out.push((Pt::new(body.center().x - 4.0, body.min.y + 3.0), r.show()));
         }
+        out
+    }
+
+    /// A tag for each net on the sheet with a value: in the middle of its longest
+    /// wire, else at a label or pin.
+    fn net_tags(&self, value_of: &dyn Fn(usize) -> Option<String>) -> Vec<(Pt, String)> {
+        let Some(schematic) = self.schematic() else { return Vec::new() };
         let conn = &self.scene.connectivity;
         let mut out = Vec::new();
         for (k, net) in conn.nets.iter().enumerate() {
-            let Some(v) = self.flat_net(k).and_then(value) else { continue };
-            // Tag the middle of the net's longest wire segment, else a label or pin.
+            let Some(v) = value_of(k) else { continue };
             let segment = net
                 .items
                 .iter()
@@ -1725,6 +1889,7 @@ impl Workspace {
             Tool::Pin { port, direction } => {
                 let symbol = Symbol {
                     generated: false,
+                    states: Vec::new(),
                     graphics: Vec::new(),
                     pins: vec![circuiter_model::symbol::SymbolPin {
                         port: port.clone(),
@@ -1831,9 +1996,36 @@ impl Workspace {
 
     /// A sensible transient run for the design being viewed.
     pub fn default_tran(&self) -> (f64, f64) {
-        Simulation::prepare_in(&self.design, self.sim_top(), &self.project.root)
-            .map(|s| s.default_run())
-            .unwrap_or((1e-3, 1e-6))
+        let p = self.run_plan();
+        (p.tstop, p.tstep)
+    }
+
+    /// How long Run goes, for hints: "for 1 µs", or "until its program ends (ECALL)".
+    pub fn run_span(&self) -> String {
+        let p = self.run_plan();
+        let most = simulation::show(p.tstop, "s");
+        if p.until_halt {
+            format!("until its program ends (ECALL), {most} at most")
+        } else {
+            format!("for {most}")
+        }
+    }
+
+    /// What Run will do for the design being viewed; worked out once per change.
+    pub fn run_plan(&self) -> simulation::RunPlan {
+        let top = self.sim_top().clone();
+        if let Some((rev, id, plan)) = self.plan_cache.borrow().as_ref() {
+            if *rev == self.revision && *id == top {
+                return *plan;
+            }
+        }
+        let plan = simulation::plan(&self.design, &top).unwrap_or(simulation::RunPlan {
+            tstop: 1e-3,
+            tstep: 1e-6,
+            until_halt: false,
+        });
+        *self.plan_cache.borrow_mut() = Some((self.revision, top, plan));
+        plan
     }
 
     /// Adds or removes the net of local net `net` from the waveform plot.
@@ -1883,10 +2075,18 @@ impl Workspace {
         }
         if let Some(schematic) = self.schematic() {
             let conn = &self.scene.connectivity;
+            let lib = &self.current().cell.library;
             for &i in &conn.dangling_pins {
                 let pin = &conn.pins[i];
-                let inst = &schematic.instances[pin.instance].name;
-                out.push((Severity::Warning, format!("pin {inst}.{} is not connected", pin.port)));
+                let inst = &schematic.instances[pin.instance];
+                // An instrument's spare probes may hang free.
+                let probe = self.design.resolve(&inst.cell, lib).is_some_and(|(_, d)| d.cell.probe);
+                if !probe {
+                    out.push((
+                        Severity::Warning,
+                        format!("pin {}.{} is not connected", inst.name, pin.port),
+                    ));
+                }
             }
             for p in &conn.dangling_wire_ends {
                 out.push((Severity::Warning, format!("wire end at {p} is not connected")));
@@ -1962,6 +2162,11 @@ fn clash(library: &circuiter_model::Library, folder: &str) -> Result<(), String>
         }
         _ => Ok(()),
     }
+}
+
+/// A voltage for a tag; below a microvolt is numerical noise, called zero.
+fn volts(v: f64) -> String {
+    simulation::show(if v.abs() < 1e-6 { 0.0 } else { v }, "V")
 }
 
 pub fn graphic_name(g: &Graphic) -> &'static str {

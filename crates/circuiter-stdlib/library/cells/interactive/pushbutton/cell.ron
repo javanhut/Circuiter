@@ -1,0 +1,6 @@
+(
+    description: "Pushbutton: closed only while held. While the circuit runs live, hold the mouse on it",
+    prefix: "SW",
+    ports: [(name: "a"), (name: "b")],
+    params: [(name: "pressed", kind: Bool, default: "false", description: "Held down")],
+)

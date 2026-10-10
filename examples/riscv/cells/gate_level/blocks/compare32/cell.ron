@@ -1,0 +1,11 @@
+(
+    description: "Comparator from gates: a - b by an adder, equal when every bit of it is 0",
+    prefix: "CMP",
+    ports: [
+        (name: "a", kind: Input, width: 32),
+        (name: "b", kind: Input, width: 32),
+        (name: "eq", kind: Output, description: "a = b"),
+        (name: "lt", kind: Output, description: "a < b, signed"),
+        (name: "ltu", kind: Output, description: "a < b, unsigned"),
+    ],
+)

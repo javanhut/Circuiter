@@ -1,0 +1,10 @@
+(
+    description: "D flip-flop with synchronous reset: q becomes 0 at a clock edge while rst is high",
+    prefix: "FF",
+    ports: [
+        (name: "d", kind: Input),
+        (name: "clk", kind: Input),
+        (name: "rst", kind: Input, description: "Reset"),
+        (name: "q", kind: Output),
+    ],
+)

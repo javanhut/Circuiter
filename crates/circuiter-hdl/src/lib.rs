@@ -7,8 +7,11 @@
 //! @(posedge clk)` with non-blocking assignments, `if`/`else`, `case`/`casez`, bit and
 //! part selects, concatenation and replication, every arithmetic, logical, bitwise,
 //! reduction, shift and comparison operator, `?:`, `$signed`, `$unsigned` and
-//! `$clog2`. Values are four-state and up to 64 bits wide. Not (yet): instances of
-//! other modules, loops, functions, tasks, `initial`.
+//! `$clog2`, instances of other modules in the same file (connected by name or by
+//! position, with `#(...)` parameters), `for` loops and `generate for`/`if` (unrolled,
+//! so their bounds must be constants), and functions (`function … endfunction`, with
+//! `return` or assigning the function's name). Values are four-state and up to 64 bits
+//! wide. Not supported: tasks, `while`/`repeat`, `initial`, inout ports of instances.
 
 pub mod parse;
 pub mod sim;
@@ -177,5 +180,148 @@ mod tests {
             create("module m (input a, output y);\n  assign y = a\nendmodule", None, &none(), 0)
                 .unwrap_err();
         assert!(e.contains("line 3") && e.contains("`;`"), "{e}");
+    }
+
+    const FULL_ADDER: &str = "
+        module full_adder (input a, b, cin, output s, cout);
+            assign s = a ^ b ^ cin;
+            assign cout = (a & b) | (cin & (a ^ b));
+        endmodule
+    ";
+
+    #[test]
+    fn instances_by_name_and_by_position() {
+        let src = format!(
+            "{FULL_ADDER}
+            module add2 (input [1:0] a, b, output [2:0] y);
+                wire c0;
+                full_adder lo (.a(a[0]), .b(b[0]), .cin(1'b0), .s(y[0]), .cout(c0));
+                full_adder hi (a[1], b[1], c0, y[1], y[2]);
+            endmodule"
+        );
+        for (a, b) in [(0, 0), (1, 2), (3, 3), (2, 3)] {
+            let (sim, n) = run(&src, vec![("a", konst(2, a)), ("b", konst(2, b))], 10.0);
+            assert_eq!(sim.value(n["y"]), Value::new(3, a + b), "{a} + {b}");
+        }
+    }
+
+    #[test]
+    fn a_generate_loop_of_instances() {
+        let src = format!(
+            "{FULL_ADDER}
+            module adder #(parameter W = 4) (input [W-1:0] a, b, output [W-1:0] s, output cout);
+                wire [W:0] c;
+                assign c[0] = 1'b0;
+                genvar i;
+                generate
+                    for (i = 0; i < W; i = i + 1) begin : bit
+                        full_adder fa (.a(a[i]), .b(b[i]), .cin(c[i]), .s(s[i]), .cout(c[i+1]));
+                    end
+                endgenerate
+                assign cout = c[W];
+            endmodule
+            module top (input [7:0] a, b, output [7:0] s, output cout);
+                adder #(.W(8)) u (.a(a), .b(b), .s(s), .cout(cout));
+            endmodule"
+        );
+        let ports = interface(&src, None, &none()).unwrap();
+        assert_eq!(ports[2].width, 8, "the parameter given to the instance");
+        let (sim, n) = run(&src, vec![("a", konst(8, 200)), ("b", konst(8, 100))], 50.0);
+        assert_eq!(sim.value(n["s"]), Value::new(8, 300 - 256));
+        assert_eq!(sim.value(n["cout"]), Value::bit(true));
+    }
+
+    #[test]
+    fn flip_flops_inside_instances_see_the_clock() {
+        // A shift register of flip-flop instances, and a clock divider made inside one
+        // clocking a flip-flop of another.
+        let src = "
+            module dff (input clk, d, output reg q);
+                always @(posedge clk) q <= d;
+            endmodule
+            module shift (input clk, d, output [2:0] q);
+                dff a (clk, d, q[0]);
+                dff b (clk, q[0], q[1]);
+                dff c (clk, q[1], q[2]);
+            endmodule";
+        let (sim, n) = run(src, vec![("clk", clock(10.0)), ("d", konst(1, 1))], 30.0);
+        // Edges at 5, 15, 25 ns: the 1 has moved through all three.
+        assert_eq!(sim.value(n["q"]), Value::new(3, 0b111));
+        let (sim, n) = run(src, vec![("clk", clock(10.0)), ("d", konst(1, 1))], 20.0);
+        assert_eq!(sim.value(n["q"]).slice(0, 2), Value::new(2, 0b11), "one stage per edge");
+        assert!(!sim.value(n["q"]).slice(2, 1).is_known());
+    }
+
+    #[test]
+    fn for_loops_are_unrolled() {
+        let src = "
+            module bits (input [7:0] a, output reg [7:0] rev, output reg [3:0] ones);
+                always_comb begin
+                    ones = 0;
+                    for (int i = 0; i < 8; i++) begin
+                        rev[i] = a[7 - i];
+                        ones = ones + a[i];
+                    end
+                end
+            endmodule";
+        let (sim, n) = run(src, vec![("a", konst(8, 0b1101_0010))], 10.0);
+        assert_eq!(sim.value(n["rev"]), Value::new(8, 0b0100_1011));
+        assert_eq!(sim.value(n["ones"]), Value::new(4, 4));
+    }
+
+    #[test]
+    fn functions_with_return_and_the_older_form() {
+        let src = "
+            module f (input [7:0] a, b, output [7:0] m, output [3:0] p);
+                function automatic logic [7:0] max(input logic [7:0] x, input logic [7:0] y);
+                    if (x > y) return x;
+                    return y;
+                endfunction
+                function [3:0] popcount;
+                    input [7:0] v;
+                    integer i;
+                    begin
+                        popcount = 0;
+                        for (i = 0; i < 8; i = i + 1)
+                            popcount = popcount + v[i];
+                    end
+                endfunction
+                assign m = max(a, b);
+                assign p = popcount(a ^ b);
+            endmodule";
+        let (sim, n) = run(src, vec![("a", konst(8, 9)), ("b", konst(8, 200))], 10.0);
+        assert_eq!(sim.value(n["m"]), Value::new(8, 200));
+        assert_eq!(sim.value(n["p"]), Value::new(4, u64::from((9u8 ^ 200).count_ones())));
+        let (sim, n) = run(src, vec![("a", konst(8, 77)), ("b", konst(8, 3))], 10.0);
+        assert_eq!(sim.value(n["m"]), Value::new(8, 77));
+    }
+
+    #[test]
+    fn instance_errors() {
+        let e =
+            create("module m (input a, output y);\n  nope u (a, y);\nendmodule", None, &none(), 0)
+                .unwrap_err();
+        assert!(e.contains("line 2") && e.contains("`nope`"), "{e}");
+        let e = create("module m (input a, output y);\n  m u (a, y);\nendmodule", None, &none(), 0)
+            .unwrap_err();
+        assert!(e.contains("contain itself"), "{e}");
+        let e = create(
+            &format!(
+                "{FULL_ADDER}module m (input a, output y);\n  full_adder u (.x(a));\nendmodule"
+            ),
+            None,
+            &none(),
+            0,
+        )
+        .unwrap_err();
+        assert!(e.contains("no port `x`"), "{e}");
+        let e = create(
+            "module m (input [3:0] a, output y);\n  always_comb for (int i = 0; i < a; i++) ;\nendmodule",
+            None,
+            &none(),
+            0,
+        )
+        .unwrap_err();
+        assert!(e.contains("constants"), "{e}");
     }
 }

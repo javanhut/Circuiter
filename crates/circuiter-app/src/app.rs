@@ -1,5 +1,6 @@
 //! Window layout: menus, toolbars, library browser, inspector, prompts and status bar.
 
+mod bench;
 mod chrome;
 mod code;
 mod explorer;
@@ -66,6 +67,14 @@ pub struct CircuiterApp {
     /// Programs open in tabs, and the one in front (over the sheet), if any.
     code_tabs: Vec<code::CodeTab>,
     active_code: Option<usize>,
+    /// While running live: the press began on a part being operated (so it isn't a
+    /// drag), and the momentary part held down.
+    live_press: bool,
+    live_held: Option<String>,
+    /// Each oscilloscope's front panel, by instance path.
+    scopes: std::collections::BTreeMap<String, bench::ScopeSettings>,
+    /// Simulated seconds per real second for live runs, once chosen.
+    live_speed: Option<f64>,
     /// A part dragged in from the library is being previewed on the sheet.
     drop_preview: bool,
 }
@@ -414,6 +423,10 @@ impl CircuiterApp {
             component_query: String::new(),
             code_tabs: Vec::new(),
             active_code: None,
+            live_press: false,
+            live_held: None,
+            scopes: std::collections::BTreeMap::new(),
+            live_speed: None,
             drop_preview: false,
         };
         if let Some(path) = args.project {
@@ -466,6 +479,17 @@ impl CircuiterApp {
         }
         if let Some(program) = args.program {
             app.open_code(&program);
+        }
+        if args.live {
+            app.live_action(chrome::LiveAction::Start);
+        }
+        if let Some(tab) = args.results.as_deref() {
+            app.bottom_tab = match tab {
+                "thermal" => 1,
+                "problems" => 2,
+                "oscilloscope" | "scope" => 3,
+                _ => 0,
+            };
         }
         app
     }
@@ -663,6 +687,11 @@ impl CircuiterApp {
             self.frames += 1;
         }
         ctx.request_repaint();
+        // A live run gets a second and a half to show something.
+        let live = self.workspace.as_ref().is_some_and(|ws| ws.live.is_some());
+        if live && self.frames < 10 {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+        }
         if self.frames == 10 {
             ctx.send_viewport_cmd(ViewportCommand::Screenshot(egui::UserData::default()));
         }
@@ -1325,6 +1354,44 @@ impl CircuiterApp {
             return;
         }
         match &sim.results {
+            Some(Results::Mixed { logic, tstop, .. }) => {
+                // Analog signals as waveforms above, digital ones as logic lanes below.
+                type Wave<'a> = (&'a str, (&'a [f64], Vec<f64>));
+                let waves: Vec<Wave<'_>> = sim
+                    .probes
+                    .iter()
+                    .zip(&names)
+                    .filter_map(|(&p, n)| Some((n.as_str(), sim.waveform(p)?)))
+                    .collect();
+                let bits: Vec<plot::LogicTrace<'_>> = sim
+                    .probes
+                    .iter()
+                    .zip(&names)
+                    .filter(|(p, _)| sim.waveform(**p).is_none())
+                    .filter_map(|(&p, n)| {
+                        Some(plot::LogicTrace {
+                            name: n,
+                            changes: logic.history.get(p)?,
+                            width: sim.netlist.nets.get(p)?.width,
+                        })
+                    })
+                    .collect();
+                let traces: Vec<Trace<'_>> =
+                    waves.iter().map(|(n, (t, v))| Trace { name: n, x: t, y: v }).collect();
+                let axis = XAxis { unit: "s", range: (0.0, *tstop), log: false };
+                let share = match (traces.is_empty(), bits.is_empty()) {
+                    (false, true) => 1.0,
+                    (true, false) => 0.0,
+                    _ => traces.len() as f32 / (traces.len() + bits.len()).max(1) as f32,
+                };
+                let (top, bottom) = area.split_top_bottom_at_fraction(share.clamp(0.0, 1.0));
+                if !traces.is_empty() {
+                    plot::show_lanes(ui, top, &mut self.plot, &traces, axis, "V", self.theme);
+                }
+                if !bits.is_empty() {
+                    plot::show_logic(ui, bottom, &mut self.plot, &bits, *tstop, self.theme);
+                }
+            }
             Some(Results::Logic(run)) => {
                 let traces: Vec<plot::LogicTrace<'_>> = sim
                     .probes
@@ -2203,6 +2270,20 @@ fn instance_panel(ui: &mut egui::Ui, ws: &mut Workspace, index: usize, field: &m
         &def.cell.description,
     );
 
+    // Parts operated while running live, and meters' readings.
+    bench::live_part_controls(ui, ws, index);
+    if id == CellId::new(circuiter_model::STD_LIBRARY, "multimeter") {
+        let path = ws.instance_path(index).unwrap_or_default();
+        let reading = match &ws.live {
+            Some(live) => live.shared.lock().ok().and_then(|s| s.readings.get(&path).copied()),
+            None => ws.fresh_sim().and_then(|sim| {
+                let meters = crate::live::Meter::all(&sim.netlist);
+                meters.iter().find(|m| m.path == path).and_then(|m| sim.meter(m))
+            }),
+        };
+        bench::live_meter_display(ui, reading);
+    }
+
     section(ui, "General");
     style::properties(ui, "general", |ui| {
         style::name(ui, "Reference");
@@ -2247,6 +2328,49 @@ fn instance_panel(ui: &mut egui::Ui, ws: &mut Workspace, index: usize, field: &m
         None => "No simulation view",
     };
     ui.label(model);
+    // Parts with several models: which one simulations use for this part.
+    let views: Vec<(Option<ViewKind>, &str)> = [
+        (Some(ViewKind::Digital), "Digital model (fast)"),
+        (Some(ViewKind::Spice), "Transistor level (SPICE)"),
+        (Some(ViewKind::Schematic), "Its schematic (open it to see)"),
+    ]
+    .into_iter()
+    .filter(|(v, _)| v.is_some_and(|v| def.has_view(v)))
+    .collect();
+    if views.len() > 1 && editable {
+        let current = views.iter().find(|(v, _)| *v == inst.view).map_or("Automatic", |(_, l)| l);
+        let mut chosen = None;
+        ui.horizontal(|ui| {
+            style::name(ui, "Simulate as");
+            egui::ComboBox::from_id_salt(("simulate-as", index))
+                .selected_text(current)
+                .width(200.0)
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(inst.view.is_none(), "Automatic")
+                        .on_hover_text(
+                            "Digital in digital and mixed designs; transistor level in analog ones",
+                        )
+                        .clicked()
+                    {
+                        chosen = Some(None);
+                    }
+                    for (v, label) in &views {
+                        if ui.selectable_label(inst.view == *v, *label).clicked() {
+                            chosen = Some(*v);
+                        }
+                    }
+                });
+        });
+        if let Some(view) = chosen {
+            let _ = ws.edit(|_, _, d| {
+                if let Some(i) = d.schematic.as_mut().and_then(|s| s.instances.get_mut(index)) {
+                    i.view = view;
+                }
+                Ok(())
+            });
+        }
+    }
     if ws.scene.descendable.get(index) == Some(&true) && ui.button("Open schematic").clicked() {
         ws.descend(index);
         return;
@@ -2427,6 +2551,25 @@ fn net_panel(ui: &mut egui::Ui, ws: &mut Workspace, net: usize) {
         ui.colored_label(WARNING, format!("⚠ conflicting names: {}", n.names.join(", ")));
     }
     let mut toggle = false;
+    // Running live: the value now, and the live waveforms.
+    let live_flat = ws.live_nets().get(net).copied().flatten();
+    if let (Some(live), Some(flat)) = (&ws.live, live_flat) {
+        section(ui, "Live");
+        let (v, bits) = live
+            .shared
+            .lock()
+            .map(|s| {
+                (s.voltages.get(flat).copied().flatten(), s.logic.get(flat).copied().flatten())
+            })
+            .unwrap_or((None, None));
+        let shown = v.map(|v| show(v, "V")).or(bits.map(|b| b.hex())).unwrap_or_else(|| "—".into());
+        ui.label(RichText::new(shown).size(18.0).monospace().color(ACCENT));
+        let watched = ws.live_watch.contains(&flat);
+        if ui.button(if watched { "Remove from Plot" } else { "Add to Plot" }).clicked() {
+            ws.toggle_live_watch(net);
+        }
+        return;
+    }
     if let (Some(sim), Some(flat)) = (ws.fresh_sim(), ws.flat_net(net)) {
         section(ui, "Simulation");
         let flat_name = &sim.netlist.nets[flat].name;
@@ -2723,12 +2866,11 @@ fn cell_panel(
             let a = ws.run_analysis();
             ws.simulate(a);
         }
-        let (tstop, _) = ws.default_tran();
         ui.label(format!(
-            "Run (Ctrl+R) switches {} on and watches it for {}: the waveforms appear \
+            "Run (Ctrl+R) switches {} on and watches it {}: the waveforms appear \
              below the sheet, each wire shows its voltage, and parts that overheat are marked.",
             ws.sim_top(),
-            show(tstop, "s")
+            ws.run_span()
         ));
         if !ran {
             ui.add_space(4.0);
@@ -3020,6 +3162,7 @@ impl eframe::App for CircuiterApp {
         self.handle_close_request(&ctx);
         self.prompts(&ctx);
         self.shortcuts(&ctx);
+        self.live_frame(&ctx);
         self.update_title(&ctx);
         if let Some(ws) = &self.workspace {
             // Project cells' symbols change as they are edited; std's never do.
@@ -3079,6 +3222,11 @@ impl eframe::App for CircuiterApp {
                         bottom: 0,
                     }))
                     .show(ui, |ui| self.doc_tabs(ui));
+                if self.workspace.as_ref().is_some_and(|ws| ws.live.is_some()) {
+                    egui::Panel::top("live-bar")
+                        .frame(egui::Frame::new().fill(p.error.gamma_multiply(0.12)))
+                        .show(ui, |ui| self.live_bar(ui));
+                }
                 if self.active_code.is_none() {
                     egui::Panel::top("canvas-header")
                         .frame(egui::Frame::new().fill(p.panel))
@@ -3139,7 +3287,7 @@ impl eframe::App for CircuiterApp {
                     ws.pick_tolerance = out.tolerance;
                     let ctx = ui.ctx().clone();
                     let (cursor, tolerance) = (out.cursor, out.tolerance);
-                    let gestures = out.gestures;
+                    let gestures = self.live_interact(&ctx, out.gestures);
                     self.drop_part(&ctx, cursor, tolerance);
                     let Some(ws) = &mut self.workspace else { return };
                     let empty_sheet = ws.schematic().is_some_and(|s| {

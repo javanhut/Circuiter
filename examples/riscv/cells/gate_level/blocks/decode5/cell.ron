@@ -1,0 +1,9 @@
+(
+    description: "Five-to-32 decoder from gates: bit a of y is high while en is",
+    prefix: "DEC",
+    ports: [
+        (name: "a", kind: Input, description: "Which output", width: 5),
+        (name: "en", kind: Input, description: "Enable"),
+        (name: "y", kind: Output, description: "One-hot", width: 32),
+    ],
+)

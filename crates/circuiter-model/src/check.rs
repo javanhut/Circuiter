@@ -217,7 +217,8 @@ pub fn check_cell(design: &Design, id: &CellId, def: &CellDef, out: &mut Vec<Dia
 
     // SPICE.
     if let Some(spice) = &def.spice {
-        for text in std::iter::once(&spice.template).chain(&spice.models) {
+        let chosen = spice.choose.iter().flat_map(|c| c.templates.values());
+        for text in std::iter::once(&spice.template).chain(chosen).chain(&spice.models) {
             match parse_template(text) {
                 Err(e) => report(Error, Some("spice"), e),
                 Ok(segments) => {

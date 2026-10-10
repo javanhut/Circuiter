@@ -30,6 +30,10 @@ pub struct Cell {
     /// How the part heats up and what destroys it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub physics: Option<Physics>,
+    /// A test instrument: its pins are probe tips that connect wherever they touch a
+    /// wire, not only at the wire's ends and corners.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub probe: bool,
 }
 
 /// A part's thermal behaviour, its absolute limits and how it fails.
@@ -105,6 +109,7 @@ impl Default for Cell {
             params: Vec::new(),
             global_net: None,
             physics: None,
+            probe: false,
         }
     }
 }

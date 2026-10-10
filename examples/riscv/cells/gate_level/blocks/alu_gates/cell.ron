@@ -1,0 +1,10 @@
+(
+    description: "ALU from gates, op = {funct7[5], funct3}: an adder that also subtracts, comparisons from its result, two barrel shifters, AND/OR/XOR, and multiplexers picking the result",
+    prefix: "ALU",
+    ports: [
+        (name: "a", kind: Input, width: 32),
+        (name: "b", kind: Input, width: 32),
+        (name: "op", kind: Input, description: "Operation", width: 4),
+        (name: "y", kind: Output, width: 32),
+    ],
+)

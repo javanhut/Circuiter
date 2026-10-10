@@ -1,0 +1,6 @@
+(
+    description: "Switch (SPST): open or closed. While the circuit runs live, click it to flip it",
+    prefix: "SW",
+    ports: [(name: "a"), (name: "b")],
+    params: [(name: "closed", kind: Bool, default: "false", description: "Closed (conducting)")],
+)

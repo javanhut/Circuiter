@@ -1,0 +1,12 @@
+(
+    description: "32-bit four-way multiplexer from three two-way ones",
+    prefix: "MUX",
+    ports: [
+        (name: "d0", kind: Input, width: 32),
+        (name: "d1", kind: Input, width: 32),
+        (name: "d2", kind: Input, width: 32),
+        (name: "d3", kind: Input, width: 32),
+        (name: "sel", kind: Input, width: 2),
+        (name: "y", kind: Output, width: 32),
+    ],
+)

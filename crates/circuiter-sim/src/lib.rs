@@ -22,7 +22,7 @@ mod solve;
 pub mod sparse;
 
 pub use analysis::{
-    AcResult, Complex, Control, DeviceOp, NoObserver, Observer, OpResult, Options, SimError,
-    Spacing, Step, TranResult, ac, dc_sweep, op, tran, tran_observed,
+    AcResult, Complex, Control, DeviceOp, Inputs, NoObserver, Observer, OpResult, Options,
+    SimError, Spacing, Step, TranResult, Transient, ac, dc_sweep, op, tran, tran_observed,
 };
 pub use circuit::{Circuit, Device, Element, Problem};

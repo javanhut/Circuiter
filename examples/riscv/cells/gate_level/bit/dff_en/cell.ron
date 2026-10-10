@@ -1,0 +1,10 @@
+(
+    description: "D flip-flop with enable: takes d at a clock edge only while en is high, else keeps q",
+    prefix: "FF",
+    ports: [
+        (name: "d", kind: Input),
+        (name: "clk", kind: Input),
+        (name: "en", kind: Input, description: "Enable"),
+        (name: "q", kind: Output),
+    ],
+)

@@ -1,0 +1,15 @@
+(
+    generated: true,
+    graphics: [
+        Rect(a: (-5.08, -5.08), b: (5.08, 5.08)),
+        Text(at: (-5.08, -6.35), text: "${name}"),
+        Text(at: (-5.08, 6.35), text: "compare32"),
+    ],
+    pins: [
+        (port: "a", at: (-7.62, -2.54), direction: Right, show_name: true),
+        (port: "b", at: (-7.62, 0.0), direction: Right, show_name: true),
+        (port: "eq", at: (7.62, -2.54), direction: Left, show_name: true),
+        (port: "lt", at: (7.62, 0.0), direction: Left, show_name: true),
+        (port: "ltu", at: (7.62, 2.54), direction: Left, show_name: true),
+    ],
+)

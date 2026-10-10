@@ -1,0 +1,18 @@
+(
+    generated: true,
+    graphics: [
+        Rect(a: (-5.08, -7.62), b: (5.08, 10.16)),
+        Text(at: (-5.08, -8.89), text: "${name}"),
+        Text(at: (-5.08, 11.43), text: "regfile_gates"),
+    ],
+    pins: [
+        (port: "ra1", at: (-7.62, -5.08), direction: Right, show_name: true),
+        (port: "ra2", at: (-7.62, -2.54), direction: Right, show_name: true),
+        (port: "wa", at: (-7.62, 0.0), direction: Right, show_name: true),
+        (port: "wd", at: (-7.62, 2.54), direction: Right, show_name: true),
+        (port: "we", at: (-7.62, 5.08), direction: Right, show_name: true),
+        (port: "clk", at: (-7.62, 7.62), direction: Right, show_name: true),
+        (port: "rd1", at: (7.62, 0.0), direction: Left, show_name: true),
+        (port: "rd2", at: (7.62, 2.54), direction: Left, show_name: true),
+    ],
+)

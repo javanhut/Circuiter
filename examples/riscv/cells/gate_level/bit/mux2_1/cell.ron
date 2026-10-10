@@ -1,0 +1,10 @@
+(
+    description: "One-bit multiplexer from gates: y = sel ? d1 : d0",
+    prefix: "MUX",
+    ports: [
+        (name: "d0", kind: Input),
+        (name: "d1", kind: Input),
+        (name: "sel", kind: Input),
+        (name: "y", kind: Output),
+    ],
+)
