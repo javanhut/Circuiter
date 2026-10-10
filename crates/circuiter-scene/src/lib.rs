@@ -251,6 +251,7 @@ impl Scene {
         let def = design.cell(id)?;
         def.symbol.as_ref()?;
         let instance = Instance {
+            fields: Default::default(),
             name: format!("{}?", def.cell.prefix),
             cell: circuiter_model::CellRef::new(Some(&id.library), &id.cell),
             placement: Transform::default(),
@@ -284,6 +285,7 @@ impl Scene {
         }
         if let Some(symbol) = &def.symbol {
             let instance = Instance {
+                fields: Default::default(),
                 name: format!("{}?", def.cell.prefix),
                 cell: circuiter_model::CellRef::new(Some(&id.library), &id.cell),
                 placement: Transform::default(),
@@ -348,6 +350,19 @@ impl Scene {
         }
         for (i, label) in schematic.labels.iter().enumerate() {
             let at = Pt::from(label.at);
+            // A global label is a flag, as KiCad draws them.
+            if label.global {
+                let dir = port_direction(schematic, label.at);
+                b.flag(
+                    Owner::Label(i),
+                    Role::NetLabel,
+                    at,
+                    dir,
+                    &label.net,
+                    PortKind::Bidirectional,
+                );
+                continue;
+            }
             b.push(
                 Role::NetLabel,
                 Owner::Label(i),
@@ -367,6 +382,22 @@ impl Scene {
             b.port_flag(i, port.at.into(), dir, &port.port, kind);
         }
 
+        // No-connect flags: a cross on the pin.
+        for &p in &schematic.no_connects {
+            let c = Pt::from(p);
+            let h = 0.635;
+            for (a, z) in [((-h, -h), (h, h)), ((-h, h), (h, -h))] {
+                b.push(
+                    Role::Wire,
+                    Owner::Derived,
+                    Shape::Polyline {
+                        points: vec![Pt::new(c.x + a.0, c.y + a.1), Pt::new(c.x + z.0, c.y + z.1)],
+                        closed: false,
+                        filled: false,
+                    },
+                );
+            }
+        }
         for &p in &connectivity.junctions {
             b.push(
                 Role::Junction,
@@ -743,6 +774,11 @@ impl Builder {
     }
 
     fn port_flag(&mut self, index: usize, at: Pt, dir: Pt, name: &str, kind: PortKind) {
+        self.flag(Owner::Port(index), Role::Port, at, dir, name, kind);
+    }
+
+    /// A named flag pointing along `dir` from `at`, shaped by the kind of pin it is.
+    fn flag(&mut self, owner: Owner, role: Role, at: Pt, dir: Pt, name: &str, kind: PortKind) {
         let size = 1.27;
         let h = size * 1.6;
         let text_w = name.chars().count() as f64 * size * CHAR_WIDTH;
@@ -778,9 +814,8 @@ impl Builder {
         let to_world = |(u, v): (f64, f64)| {
             Pt::new(at.x + u * dir.x - v * dir.y, at.y + u * dir.y + v * dir.x)
         };
-        let owner = Owner::Port(index);
         self.push(
-            Role::Port,
+            role,
             owner,
             Shape::Polyline {
                 points: local.into_iter().map(to_world).collect(),
@@ -789,7 +824,7 @@ impl Builder {
             },
         );
         self.push(
-            Role::Port,
+            role,
             owner,
             Shape::Text {
                 at: to_world((len / 2.0, 0.0)),
@@ -887,6 +922,7 @@ mod tests {
 
     fn instance(cell: &str, params: &[(&str, &str)]) -> Instance {
         Instance {
+            fields: Default::default(),
             name: "R7".into(),
             cell: cell.parse().unwrap(),
             placement: Transform::default(),

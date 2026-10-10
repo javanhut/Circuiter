@@ -1,0 +1,5 @@
+(
+    description: "Pin header, 2 way (2.54 mm pin header): where wires, cables or another board connect. It has no electrical model: in simulation its pins are just connection points",
+    prefix: "J",
+    ports: [(name: "p1", description: "Pin 1"), (name: "p2", description: "Pin 2")],
+)

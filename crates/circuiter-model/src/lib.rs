@@ -5,6 +5,8 @@
 //! a [`project::Project`] owns one library and refers to others; a [`design::Design`]
 //! ties the libraries together, resolves references and elaborates the hierarchy.
 
+pub mod annotate;
+pub mod board;
 pub mod builder;
 pub mod cell;
 pub mod check;

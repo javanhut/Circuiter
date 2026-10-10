@@ -113,6 +113,9 @@ fn power_supply(design: &Design) -> CellDef {
     sh.nets(c2, &[("a", "5v"), ("b", "GND")]);
     sh.nets(rl, &[("a", "5v"), ("b", "GND")]);
     sh.nets(dmm, &[("p", "5v"), ("com", "GND")]);
+    // The rectifiers feed `raw`, which the rules check can't see through: flag it.
+    let flg = sh.part("std:pwr_flag", "FLG1", 64, 18, &[]);
+    sh.nets(flg, &[("pwr", "raw")]);
     cell(
         "power_supply",
         "Linear power supply: 230 V mains, a 15:1 centre-tapped transformer, full-wave \
@@ -388,6 +391,55 @@ fn case_lid() -> CellDef {
     lid
 }
 
+/// The blinker's board: parts placed, each connection a plain two-leg track where one
+/// fits within the design rules (the rest left on the ratsnest to route by hand), a
+/// ground pour on the back, and a vented case.
+fn blinker_board(design: &Design) -> circuiter_model::board::Board {
+    use circuiter_model::board::{Layer, Track, Zone};
+    use circuiter_model::geom::Length;
+    use circuiter_pcb::layout::{Layout, point};
+    let id = circuiter_model::CellId::new(PROJECT, "blinker");
+    let mut board = circuiter_pcb::sync::new_board(design, &id).expect("a board");
+    let o = board.outline.clone();
+    board.zones.push(Zone::new(Layer::BCu, "GND", o));
+    loop {
+        let layout = Layout::new(design, &id, &board).expect("laid out");
+        let checked = circuiter_pcb::drc::check(&layout);
+        let unrouted = checked.connectivity.unrouted();
+        let mut better = None;
+        'search: for (net, a, b) in &checked.connectivity.ratsnest {
+            for layer in [Layer::FCu, Layer::BCu] {
+                for corner in [[b[0], a[1]], [a[0], b[1]]] {
+                    let mut trial = board.clone();
+                    for (p, q) in [(*a, corner), (corner, *b)] {
+                        if p != q {
+                            trial.tracks.push(Track {
+                                layer,
+                                a: point(p),
+                                b: point(q),
+                                width: Length::from_mm(0.3),
+                                net: net.clone(),
+                            });
+                        }
+                    }
+                    let l = Layout::new(design, &id, &trial).expect("laid out");
+                    let c = circuiter_pcb::drc::check(&l);
+                    if c.errors() == 0 && c.connectivity.unrouted() < unrouted {
+                        better = Some(trial);
+                        break 'search;
+                    }
+                }
+            }
+        }
+        match better {
+            Some(b) => board = b,
+            None => break,
+        }
+    }
+    board.enclosure = Some(circuiter_model::board::Enclosure { vents: true, ..Default::default() });
+    board
+}
+
 fn main() {
     let dir =
         PathBuf::from(std::env::args().nth(1).unwrap_or_else(|| "examples/analog_lab".into()));
@@ -401,6 +453,12 @@ fn main() {
     }
     library.insert(case());
     library.insert(case_lid());
+    // The blinker laid out on a board, in a case.
+    let mut with_lib = Design::new();
+    with_lib.add_library(circuiter_stdlib::library()).expect("std");
+    with_lib.add_library(library.clone()).expect("project");
+    let board = blinker_board(&with_lib);
+    library.cells.get_mut("blinker").expect("blinker").board = Some(board);
     let manifest = dir.join(circuiter_model::project::MANIFEST_FILE);
     let project = if manifest.is_file() {
         let mut p = Project::load(&dir).expect("existing project");

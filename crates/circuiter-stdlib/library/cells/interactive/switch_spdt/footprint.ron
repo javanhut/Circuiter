@@ -1,0 +1,4 @@
+(
+    package: "toggle_switch",
+    pins: {"a": "1", "b": "3", "com": "2"},
+)

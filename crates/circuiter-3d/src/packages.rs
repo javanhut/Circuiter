@@ -36,6 +36,8 @@ pub const PACKAGES: &[&str] = &[
     "toggle_switch",
     "tactile",
     "transformer",
+    "header",
+    "terminal",
 ];
 
 /// The parameters a package reads, with their values.
@@ -107,6 +109,8 @@ pub fn generate(package: &str, p: Params<'_>) -> Result<Mesh, String> {
         "toggle_switch" => toggle_switch(p),
         "tactile" => tactile(p),
         "transformer" => transformer(p),
+        "header" => header(p),
+        "terminal" => terminal(p),
         other => return Err(format!("no 3D package called `{other}`")),
     })
 }
@@ -140,7 +144,7 @@ pub fn resistor_bands(ohms: f64) -> [&'static str; 4] {
 // ---- Two-lead parts ------------------------------------------------------------------
 
 /// An axial part: `style` resistor (with colour bands from `R`), diode (a cathode band
-/// at +X) or plain.
+/// at −X, over pad 1 as KiCad numbers it) or plain.
 fn axial(p: Params<'_>) -> Mesh {
     let style = text(p, "style", "resistor");
     let l = num(p, "length", 6.3);
@@ -174,7 +178,7 @@ fn axial(p: Params<'_>) -> Mesh {
         }
     } else if style == "diode" {
         let band = color(&text(p, "band", "silver"));
-        body.append(cylinder(r * 1.02, l * 0.78, l * 0.9, 24, band));
+        body.append(cylinder(r * 1.02, l * 0.1, l * 0.22, 24, band));
     }
     let mut m = along_x(body, l, zc);
     for s in [-1.0f32, 1.0] {
@@ -223,9 +227,10 @@ fn led(p: Params<'_>) -> Mesh {
         profile.push((r * a.cos(), h - r + r * a.sin()));
     }
     let mut m = lathe(&profile, 32, lens);
-    // The anode (−X) lead is the longer one.
-    m.append(leads(&[(-1.27, 0.0)], 1.0));
-    m.append(rod([1.27, 0.0, BELOW + 1.0], [1.27, 0.0, 1.0], LEAD, 8, tin()));
+    // The anode (+X) lead is the longer one; the cathode is on the left, as the
+    // footprint's pad 1 is.
+    m.append(leads(&[(1.27, 0.0)], 1.0));
+    m.append(rod([-1.27, 0.0, BELOW + 1.0], [-1.27, 0.0, 1.0], LEAD, 8, tin()));
     m
 }
 
@@ -282,8 +287,8 @@ fn fuse(p: Params<'_>) -> Mesh {
         m.append(wire(
             &[
                 [s * l / 2.0, 0.0, zc],
-                [s * (l / 2.0 + 1.5), 0.0, zc],
-                [s * (l / 2.0 + 1.5), 0.0, BELOW],
+                [s * (l / 2.0 + 1.3), 0.0, zc],
+                [s * (l / 2.0 + 1.3), 0.0, BELOW],
             ],
             LEAD,
             tin(),
@@ -399,7 +404,9 @@ fn dip(p: Params<'_>) -> Result<Mesh, String> {
             m.append(cuboid([x - 0.25, y1 - 0.13, BELOW], [x + 0.25, y1 + 0.13, 0.5], tin()));
         }
     }
-    Ok(m)
+    // Stood with its rows running up the board, pin 1 at the top left, as KiCad's
+    // footprints have it.
+    Ok(m.transformed(&Mat4::rotate_z(-FRAC_PI_2)))
 }
 
 fn bridge() -> Mesh {
@@ -529,8 +536,8 @@ fn pot(p: Params<'_>) -> Mesh {
     let angle = (-135.0 + 270.0 * position).to_radians();
     let pointer = cuboid([-0.4, 0.0, 19.0], [0.4, 5.2, 19.2], color("white"));
     m.append(pointer.transformed(&Mat4::rotate_z(-angle)));
-    m.append(leads(&[(-2.54, -6.0), (0.0, -6.0), (2.54, -6.0)], 0.5));
-    m.append(cuboid([-3.0, -6.2, 0.4], [3.0, -5.0, 0.6], tin()));
+    m.append(leads(&[(-2.54, 6.0), (0.0, 6.0), (2.54, 6.0)], 0.5));
+    m.append(cuboid([-3.0, 5.0, 0.4], [3.0, 6.2, 0.6], tin()));
     m
 }
 
@@ -572,6 +579,33 @@ fn transformer(p: Params<'_>) -> Mesh {
     m
 }
 
+/// A 1 × N pin header, 2.54 mm pitch: a black plastic strip with square gold pins.
+fn header(p: Params<'_>) -> Mesh {
+    let n = num(p, "pins", 2.0).round().max(1.0) as i32;
+    let x0 = -(n - 1) as f32 * 1.27;
+    let mut m = cuboid([x0 - 1.27, -1.27, 0.0], [-x0 + 1.27, 1.27, 2.5], color("black"));
+    for k in 0..n {
+        let x = x0 + 2.54 * k as f32;
+        m.append(cuboid([x - 0.32, -0.32, BELOW], [x + 0.32, 0.32, 8.5], color("gold")));
+    }
+    m
+}
+
+/// A screw terminal block, 5.08 mm pitch: green, a wire entry and a screw per way.
+fn terminal(p: Params<'_>) -> Mesh {
+    let n = num(p, "pins", 2.0).round().max(1.0) as i32;
+    let x0 = -(n - 1) as f32 * 2.54;
+    let mut m = cuboid([x0 - 2.54, -4.0, 0.0], [-x0 + 2.54, 4.0, 10.0], color("green"));
+    for k in 0..n {
+        let x = x0 + 5.08 * k as f32;
+        m.append(cylinder(1.6, 10.0, 10.1, 20, color("silver")).translated([x, 1.0, 0.0]));
+        m.append(cuboid([x - 1.2, 0.85, 10.1], [x + 1.2, 1.15, 10.2], color("black")));
+        m.append(cuboid([x - 1.6, -4.05, 3.0], [x + 1.6, -3.95, 6.2], color("black")));
+        m.append(rod([x, 0.0, BELOW], [x, 0.0, 0.0], 0.5, 8, tin()));
+    }
+    m
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -609,12 +643,13 @@ mod tests {
 
     #[test]
     fn a_dip_grows_with_its_pins_and_a_switch_lever_follows_its_state() {
-        let width = |pins: &str| {
+        // Rows run up the board (along Y), as the footprint's do.
+        let length = |pins: &str| {
             let p = params(&[("pins", pins)]);
             let (lo, hi) = generate("dip", &|k| p.get(k).cloned()).unwrap().bounds().unwrap();
-            hi[0] - lo[0]
+            hi[1] - lo[1]
         };
-        assert!((width("16") - width("8") - 4.0 * 2.54).abs() < 0.01);
+        assert!((length("16") - length("8") - 4.0 * 2.54).abs() < 0.01);
         // Where the lever's tip is: the mean X of everything above the bushing.
         let tip = |on: &str| {
             let p = params(&[("on", on)]);

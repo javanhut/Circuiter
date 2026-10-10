@@ -1,0 +1,4 @@
+(
+    package: "tactile",
+    pins: {"a": "1,3", "b": "2,4"},
+)

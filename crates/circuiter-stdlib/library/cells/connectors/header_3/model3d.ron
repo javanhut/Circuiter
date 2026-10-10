@@ -1,0 +1,4 @@
+(
+    package: "header",
+    params: {"pins": "3"},
+)

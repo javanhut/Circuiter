@@ -1,0 +1,9 @@
+(
+    graphics: [
+        Polyline(
+            points: [(0.0, -1.27), (-1.016, -2.032), (0.0, -2.794), (1.016, -2.032), (0.0, -1.27)],
+        ),
+        Text(at: (0.0, -3.81), text: "PWR_FLAG", size: 0.889, anchor: Center),
+    ],
+    pins: [(port: "pwr", at: (0.0, 0.0), direction: Up, length: 1.27)],
+)

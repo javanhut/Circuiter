@@ -1,0 +1,4 @@
+(
+    package: "disc",
+    params: {"pitch": "5.08"},
+)

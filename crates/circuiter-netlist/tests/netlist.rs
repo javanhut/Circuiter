@@ -81,6 +81,7 @@ fn single_pin_nets_are_warned_about() {
     *tb.schematic.as_mut().unwrap() = Schematic {
         instances: vec![
             Instance {
+                fields: Default::default(),
                 name: "R1".into(),
                 cell: "std:resistor".parse().unwrap(),
                 placement: Transform::default(),
@@ -88,6 +89,7 @@ fn single_pin_nets_are_warned_about() {
                 view: None,
             },
             Instance {
+                fields: Default::default(),
                 name: "G".into(),
                 cell: "std:gnd".parse().unwrap(),
                 placement: Transform::at(Point::mm(0.0, 20.0)),

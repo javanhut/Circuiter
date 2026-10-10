@@ -17,6 +17,8 @@ use circuiter_model::units::parse_quantity;
 use circuiter_model::{CellId, Design};
 use std::collections::{BTreeMap, BTreeSet};
 
+pub mod erc;
+
 /// The global net that is the circuit's reference, SPICE node `0`.
 pub const GROUND: &str = "GND";
 
@@ -31,6 +33,20 @@ pub struct FlatNet {
     pub pins: Vec<(String, String)>,
     /// Bits: 1 for a wire, more for a bus.
     pub width: u32,
+}
+
+/// A part on the board: one with a footprint, from the physical flattening.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PhysicalElement {
+    /// Instance path from the top cell: `R1`, `X1.R2`.
+    pub path: String,
+    pub cell: CellId,
+    /// The instance's own parameter values (the rest are the cell's defaults).
+    pub params: BTreeMap<String, String>,
+    /// Its fields for the bill of materials (`MPN`, `DNP`…).
+    pub fields: BTreeMap<String, String>,
+    /// Each port of the cell and the net it is on.
+    pub ports: Vec<(String, usize)>,
 }
 
 /// A leaf element of the flattened circuit, such as one transistor.
@@ -83,9 +99,28 @@ pub struct Netlist {
     /// each of its local nets, in the order of [`Connectivity::nets`].
     pub sheets: BTreeMap<String, Vec<usize>>,
     pub diagnostics: Vec<Diagnostic>,
+    /// The parts with footprints, from [`Netlist::build_physical`].
+    pub physical: Vec<PhysicalElement>,
+    /// Parts on the sheets that have no footprint, so aren't on the board (sources,
+    /// meters): their instance paths.
+    pub off_board: Vec<String>,
 }
 
 impl Netlist {
+    /// Flattens the hierarchy under `top` into the parts that go on a board: each part
+    /// with a footprint is one, cells without one are opened to their schematics, and
+    /// parts with neither are listed as off the board. Nets are named as in simulation.
+    pub fn build_physical(design: &Design, top: &CellId) -> Result<Netlist, String> {
+        let def = design.cell(top).ok_or_else(|| format!("cell {top} not found"))?;
+        if def.schematic.is_none() {
+            return Err(format!("{top} has no schematic"));
+        }
+        let mut b = Builder::new(design, top);
+        b.physical = true;
+        b.sheet(top, def, "", 0, &BTreeMap::new(), &mut vec![top.clone()]);
+        Ok(b.finish())
+    }
+
     /// Flattens the hierarchy under `top`. Problems that make an element impossible to
     /// write leave it out and are reported in [`Netlist::diagnostics`].
     pub fn build(design: &Design, top: &CellId) -> Result<Netlist, String> {
@@ -136,7 +171,7 @@ impl Netlist {
                 let Some((child_id, child)) = design.resolve(&inst.cell, &id.library) else {
                     continue;
                 };
-                if child.cell.global_net.is_some() {
+                if child.cell.global_net.is_some() || child.cell.power_flag {
                     continue;
                 }
                 let digital_only = child.digital.is_some()
@@ -175,7 +210,7 @@ impl Netlist {
             let mut any = false;
             for inst in &s.instances {
                 let (child_id, child) = design.resolve(&inst.cell, &id.library)?;
-                if child.cell.global_net.is_some() {
+                if child.cell.global_net.is_some() || child.cell.power_flag {
                     continue;
                 }
                 match pick_digital(child, inst.view) {
@@ -266,6 +301,10 @@ struct Builder<'a> {
     /// Instruments, whose spare probes may hang free.
     probes: BTreeSet<String>,
     digital_elements: Vec<PendingDigital>,
+    /// Flattening for a board.
+    physical: bool,
+    physical_elements: Vec<PhysicalElement>,
+    off_board: Vec<String>,
     /// The width of each port's net, as (net, width), for every element.
     widths: Vec<(usize, u32)>,
 }
@@ -322,6 +361,9 @@ impl<'a> Builder<'a> {
             mixed: false,
             probes: BTreeSet::new(),
             digital_elements: Vec::new(),
+            physical: false,
+            physical_elements: Vec::new(),
+            off_board: Vec::new(),
             widths: Vec::new(),
         };
         let ground = b.new_net(Candidate { class: 0, depth: 0, source: 0, name: GROUND.into() });
@@ -419,6 +461,10 @@ impl<'a> Builder<'a> {
                 self.report(Severity::Error, format!("{inst_path}: unknown cell `{}`", inst.cell));
                 continue;
             };
+            // A power flag only speaks to the rules check, which reads the analog netlist.
+            if child.cell.power_flag && (self.digital || self.mixed) {
+                continue;
+            }
             let mut pins: BTreeMap<String, usize> = conn
                 .pins
                 .iter()
@@ -433,6 +479,41 @@ impl<'a> Builder<'a> {
                     pins.entry(port.name.clone()).or_insert(net);
                     self.hidden.insert((inst_path.clone(), port.name.clone()));
                 }
+            }
+            if self.physical {
+                if child.footprint.is_some() {
+                    let ports = child
+                        .cell
+                        .ports
+                        .iter()
+                        .map(|port| {
+                            let net = match pins.get(&port.name) {
+                                Some(&n) => n,
+                                None => self.new_net(Candidate {
+                                    class: 2,
+                                    depth: usize::MAX,
+                                    source: 0,
+                                    name: format!("{inst_path}.{}", port.name),
+                                }),
+                            };
+                            (port.name.clone(), net)
+                        })
+                        .collect();
+                    self.physical_elements.push(PhysicalElement {
+                        path: inst_path,
+                        cell: child_id,
+                        params: inst.params.clone(),
+                        fields: inst.fields.clone(),
+                        ports,
+                    });
+                } else if child.schematic.is_some() && !stack.contains(&child_id) {
+                    stack.push(child_id.clone());
+                    self.sheet(&child_id, child, &inst_path, depth + 1, &pins, stack);
+                    stack.pop();
+                } else if child.cell.global_net.is_none() && !child.cell.power_flag {
+                    self.off_board.push(inst_path);
+                }
+                continue;
             }
             let view = if self.digital || self.mixed {
                 pick_digital(child, inst.view)
@@ -771,6 +852,15 @@ impl<'a> Builder<'a> {
                 ports,
             });
         }
+        let pending = std::mem::take(&mut self.physical_elements);
+        let mut physical = Vec::with_capacity(pending.len());
+        for mut e in pending {
+            for (port, id) in &mut e.ports {
+                *id = flat(&mut self, *id);
+                nets[*id].pins.push((e.path.clone(), port.clone()));
+            }
+            physical.push(e);
+        }
         for (id, width) in std::mem::take(&mut self.widths) {
             let net = flat(&mut self, id);
             nets[net].width = nets[net].width.max(width);
@@ -821,7 +911,7 @@ impl<'a> Builder<'a> {
             }
         }
 
-        if nets[0].pins.is_empty() && !self.digital {
+        if nets[0].pins.is_empty() && !self.digital && !self.physical {
             // Physically a circuit works without an earth reference (a battery-powered
             // one does), so this is a warning: voltages are then measured against board
             // leakage and their absolute values are arbitrary.
@@ -851,6 +941,8 @@ impl<'a> Builder<'a> {
             models: self.models,
             sheets,
             diagnostics: self.diagnostics,
+            physical,
+            off_board: self.off_board,
         }
     }
 }

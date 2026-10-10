@@ -9,6 +9,7 @@ use crate::interface;
 use crate::simulation::{self, Results, Simulation};
 use crate::symbol_edit::{self, FINE_GRID};
 use anyhow::{Context as _, Result};
+use circuiter_model::board::Board;
 use circuiter_model::builder;
 use circuiter_model::cell::{Cell, PortKind, validate_name};
 use circuiter_model::check::{Diagnostic, Severity, check_libraries};
@@ -58,7 +59,11 @@ pub enum Tool {
     },
     Label {
         net: String,
+        /// A global label: joins its net everywhere in the design.
+        global: bool,
     },
+    /// No-connect flags: clicking a pin marks it as meant to be left open.
+    NoConnect,
     Port {
         name: String,
         kind: PortKind,
@@ -94,6 +99,7 @@ impl Tool {
             Tool::Place { .. } => "Place",
             Tool::Wire { .. } => "Wire",
             Tool::Label { .. } => "Label",
+            Tool::NoConnect => "No connect",
             Tool::Port { .. } => "Port",
             Tool::Line { .. } => "Line",
             Tool::Rect { .. } => "Rectangle",
@@ -117,7 +123,13 @@ impl Tool {
             Tool::Wire { .. } => {
                 "Click to add a corner · click a pin or wire to finish · double-click to end · / flip corner · Esc cancel"
             }
-            Tool::Label { .. } => "Click a wire or pin to label its net · Esc done",
+            Tool::Label { global: false, .. } => "Click a wire or pin to label its net · Esc done",
+            Tool::Label { .. } => {
+                "Click a wire or pin to give it a global label, joining its net across every sheet · Esc done"
+            }
+            Tool::NoConnect => {
+                "Click a pin that's meant to be left open (click again to take the flag off) · Esc done"
+            }
             Tool::Port { .. } => "Click where the port connects · Esc cancel",
             Tool::Line { points } if points.is_empty() => "Click to start a line · Esc done",
             Tool::Line { .. } => {
@@ -166,6 +178,13 @@ struct History {
     redo: Vec<CellDef>,
 }
 
+/// A rules check running in the background.
+#[derive(Debug)]
+struct ErcJob {
+    key: (u64, CellId),
+    rx: std::sync::mpsc::Receiver<Vec<circuiter_netlist::erc::Violation>>,
+}
+
 #[derive(Debug)]
 pub struct Workspace {
     pub project: Project,
@@ -188,6 +207,12 @@ pub struct Workspace {
     pub sim_error: Option<String>,
     /// What the last edit connected or disconnected, for the status bar.
     pub notice: Option<String>,
+    /// The electrical rules check of the design from the top of the hierarchy shown.
+    pub erc: Vec<circuiter_netlist::erc::Violation>,
+    /// The check running in the background: for which revision and top, and where its
+    /// findings will arrive. Big designs take a moment to flatten.
+    erc_job: Option<ErcJob>,
+    erc_done: Option<(u64, CellId)>,
     /// How close, in mm, the pointer must be to pick something, at the current zoom.
     /// Kept up to date by the canvas, for hover feedback.
     pub pick_tolerance: f64,
@@ -283,6 +308,9 @@ impl Workspace {
             sim: None,
             sim_error: None,
             notice: None,
+            erc: Vec::new(),
+            erc_job: None,
+            erc_done: None,
             pick_tolerance: 0.5,
             wire_from_pin: false,
             clipboard: None,
@@ -378,6 +406,66 @@ impl Workspace {
         let libs = self.checked_libraries();
         let refs: Vec<&str> = libs.iter().map(String::as_str).collect();
         self.diagnostics = check_libraries(&self.design, &refs);
+        let top = self.sim_top().clone();
+        let sheet = self.design.cell(&top).is_some_and(|d| d.schematic.is_some());
+        if !sheet || top.library == STD_LIBRARY {
+            self.erc.clear();
+            self.erc_job = None;
+            self.erc_done = None;
+            return;
+        }
+        let key = (self.revision, top.clone());
+        let running = self.erc_job.as_ref().is_some_and(|j| j.key == key);
+        if self.erc_done.as_ref() == Some(&key) || running {
+            return;
+        }
+        if cfg!(test) {
+            self.erc = circuiter_netlist::erc::check(&self.design, &top);
+            self.erc_done = Some(key);
+            return;
+        }
+        let design = self.design.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(circuiter_netlist::erc::check(&design, &top));
+        });
+        self.erc_job = Some(ErcJob { key, rx });
+    }
+
+    /// Picks up the background rules check's findings; whether it's still running.
+    pub fn poll_erc(&mut self) -> bool {
+        let Some(job) = &self.erc_job else { return false };
+        match job.rx.try_recv() {
+            Ok(found) => {
+                self.erc = found;
+                self.erc_done = self.erc_job.take().map(|j| j.key);
+                false
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => true,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.erc_job = None;
+                false
+            }
+        }
+    }
+
+    /// Renumbers the parts on the sheet shown, keeping the board's footprints with
+    /// them; returns how many were renamed.
+    pub fn annotate(
+        &mut self,
+        order: circuiter_model::annotate::Order,
+        reset: bool,
+    ) -> Result<usize, String> {
+        self.edit(|design, lib, def| {
+            let Some(s) = def.schematic.as_mut() else {
+                return Err("this cell has no schematic".into());
+            };
+            let renames = circuiter_model::annotate::annotate(design, lib, s, order, reset);
+            if let Some(b) = def.board.as_mut() {
+                circuiter_model::annotate::rename_on_board(b, &renames);
+            }
+            Ok(renames.len())
+        })
     }
 
     fn build_scene(&self) -> Option<Scene> {
@@ -672,6 +760,33 @@ impl Workspace {
             self.dirty = true;
             self.refresh();
             self.note_changes(&groups);
+        }
+        Ok(out)
+    }
+
+    /// Changes the current cell's board (`None` until it has one), with undo. The
+    /// circuit is untouched, so simulation results stay valid.
+    pub fn edit_board<T>(
+        &mut self,
+        f: impl FnOnce(&Design, &CellId, &mut Option<Board>) -> Result<T, String>,
+    ) -> Result<T, String> {
+        if !self.editable() {
+            return Err("this cell is read-only".into());
+        }
+        let id = self.current().cell.clone();
+        let before = self.design.cell(&id).cloned().ok_or("cell not found")?;
+        let mut board = before.board.clone();
+        let out = f(&self.design, &id, &mut board)?;
+        if board != before.board {
+            let h = self.history.entry(id.clone()).or_default();
+            h.undo.push(before);
+            if h.undo.len() > HISTORY_LIMIT {
+                h.undo.remove(0);
+            }
+            h.redo.clear();
+            self.design.cell_mut(&id).expect("exists").board = board;
+            self.revision += 1;
+            self.dirty = true;
         }
         Ok(out)
     }
@@ -982,6 +1097,34 @@ impl Workspace {
 
     /// Adds a part made from a Verilog module to the project, in the `hdl` folder, or
     /// brings an existing one up to date with its module (keeping a drawn symbol).
+    /// A new 3D part in the project's library, modelled by `body`: named `name`, or
+    /// `name_2`… if that's taken. Returns its id.
+    pub fn add_body_part(
+        &mut self,
+        name: &str,
+        folder: &str,
+        body: circuiter_model::model3d::Model3d,
+    ) -> Result<CellId, String> {
+        let lib = self.project.name().to_owned();
+        let library = self.design.library_mut(&lib).ok_or("project library missing")?;
+        let name = (1..)
+            .map(|k| if k == 1 { name.to_owned() } else { format!("{name}_{k}") })
+            .find(|n| library.cell(n).is_none())
+            .expect("a free name");
+        validate_name(&name)?;
+        library.insert(CellDef {
+            name: name.clone(),
+            folder: folder.to_owned(),
+            cell: Cell { description: format!("{name}: a modelled body"), ..Cell::default() },
+            model3d: Some(body),
+            ..CellDef::default()
+        });
+        self.dirty = true;
+        self.revision += 1;
+        self.recheck();
+        Ok(CellId::new(&lib, &name))
+    }
+
     pub fn add_hdl_part(&mut self, def: CellDef) -> Result<CellId, String> {
         let lib = self.project.name().to_owned();
         let id = CellId::new(&lib, &def.name);
@@ -1013,6 +1156,27 @@ impl Workspace {
             .as_ref()
             .and_then(|l| l.shared.lock().ok().map(|s| s.states.clone()))
             .unwrap_or_default()
+    }
+
+    /// The running circuit's parts as the board shows them in 3D: each operated part's
+    /// parameter as it's set now, and each light's brightness. Empty when not running.
+    pub fn live_board(&self) -> circuiter_pcb::board3d::Live {
+        let mut out = circuiter_pcb::board3d::Live::default();
+        let Some(live) = &self.live else { return out };
+        let Ok(shared) = live.shared.lock() else { return out };
+        for (path, value) in &shared.states {
+            if let Some(kind) = live.control(path) {
+                out.params
+                    .entry(path.clone())
+                    .or_default()
+                    .insert(kind.param().to_owned(), value.clone());
+            }
+        }
+        for (path, (g, _)) in &shared.glow {
+            // In steps, so a flicker doesn't rebuild the board every frame.
+            out.glow.insert(path.clone(), (g * 10.0).round() / 10.0);
+        }
+        out
     }
 
     /// Starts the design being viewed running live, at `speed` simulated seconds per
@@ -1650,8 +1814,13 @@ impl Workspace {
                 }
             }
             (Tool::Wire { .. }, Gesture::DoubleClick { .. }) => self.finish_wire(),
-            (Tool::Label { net }, Gesture::Click { at, .. }) => {
-                return self.edit(|_, _, def| edit::add_label(def, &net, snapped(at))).err();
+            (Tool::Label { net, global }, Gesture::Click { at, .. }) => {
+                return self
+                    .edit(|_, _, def| edit::add_label(def, &net, snapped(at), global))
+                    .err();
+            }
+            (Tool::NoConnect, Gesture::Click { at, .. }) => {
+                return self.edit(|_, _, def| edit::toggle_no_connect(def, snapped(at))).err();
             }
             (Tool::Port { name, kind }, Gesture::Click { at, .. }) => {
                 let result = self.edit(|_, _, def| edit::add_port(def, &name, kind, snapped(at)));
@@ -1984,6 +2153,7 @@ impl Workspace {
                     edit::next_instance_name(s, &prefix.unwrap_or_default())
                 });
                 let inst = Instance {
+                    fields: Default::default(),
                     name,
                     cell: cell.clone(),
                     placement: Transform { position: at, rotation: *rotation, mirror: *mirror },
@@ -1999,7 +2169,7 @@ impl Workspace {
                     overlay.wire = all.into_iter().map(Pt::from).collect();
                 }
             }
-            Tool::Label { net } => overlay.ghost.push(text(net.clone(), Role::NetLabel)),
+            Tool::Label { net, .. } => overlay.ghost.push(text(net.clone(), Role::NetLabel)),
             Tool::Port { name, .. } => overlay.ghost.push(text(format!("port {name}"), Role::Port)),
             _ => {}
         }
@@ -2064,6 +2234,7 @@ impl Workspace {
             return Vec::new();
         }
         let inst = Instance {
+            fields: Default::default(),
             name: format!("{}?", def.cell.prefix),
             cell: circuiter_model::CellRef::new(None, &def.name),
             placement: Transform::at(at),
@@ -2248,6 +2419,17 @@ impl Workspace {
                         pin.port
                     ),
                 ));
+            }
+            // The rules check: findings on this sheet, and the circuit's own at the top.
+            let sheet = self.sheet_path();
+            for v in &self.erc {
+                let here = match &v.sheet {
+                    Some(s) => *s == sheet,
+                    None => self.levels.len() == 1,
+                };
+                if here {
+                    out.push((v.severity, format!("ERC: {}", v.message)));
+                }
             }
             for net in &conn.nets {
                 if net.names.len() > 1 {
@@ -2553,6 +2735,56 @@ mod tests {
         (tmp, ws)
     }
 
+    /// Q and a click flag a pin as meant to be open; a second click takes it off.
+    #[test]
+    fn no_connect_flags_quiet_open_pins() {
+        let (_tmp, mut ws) = two_resistors();
+        let open = |ws: &Workspace| {
+            ws.problems().iter().filter(|(_, m)| m.contains("not connected")).count()
+        };
+        assert_eq!(open(&ws), 4);
+        ws.tool = Tool::NoConnect;
+        assert!(ws.gesture(Gesture::Click { at: Pt::new(5.1, 0.1), shift: false }, 0.5).is_none());
+        assert_eq!(ws.schematic().unwrap().no_connects, vec![Point::mm(5.08, 0.0)]);
+        assert_eq!(open(&ws), 3);
+        assert!(ws.gesture(Gesture::Click { at: Pt::new(5.0, 0.0), shift: false }, 0.5).is_none());
+        assert!(ws.schematic().unwrap().no_connects.is_empty());
+        assert_eq!(open(&ws), 4);
+    }
+
+    /// Annotating renumbers by position and the board's footprints follow.
+    #[test]
+    fn annotation_renames_parts_and_their_footprints() {
+        let (_tmp, mut ws) = two_resistors();
+        // Swap the names, so reading order disagrees with them, and lay out a board.
+        ws.edit(|_, _, d| {
+            let s = d.schematic.as_mut().unwrap();
+            s.instances[0].name = "R7".into();
+            s.instances[1].name = "R3".into();
+            Ok(())
+        })
+        .unwrap();
+        ws.edit_board(|design, id, b| {
+            *b = Some(circuiter_pcb::sync::new_board(design, id)?);
+            Ok(())
+        })
+        .unwrap();
+        let at = |ws: &Workspace, path: &str| {
+            ws.current_def().unwrap().board.as_ref().unwrap().placed(path).map(|f| f.at)
+        };
+        let (r7, r3) = (at(&ws, "R7").unwrap(), at(&ws, "R3").unwrap());
+        let renamed = ws.annotate(circuiter_model::annotate::Order::Rows, true).unwrap();
+        assert_eq!(renamed, 2);
+        let names: Vec<String> =
+            ws.schematic().unwrap().instances.iter().map(|i| i.name.clone()).collect();
+        assert_eq!(names, ["R1", "R2"], "left to right");
+        assert_eq!(at(&ws, "R1"), Some(r7), "R7's footprint is R1's now");
+        assert_eq!(at(&ws, "R2"), Some(r3));
+        ws.undo();
+        assert_eq!(ws.schematic().unwrap().instances[0].name, "R7");
+        assert_eq!(at(&ws, "R7"), Some(r7));
+    }
+
     #[test]
     fn dragging_out_of_a_pin_draws_a_wire() {
         let (_tmp, mut ws) = two_resistors();
@@ -2804,7 +3036,7 @@ mod tests {
         let (tmp, mut ws) = blank_sheet();
         ws.tool = Tool::Port { name: "in".into(), kind: PortKind::Input };
         assert!(click(&mut ws, 0.0, 0.0).is_none());
-        ws.tool = Tool::Label { net: "MID".into() };
+        ws.tool = Tool::Label { net: "MID".into(), global: false };
         click(&mut ws, 10.16, 0.0);
         assert_eq!(ws.current_def().unwrap().cell.ports.len(), 1);
         ws.save().unwrap();
@@ -3033,7 +3265,7 @@ mod tests {
         let out = pin_at(&ws, "X1", "out");
         let tail = Pt::new(out.x + 7.62, out.y);
         drag_wire(&mut ws, out, tail);
-        ws.tool = Tool::Label { net: "OUT".into() };
+        ws.tool = Tool::Label { net: "OUT".into(), global: false };
         assert!(click(&mut ws, tail.x, tail.y).is_none());
         let v1 = instance(&ws, "V1");
         ws.edit(|_, _, d| {
@@ -3079,7 +3311,7 @@ mod tests {
         drag_wire(&mut ws, from, to);
         let (from, to) = (pin_at(&ws, "R2", "b"), pin_at(&ws, "GND2", "gnd"));
         drag_wire(&mut ws, from, to);
-        ws.tool = Tool::Label { net: "OUT".into() };
+        ws.tool = Tool::Label { net: "OUT".into(), global: false };
         assert!(click(&mut ws, 10.16, -10.16).is_none());
         assert!(ws.scene.connectivity.dangling_pins.is_empty(), "{:?}", ws.problems());
 
@@ -3120,7 +3352,7 @@ mod tests {
         let out = pin_at(&ws, "X1", "OUT");
         let tail = Pt::new(out.x + 7.62, out.y);
         drag_wire(&mut ws, out, tail);
-        ws.tool = Tool::Label { net: "Y".into() };
+        ws.tool = Tool::Label { net: "Y".into(), global: false };
         assert!(click(&mut ws, tail.x, tail.y).is_none());
         let v1 = instance(&ws, "V1");
         ws.edit(|_, _, d| {

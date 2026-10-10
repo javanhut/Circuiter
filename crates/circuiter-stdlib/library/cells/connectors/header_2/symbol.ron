@@ -1,0 +1,12 @@
+(
+    graphics: [
+        Rect(a: (-2.54, -2.54), b: (0.0, 2.54)),
+        Text(at: (-2.54, -3.81), text: "${name}"),
+        Rect(a: (-1.778, -0.381), b: (-1.016, 0.381), fill: true),
+        Rect(a: (-1.778, 2.159), b: (-1.016, 2.921), fill: true),
+    ],
+    pins: [
+        (port: "p1", at: (-5.08, 0.0), direction: Right),
+        (port: "p2", at: (-5.08, 2.54), direction: Right),
+    ],
+)

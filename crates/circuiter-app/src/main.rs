@@ -35,7 +35,8 @@ pub struct Args {
     /// Colour theme: `paper` or `bench`.
     #[arg(long)]
     pub theme: Option<String>,
-    /// View to show: `schematic`, `symbol` or `3d`.
+    /// View to show: `schematic`, `symbol`, `pcb`, `3d`, or `board3d` (the laid-out
+    /// board in 3D).
     #[arg(long)]
     pub view: Option<String>,
     /// Select an instance (or, in the symbol view, a pin; in the 3D view, a feature of
@@ -51,7 +52,8 @@ pub struct Args {
     /// Start the circuit running live after opening.
     #[arg(long)]
     pub live: bool,
-    /// Show this tab of the results panel: waveforms, thermal, problems or oscilloscope.
+    /// Show this tab of the results panel: waveforms, thermal, problems or oscilloscope
+    /// (or `none` to hide the panel).
     #[arg(long)]
     pub results: Option<String>,
     /// Open a program (relative to the project) in the code editor.

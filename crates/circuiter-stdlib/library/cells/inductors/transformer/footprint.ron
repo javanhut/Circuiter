@@ -1,0 +1,4 @@
+(
+    package: "transformer",
+    pins: {"p1": "1", "p2": "2", "s1": "3", "s2": "5"},
+)

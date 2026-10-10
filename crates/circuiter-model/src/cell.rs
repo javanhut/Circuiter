@@ -9,6 +9,7 @@ use crate::schematic::Schematic;
 use crate::spice::SpiceView;
 use crate::symbol::Symbol;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
 
@@ -25,6 +26,8 @@ pub struct Cell {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub params: Vec<ParamDef>,
     /// Power and ground symbols: every instance's single port joins this global net.
+    /// `${param.X}` names it after the instance's parameter `X`, so one symbol serves
+    /// every rail (`+5V`, `+3V3`, `-12V`), as KiCad's value-named power symbols do.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub global_net: Option<String>,
     /// How the part heats up and what destroys it.
@@ -34,6 +37,10 @@ pub struct Cell {
     /// wire, not only at the wire's ends and corners.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub probe: bool,
+    /// A power flag: says its net is supplied from somewhere the electrical rules
+    /// check can't see (KiCad's PWR_FLAG). It does nothing in simulation.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub power_flag: bool,
 }
 
 /// A part's thermal behaviour, its absolute limits and how it fails.
@@ -110,11 +117,26 @@ impl Default for Cell {
             global_net: None,
             physics: None,
             probe: false,
+            power_flag: false,
         }
     }
 }
 
 impl Cell {
+    /// The global net an instance with these parameter values joins, if this is a
+    /// power or ground symbol.
+    pub fn global_net_for(&self, params: &BTreeMap<String, String>) -> Option<String> {
+        let g = self.global_net.as_ref()?;
+        match g.strip_prefix("${param.").and_then(|r| r.strip_suffix('}')) {
+            Some(name) => params
+                .get(name)
+                .cloned()
+                .or_else(|| self.param(name)?.default.clone())
+                .filter(|n| !n.trim().is_empty()),
+            None => Some(g.clone()),
+        }
+    }
+
     pub fn port(&self, name: &str) -> Option<&Port> {
         self.ports.iter().find(|p| p.name == name)
     }
@@ -315,6 +337,10 @@ pub struct CellDef {
     pub digital: Option<crate::digital::DigitalView>,
     /// The physical body, for 3D views.
     pub model3d: Option<crate::model3d::Model3d>,
+    /// Its footprint on a board: pads, silkscreen, courtyard.
+    pub footprint: Option<crate::board::FootprintView>,
+    /// The board this cell's schematic is laid out on.
+    pub board: Option<crate::board::Board>,
 }
 
 impl CellDef {

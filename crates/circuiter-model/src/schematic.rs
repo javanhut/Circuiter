@@ -17,6 +17,9 @@ pub struct Schematic {
     /// Where each of the cell's ports attaches inside this schematic.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ports: Vec<SchematicPort>,
+    /// No-connect flags: pins here are meant to be left unconnected.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub no_connects: Vec<Point>,
 }
 
 impl Schematic {
@@ -39,6 +42,19 @@ pub struct Instance {
     /// level while the rest use fast models). `None` uses the design's view order.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view: Option<ViewKind>,
+    /// Fields for the bill of materials and the board house, as KiCad has them:
+    /// `MPN`, `Manufacturer`, `Datasheet`, and `DNP` (do not populate) when set.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fields: BTreeMap<String, String>,
+}
+
+impl Instance {
+    /// Whether the part is left off the assembled board (its `DNP` field is set).
+    pub fn dnp(&self) -> bool {
+        self.fields
+            .get("DNP")
+            .is_some_and(|v| !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false"))
+    }
 }
 
 /// A wire drawn as a polyline. Connects to pins, ports, labels and other wires at its
@@ -48,11 +64,18 @@ pub struct Wire {
     pub points: Vec<Point>,
 }
 
-/// Names the net at a point. Labels with the same name in one schematic are connected.
+/// Names the net at a point. Labels with the same name in one schematic are connected;
+/// a global label joins its net everywhere in the design, across the hierarchy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetLabel {
     pub net: String,
     pub at: Point,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub global: bool,
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
 }
 
 /// The attachment point of one of the cell's ports inside its own schematic.

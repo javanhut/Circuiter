@@ -171,12 +171,74 @@ impl CircuiterApp {
         }
         let (_, draft, _) = ed.draft.as_mut().expect("set");
         let mut commit = false;
+        let symbol = ws.current_def().and_then(|d| d.symbol.clone());
+        let mut import = false;
         ui.horizontal(|ui| {
             ui.label(RichText::new(format!("{}  Body", icon::CUBE)).strong().size(15.0));
             if !editable {
                 ui.label(RichText::new("read-only").color(p.weak));
             }
+            style::trailing(ui, |ui| {
+                ui.add_enabled_ui(editable, |ui| {
+                    ui.menu_button(format!("{}  From 2D", icon::POLYGON), |ui| {
+                        if ui
+                            .button("Import Outline (DXF, SVG)…")
+                            .on_hover_text(
+                                "Extrude a drawing's outline; its inner outlines become holes",
+                            )
+                            .clicked()
+                        {
+                            import = true;
+                            ui.close();
+                        }
+                        if ui
+                            .add_enabled(symbol.is_some(), egui::Button::new("From the Symbol"))
+                            .on_hover_text(
+                                "The symbol's outline as a body, its inner drawings raised on top",
+                            )
+                            .clicked()
+                        {
+                            if let Some(sym) = &symbol {
+                                let loops = symbol_loops(sym);
+                                if loops.is_empty() {
+                                    self.error =
+                                        Some("the symbol has no closed outline to extrude".into());
+                                } else {
+                                    let added =
+                                        from_loops(&loops, &draft.features, "Symbol", "3", true);
+                                    ed.selected = Some(draft.features.len());
+                                    draft.features.extend(added);
+                                    commit = true;
+                                }
+                            }
+                            ui.close();
+                        }
+                    });
+                });
+            });
         });
+        if import {
+            let file = rfd::FileDialog::new().add_filter("Drawings", &["dxf", "svg"]).pick_file();
+            if let Some(path) = file {
+                let read = std::fs::read_to_string(&path)
+                    .map_err(|e| format!("reading {}: {e}", path.display()))
+                    .and_then(|text| {
+                        circuiter_3d::import2d::outlines(&path.to_string_lossy(), &text)
+                    });
+                match read {
+                    Ok(loops) => {
+                        let name = path
+                            .file_stem()
+                            .map_or("Outline".into(), |s| s.to_string_lossy().into_owned());
+                        let added = from_loops(&loops, &draft.features, &name, "5", false);
+                        ed.selected = Some(draft.features.len());
+                        draft.features.extend(added);
+                        commit = true;
+                    }
+                    Err(e) => self.error = Some(e),
+                }
+            }
+        }
         ui.add_space(4.0);
         if draft.features.is_empty() && draft.package.is_empty() {
             ui.label(RichText::new("No 3D body yet. Model one from features, as in a CAD program, or use one of the ready-made packages.").color(p.weak));
@@ -514,6 +576,91 @@ fn feature_editor(
     done
 }
 
+/// Features made from outlines: the largest extruded `height` high, centred on the
+/// origin; the others cut through it as holes, or, with `raised`, standing half a
+/// millimetre proud of its top (a symbol's markings).
+pub fn from_loops(
+    loops: &[circuiter_3d::import2d::Loop],
+    existing: &[Feature],
+    name: &str,
+    height: &str,
+    raised: bool,
+) -> Vec<Feature> {
+    use circuiter_3d::import2d;
+    let Some(outer) = loops.first() else { return Vec::new() };
+    let shift = import2d::centre(outer);
+    let mut all: Vec<Feature> = existing.to_vec();
+    let mut out = Vec::new();
+    let base = unique(&all, name);
+    let f = Feature::new(
+        &base,
+        Shape::Extrude { sketch: import2d::sketch(outer, shift), height: height.into() },
+    );
+    all.push(f.clone());
+    out.push(f);
+    for (k, l) in loops.iter().enumerate().skip(1) {
+        let label = if raised { format!("{base} mark {k}") } else { format!("{base} hole {k}") };
+        let shape = if raised {
+            Shape::Extrude { sketch: import2d::sketch(l, shift), height: "0.5".into() }
+        } else {
+            Shape::Extrude { sketch: import2d::sketch(l, shift), height: format!("{height} + 2") }
+        };
+        let mut f = Feature::new(&unique(&all, &label), shape);
+        if raised {
+            f.at = s3("0", "0", height);
+            f.color = "white".into();
+        } else {
+            f.operation = Operation::Cut;
+            f.at = s3("0", "0", "-1");
+        }
+        all.push(f.clone());
+        out.push(f);
+    }
+    out
+}
+
+/// A symbol's closed outlines (rectangles, circles, closed or filled polylines), in
+/// millimetres with Y up.
+pub fn symbol_loops(symbol: &circuiter_model::symbol::Symbol) -> Vec<circuiter_3d::import2d::Loop> {
+    use circuiter_model::symbol::Graphic;
+    let mut loops = Vec::new();
+    for g in &symbol.graphics {
+        match g {
+            Graphic::Rect { a, b, .. } => {
+                let (x0, y0, x1, y1) = (a.x.mm(), -a.y.mm(), b.x.mm(), -b.y.mm());
+                loops.push(vec![(x0, y0, 0.0), (x1, y0, 0.0), (x1, y1, 0.0), (x0, y1, 0.0)]);
+            }
+            Graphic::Circle { center, radius, .. } => {
+                let (x, y, r) = (center.x.mm(), -center.y.mm(), radius.mm());
+                loops.push(vec![(x - r, y, 1.0), (x + r, y, 1.0)]);
+            }
+            Graphic::Polyline { points, fill }
+                if points.len() >= 3 && (*fill || points.first() == points.last()) =>
+            {
+                let mut l: Vec<(f64, f64, f64)> =
+                    points.iter().map(|p| (p.x.mm(), -p.y.mm(), 0.0)).collect();
+                if points.first() == points.last() {
+                    l.pop();
+                }
+                loops.push(l);
+            }
+            _ => {}
+        }
+    }
+    loops.retain(|l| circuiter_3d::import2d::area(l).abs() > 1e-6 || l.len() == 2);
+    loops.sort_by(|a, b| {
+        let size = |l: &circuiter_3d::import2d::Loop| {
+            if l.len() == 2 {
+                std::f64::consts::PI * ((l[1].0 - l[0].0) / 2.0).powi(2)
+            } else {
+                circuiter_3d::import2d::area(l).abs()
+            }
+        };
+        size(b).total_cmp(&size(a))
+    });
+    loops
+}
+
 /// A named sketch to start from.
 type Preset = (&'static str, fn() -> Sketch);
 
@@ -630,6 +777,43 @@ fn sketch_editor(
         egui::FontId::proportional(10.0),
         p.weak,
     );
+    // Dimensions: each straight edge's length beside it, and the overall size.
+    let n_pts = sketch.points.len();
+    for k in 0..n_pts {
+        let (Some(a), Some(b)) = (corners[k], corners[(k + 1) % n_pts]) else { continue };
+        if !sketch.points[k].bulge.trim().is_empty() {
+            continue;
+        }
+        let len = (b.0 - a.0).hypot(b.1 - a.1);
+        if len * scale < 28.0 {
+            continue;
+        }
+        let m = to_screen((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0);
+        // Outside the outline: along the edge's normal, away from the middle.
+        let normal = egui::vec2(b.1 - a.1, a.0 - b.0).normalized();
+        let outward = if (m - to_screen(mid.0, mid.1)).dot(egui::vec2(normal.x, -normal.y)) >= 0.0 {
+            1.0
+        } else {
+            -1.0
+        };
+        let at = m + egui::vec2(normal.x, -normal.y) * 9.0 * outward;
+        painter.text(
+            at,
+            egui::Align2::CENTER_CENTER,
+            format!("{len:.1}"),
+            egui::FontId::monospace(9.5),
+            p.weak,
+        );
+    }
+    if lo.0 < hi.0 {
+        painter.text(
+            rect.right_bottom() + egui::vec2(-6.0, -4.0),
+            egui::Align2::RIGHT_BOTTOM,
+            format!("{:.1} × {:.1} mm", hi.0 - lo.0, hi.1 - lo.1),
+            egui::FontId::monospace(10.0),
+            p.weak,
+        );
+    }
     // Corner handles and edge midpoints.
     let pointer = response.interact_pointer_pos().or(response.hover_pos());
     let near = |a: egui::Pos2| pointer.is_some_and(|q| q.distance(a) < 7.0);
@@ -709,6 +893,56 @@ fn sketch_editor(
     }
     response
         .on_hover_text("Drag a corner; click a + to add one; right-click a corner to remove it");
+    // The size and each edge's length and direction, to type in.
+    egui::CollapsingHeader::new("Dimensions").default_open(true).show(ui, |ui| {
+        if lo.0 < hi.0 {
+            let (mut w, mut h) = (hi.0 - lo.0, hi.1 - lo.1);
+            ui.horizontal(|ui| {
+                ui.label("Size");
+                let a = ui.add(
+                    egui::DragValue::new(&mut w).range(0.1..=10000.0).speed(0.1).suffix(" mm"),
+                );
+                ui.label("×");
+                let b = ui.add(
+                    egui::DragValue::new(&mut h).range(0.1..=10000.0).speed(0.1).suffix(" mm"),
+                );
+                if a.changed() || b.changed() {
+                    set_size(sketch, &corners, (lo, hi), (w, h));
+                    done = true;
+                }
+            });
+        }
+        egui::Grid::new("sketch-edges").num_columns(3).show(ui, |ui| {
+            ui.label(RichText::new("edge").small());
+            ui.label(RichText::new("length").small());
+            ui.label(RichText::new("direction").small());
+            ui.end_row();
+            let n = sketch.points.len();
+            for k in 0..n {
+                let (Some(a), Some(b)) = (corners[k], corners[(k + 1) % n]) else { continue };
+                ui.label(RichText::new(format!("{} → {}", k + 1, (k + 1) % n + 1)).small());
+                if !sketch.points[k].bulge.trim().is_empty() {
+                    ui.label(RichText::new("arc").small().weak());
+                    ui.label("");
+                    ui.end_row();
+                    continue;
+                }
+                let mut len = (b.0 - a.0).hypot(b.1 - a.1);
+                let mut angle = (b.1 - a.1).atan2(b.0 - a.0).to_degrees();
+                let l = ui.add(
+                    egui::DragValue::new(&mut len).range(0.01..=10000.0).speed(0.1).suffix(" mm"),
+                );
+                let d = ui.add(
+                    egui::DragValue::new(&mut angle).range(-180.0..=180.0).speed(1.0).suffix("°"),
+                );
+                if l.changed() || d.changed() {
+                    set_edge(sketch, &corners, k, len, angle);
+                    done = true;
+                }
+                ui.end_row();
+            }
+        });
+    });
     // The corners as numbers.
     egui::CollapsingHeader::new("Corners").default_open(false).show(ui, |ui| {
         egui::Grid::new("sketch-corners").num_columns(3).show(ui, |ui| {
@@ -733,9 +967,139 @@ fn sketch_editor(
     done
 }
 
+/// Gives edge `k` (corner `k` to the next) this length and direction, moving the
+/// corners after it with its end, so the rest of the outline keeps its shape; the
+/// closing edge takes up the change.
+pub fn set_edge(
+    sketch: &mut Sketch,
+    corners: &[Option<(f32, f32)>],
+    k: usize,
+    len: f32,
+    degrees: f32,
+) {
+    let n = sketch.points.len();
+    let (Some(a), Some(b)) = (corners[k], corners[(k + 1) % n]) else { return };
+    let r = degrees.to_radians();
+    let to = (a.0 + len * r.cos(), a.1 + len * r.sin());
+    let delta = (to.0 - b.0, to.1 - b.1);
+    let fmt = |v: f32| {
+        let s = format!("{v:.3}");
+        s.trim_end_matches('0').trim_end_matches('.').to_owned()
+    };
+    // Corner k+1 and those after it, up to the last (corner 0 stays: it starts the
+    // outline).
+    for (q, c) in sketch.points.iter_mut().zip(corners).skip(k + 1) {
+        if let Some(c) = c {
+            q.x = fmt(c.0 + delta.0);
+            q.y = fmt(c.1 + delta.1);
+        }
+    }
+}
+
+/// Scales the outline about its middle to `size` (width, height), from its bounds now.
+pub fn set_size(
+    sketch: &mut Sketch,
+    corners: &[Option<(f32, f32)>],
+    (lo, hi): ((f32, f32), (f32, f32)),
+    size: (f32, f32),
+) {
+    let (w, h) = (hi.0 - lo.0, hi.1 - lo.1);
+    if w <= 0.0 || h <= 0.0 {
+        return;
+    }
+    let (sx, sy) = (size.0 / w, size.1 / h);
+    let c = ((lo.0 + hi.0) / 2.0, (lo.1 + hi.1) / 2.0);
+    let fmt = |v: f32| {
+        let s = format!("{v:.3}");
+        s.trim_end_matches('0').trim_end_matches('.').to_owned()
+    };
+    for (q, corner) in sketch.points.iter_mut().zip(corners) {
+        if let Some((x, y)) = *corner {
+            q.x = fmt(c.0 + (x - c.0) * sx);
+            q.y = fmt(c.1 + (y - c.1) * sy);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sketches_take_dimensions() {
+        let mut s = Sketch::rectangle(20.0, 10.0);
+        let corners = |s: &Sketch| -> Vec<Option<(f32, f32)>> {
+            s.points.iter().map(|q| Some((q.x.parse().unwrap(), q.y.parse().unwrap()))).collect()
+        };
+        // The bottom edge (corner 1 → 2) made 30 long: the right side moves with it.
+        let c = corners(&s);
+        set_edge(&mut s, &c, 0, 30.0, 0.0);
+        let c = corners(&s);
+        assert_eq!(c[1], Some((20.0, -5.0)));
+        assert_eq!(c[2], Some((20.0, 5.0)), "the right side kept its shape");
+        assert_eq!(c[0], Some((-10.0, -5.0)), "the start stays");
+        // Then the whole made 40 × 20 about its middle.
+        let c = corners(&s);
+        set_size(&mut s, &c, ((-10.0, -5.0), (20.0, 5.0)), (40.0, 20.0));
+        let c = corners(&s);
+        assert_eq!(c[0], Some((-15.0, -10.0)));
+        assert_eq!(c[2], Some((25.0, 10.0)));
+    }
+
+    /// A volume from a closed mesh's triangles.
+    fn volume(m: &circuiter_3d::Mesh) -> f32 {
+        m.indices
+            .chunks(3)
+            .map(|t| {
+                let [a, b, c] = [t[0], t[1], t[2]].map(|i| m.vertices[i as usize].pos);
+                (a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0])
+                    + a[2] * (b[0] * c[1] - b[1] * c[0]))
+                    / 6.0
+            })
+            .sum()
+    }
+
+    /// A drawn plate with a hole becomes a body with the hole through it; a symbol's
+    /// box a body with its markings raised.
+    #[test]
+    fn bodies_come_from_drawings_and_symbols() {
+        let svg = r#"<svg width="40mm" height="20mm" viewBox="0 0 40 20"><rect x="0" y="0" width="40" height="20"/><circle cx="10" cy="10" r="3"/></svg>"#;
+        let loops = circuiter_3d::import2d::outlines("plate.svg", svg).unwrap();
+        let fs = from_loops(&loops, &[], "plate", "5", false);
+        assert_eq!(fs.len(), 2);
+        assert_eq!(fs[1].operation, Operation::Cut);
+        let built = circuiter_3d::cad::evaluate(&fs, &|_| None);
+        assert!(built.errors.is_empty(), "{:?}", built.errors);
+        let want = (800.0 - std::f32::consts::PI * 9.0) * 5.0;
+        assert!(
+            (volume(&built.mesh) - want).abs() < want * 0.01,
+            "{} vs {want}",
+            volume(&built.mesh)
+        );
+        let (lo, hi) = built.mesh.bounds().unwrap();
+        assert!((lo[0] + 20.0).abs() < 1e-3 && (hi[0] - 20.0).abs() < 1e-3, "centred");
+
+        let lib = circuiter_stdlib::library();
+        let chip = lib.cell("ne555").unwrap().symbol.as_ref().unwrap();
+        let loops = symbol_loops(chip);
+        assert!(!loops.is_empty());
+        let fs = from_loops(&loops, &[], "Symbol", "3", true);
+        let built = circuiter_3d::cad::evaluate(&fs, &|_| None);
+        assert!(built.errors.is_empty() && !built.mesh.vertices.is_empty());
+
+        // A board's outline from a drawing: top-left at the origin, Y down.
+        let outline = super::super::pcb::board_outline(&loops_of("plate.svg", svg)[0]);
+        let xs: Vec<f64> = outline.iter().map(|p| p.x.mm()).collect();
+        let ys: Vec<f64> = outline.iter().map(|p| p.y.mm()).collect();
+        assert!(
+            xs.iter().all(|&x| x > -1e-9 && x < 40.0 + 1e-9)
+                && ys.iter().all(|&y| y > -1e-9 && y < 20.0 + 1e-9)
+        );
+    }
+
+    fn loops_of(name: &str, text: &str) -> Vec<circuiter_3d::import2d::Loop> {
+        circuiter_3d::import2d::outlines(name, text).unwrap()
+    }
 
     #[test]
     fn new_features_get_unique_names_and_patterns_copy_the_operation() {

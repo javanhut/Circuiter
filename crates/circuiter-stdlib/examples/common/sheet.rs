@@ -46,6 +46,7 @@ impl<'a> Sheet<'a> {
         let g = Length::from_mm(GRID).nm();
         let at = Point::new(Length(x * g - left), Length(y * g - top));
         self.s.instances.push(Instance {
+            fields: Default::default(),
             name: name.into(),
             cell: r,
             placement: Transform { position: at, rotation: Rotation::R0, mirror: false },
@@ -82,7 +83,7 @@ impl<'a> Sheet<'a> {
     pub fn nets(&mut self, inst: usize, pairs: &[(&str, &str)]) {
         for (port, net) in pairs {
             let end = self.stub(inst, port, 2);
-            self.s.labels.push(NetLabel { net: net.to_string(), at: end });
+            self.s.labels.push(NetLabel { global: false, net: net.to_string(), at: end });
         }
     }
 }

@@ -9,8 +9,10 @@
 pub mod assembly;
 pub mod cad;
 pub mod csg;
+pub mod import2d;
 pub mod math;
 pub mod packages;
+pub mod solid;
 
 use math::{Mat4, V3, cross, normalize, sub};
 
@@ -81,6 +83,45 @@ impl Mesh {
     fn push(&mut self, pos: V3, normal: V3, color: Rgba) -> u32 {
         self.vertices.push(Vertex { pos, normal, color });
         self.vertices.len() as u32 - 1
+    }
+
+    /// What lies on one side of a plane square to `axis` at `at`: the side above it
+    /// when `keep_above`. Triangles across the plane are cut along it (the cut isn't
+    /// capped: a section shows the walls' thickness as an open edge).
+    pub fn clipped(&self, axis: usize, at: f32, keep_above: bool) -> Mesh {
+        let side = |v: &Vertex| if keep_above { v.pos[axis] - at } else { at - v.pos[axis] };
+        let mut out = Mesh::default();
+        for t in self.indices.chunks_exact(3) {
+            let vs = [t[0], t[1], t[2]].map(|i| self.vertices[i as usize]);
+            let d = vs.map(|v| side(&v));
+            if d.iter().all(|&x| x >= 0.0) {
+                let i = vs.map(|v| out.push(v.pos, v.normal, v.color));
+                out.indices.extend(i);
+                continue;
+            }
+            if d.iter().all(|&x| x <= 0.0) {
+                continue;
+            }
+            // Sutherland–Hodgman against the plane, then a fan.
+            let mut poly: Vec<Vertex> = Vec::with_capacity(4);
+            for k in 0..3 {
+                let (a, b) = (vs[k], vs[(k + 1) % 3]);
+                let (da, db) = (d[k], d[(k + 1) % 3]);
+                if da >= 0.0 {
+                    poly.push(a);
+                }
+                if (da >= 0.0) != (db >= 0.0) {
+                    let s = da / (da - db);
+                    let lerp = |p: V3, q: V3| [0, 1, 2].map(|j| p[j] + (q[j] - p[j]) * s);
+                    poly.push(Vertex { pos: lerp(a.pos, b.pos), normal: a.normal, color: a.color });
+                }
+            }
+            let base: Vec<u32> = poly.iter().map(|v| out.push(v.pos, v.normal, v.color)).collect();
+            for k in 1..base.len().saturating_sub(1) {
+                out.indices.extend([base[0], base[k], base[k + 1]]);
+            }
+        }
+        out
     }
 
     /// A flat quad `a b c d`, counter-clockwise seen from outside.
@@ -365,45 +406,167 @@ pub fn extrude(outline: &[(f32, f32)], z0: f32, z1: f32, color: Rgba) -> Mesh {
     m
 }
 
-/// Ear-clipping triangulation of a simple counter-clockwise polygon.
+/// Ear-clipping triangulation of a simple counter-clockwise polygon. Repeated points
+/// don't block ears at their own place.
 fn triangulate(poly: &[(f32, f32)]) -> Vec<[u32; 3]> {
     let mut idx: Vec<usize> = (0..poly.len()).collect();
     let mut out = Vec::new();
     let area2 = |a: (f32, f32), b: (f32, f32), c: (f32, f32)| {
         (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0)
     };
-    let mut guard = 0;
-    while idx.len() > 3 && guard < 10_000 {
-        guard += 1;
+    let mut k = 0;
+    let mut misses = 0;
+    while idx.len() > 3 && misses <= idx.len() {
         let n = idx.len();
-        let mut clipped = false;
-        for k in 0..n {
-            let (ia, ib, ic) = (idx[(k + n - 1) % n], idx[k], idx[(k + 1) % n]);
-            let (a, b, c) = (poly[ia], poly[ib], poly[ic]);
-            if area2(a, b, c) <= 1e-9 {
-                continue;
-            }
-            let inside = idx.iter().any(|&j| {
-                j != ia && j != ib && j != ic && {
-                    let p = poly[j];
-                    area2(a, b, p) >= 0.0 && area2(b, c, p) >= 0.0 && area2(c, a, p) >= 0.0
-                }
+        k %= n;
+        let (ia, ib, ic) = (idx[(k + n - 1) % n], idx[k], idx[(k + 1) % n]);
+        let (a, b, c) = (poly[ia], poly[ib], poly[ic]);
+        let convex = area2(a, b, c) > 1e-9;
+        let (lo, hi) = (
+            (a.0.min(b.0).min(c.0), a.1.min(b.1).min(c.1)),
+            (a.0.max(b.0).max(c.0), a.1.max(b.1).max(c.1)),
+        );
+        let blocked = convex
+            && idx.iter().any(|&j| {
+                let p = poly[j];
+                p.0 >= lo.0
+                    && p.0 <= hi.0
+                    && p.1 >= lo.1
+                    && p.1 <= hi.1
+                    && p != a
+                    && p != b
+                    && p != c
+                    && area2(a, b, p) >= 0.0
+                    && area2(b, c, p) >= 0.0
+                    && area2(c, a, p) >= 0.0
             });
-            if !inside {
-                out.push([ia as u32, ib as u32, ic as u32]);
-                idx.remove(k);
-                clipped = true;
-                break;
-            }
-        }
-        if !clipped {
-            break;
+        if convex && !blocked {
+            out.push([ia as u32, ib as u32, ic as u32]);
+            idx.remove(k);
+            misses = 0;
+        } else if area2(a, b, c).abs() <= 1e-9 && (a == c || a == b || b == c) {
+            // A spike or a repeated point: drop it.
+            idx.remove(k);
+            misses = 0;
+        } else {
+            k += 1;
+            misses += 1;
         }
     }
     if idx.len() == 3 {
         out.push([idx[0] as u32, idx[1] as u32, idx[2] as u32]);
     }
     out
+}
+
+/// Triangles covering an outline less its holes (any orientation; inside is where an
+/// odd number of outlines enclose): the plane cut into horizontal slabs at every
+/// corner's height, each slab's inside spans made two triangles. Robust whatever the
+/// holes, at the price of corners shared along slab edges. Returns the points and the
+/// triangles over them, counter-clockwise.
+pub fn triangulate_holes(
+    outer: &[(f32, f32)],
+    holes: &[Vec<(f32, f32)>],
+) -> (Vec<(f32, f32)>, Vec<[u32; 3]>) {
+    // Edges that aren't flat, lower end first.
+    let mut edges: Vec<[f64; 4]> = Vec::new();
+    for ring in std::iter::once(outer).chain(holes.iter().map(Vec::as_slice)) {
+        let n = ring.len();
+        for k in 0..n {
+            let (a, b) = (ring[k], ring[(k + 1) % n]);
+            let (a, b) = ((f64::from(a.0), f64::from(a.1)), (f64::from(b.0), f64::from(b.1)));
+            if a.1 != b.1 {
+                edges.push(if a.1 < b.1 { [a.0, a.1, b.0, b.1] } else { [b.0, b.1, a.0, a.1] });
+            }
+        }
+    }
+    edges.sort_by(|a, b| a[1].total_cmp(&b[1]));
+    let mut ys: Vec<f64> = edges.iter().flat_map(|e| [e[1], e[3]]).collect();
+    ys.sort_by(f64::total_cmp);
+    ys.dedup();
+    let x_at = |e: &[f64; 4], y: f64| e[0] + (e[2] - e[0]) * (y - e[1]) / (e[3] - e[1]);
+    let mut points = Vec::new();
+    let mut tris = Vec::new();
+    let mut active: Vec<usize> = Vec::new();
+    let mut next = 0;
+    for w in ys.windows(2) {
+        let (ya, yb) = (w[0], w[1]);
+        let ym = (ya + yb) / 2.0;
+        while next < edges.len() && edges[next][1] < ym {
+            active.push(next);
+            next += 1;
+        }
+        active.retain(|&k| edges[k][3] > ym);
+        let mut spans: Vec<(f64, f64, f64)> = active
+            .iter()
+            .map(|&k| (x_at(&edges[k], ym), x_at(&edges[k], ya), x_at(&edges[k], yb)))
+            .collect();
+        spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for pair in spans.chunks_exact(2) {
+            let (l, r) = (pair[0], pair[1]);
+            let base = points.len() as u32;
+            points.extend([
+                (l.1 as f32, ya as f32),
+                (r.1 as f32, ya as f32),
+                (r.2 as f32, yb as f32),
+                (l.2 as f32, yb as f32),
+            ]);
+            tris.push([base, base + 1, base + 2]);
+            tris.push([base, base + 2, base + 3]);
+        }
+    }
+    (points, tris)
+}
+
+/// A flat outline with holes raised from `z0` to `z1`: walls round the outside and
+/// inside each hole, caps top and bottom.
+pub fn extrude_holes(
+    outer: &[(f32, f32)],
+    holes: &[Vec<(f32, f32)>],
+    z0: f32,
+    z1: f32,
+    color: Rgba,
+) -> Mesh {
+    if holes.is_empty() {
+        return extrude(outer, z0, z1, color);
+    }
+    let mut m = Mesh::default();
+    let mut walls = |ring: &[(f32, f32)]| {
+        let n = ring.len();
+        for k in 0..n {
+            let (a, b) = (ring[k], ring[(k + 1) % n]);
+            let normal = normalize([b.1 - a.1, a.0 - b.0, 0.0]);
+            let i = [
+                m.push([a.0, a.1, z0], normal, color),
+                m.push([b.0, b.1, z0], normal, color),
+                m.push([b.0, b.1, z1], normal, color),
+                m.push([a.0, a.1, z1], normal, color),
+            ];
+            m.indices.extend([i[0], i[1], i[2], i[0], i[2], i[3]]);
+        }
+    };
+    walls(&orient_ccw(outer));
+    for h in holes.iter().filter(|h| h.len() >= 3) {
+        let mut h = orient_ccw(h);
+        h.reverse();
+        walls(&h);
+    }
+    let (poly, tris) = triangulate_holes(outer, holes);
+    for (z, up) in [(z1, true), (z0, false)] {
+        let normal = if up { [0.0, 0.0, 1.0] } else { [0.0, 0.0, -1.0] };
+        let base = m.vertices.len() as u32;
+        for p in &poly {
+            m.push([p.0, p.1, z], normal, color);
+        }
+        for t in &tris {
+            if up {
+                m.indices.extend([base + t[0], base + t[1], base + t[2]]);
+            } else {
+                m.indices.extend([base + t[0], base + t[2], base + t[1]]);
+            }
+        }
+    }
+    m
 }
 
 /// A rectangle with rounded corners, counter-clockwise, centred on the origin.
@@ -455,6 +618,72 @@ pub fn color(name: &str) -> Rgba {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn meshes_are_cut_in_section() {
+        let block = cuboid([0.0, 0.0, 0.0], [10.0, 4.0, 2.0], color("grey"));
+        let half = block.clipped(0, 4.0, true);
+        let (lo, hi) = half.bounds().unwrap();
+        assert!((lo[0] - 4.0).abs() < 1e-5 && (hi[0] - 10.0).abs() < 1e-5);
+        let other = block.clipped(0, 4.0, false);
+        assert!((other.bounds().unwrap().1[0] - 4.0).abs() < 1e-5);
+        assert!(block.clipped(0, 20.0, true).indices.is_empty());
+    }
+
+    #[test]
+    fn outlines_with_holes_extrude_closed() {
+        let square = |c: (f32, f32), r: f32| {
+            vec![(c.0 - r, c.1 - r), (c.0 + r, c.1 - r), (c.0 + r, c.1 + r), (c.0 - r, c.1 + r)]
+        };
+        let circle = |c: (f32, f32), r: f32| -> Vec<(f32, f32)> {
+            (0..32)
+                .map(|k| {
+                    let a = k as f32 * std::f32::consts::TAU / 32.0;
+                    (c.0 + r * a.cos(), c.1 + r * a.sin())
+                })
+                .collect()
+        };
+        let holes = vec![
+            square((-5.0, 0.0), 2.0),
+            circle((5.0, 3.0), 2.0),
+            circle((5.0, -4.0), 1.5),
+            square((0.0, 0.0), 1.0),
+        ];
+        let m = extrude_holes(&square((0.0, 0.0), 10.0), &holes, 0.0, 1.0, color("board"));
+        let hole_area = 16.0 + 4.0 + std::f32::consts::PI * (4.0 + 2.25) * 0.994;
+        let want = 400.0 - hole_area;
+        assert!((volume(&m) - want).abs() < 0.5, "{} vs {want}", volume(&m));
+        // The top alone covers exactly the area between: every triangle of it counted once.
+        let top: f32 = m
+            .indices
+            .chunks(3)
+            .map(|t| {
+                let [a, b, c] = [t[0], t[1], t[2]].map(|i| m.vertices[i as usize]);
+                if a.normal[2] > 0.5 {
+                    ((b.pos[0] - a.pos[0]) * (c.pos[1] - a.pos[1])
+                        - (b.pos[1] - a.pos[1]) * (c.pos[0] - a.pos[0]))
+                        / 2.0
+                } else {
+                    0.0
+                }
+            })
+            .sum();
+        assert!((top - want).abs() < 0.5, "{top} vs {want}");
+        // A pour with a hundred clearance holes is covered exactly.
+        let many: Vec<_> = (0..100)
+            .map(|k| circle((-9.0 + 2.0 * (k % 10) as f32, -9.0 + 2.0 * (k / 10) as f32), 0.6))
+            .collect();
+        let (pts, tris) = triangulate_holes(&square((0.0, 0.0), 10.0), &many);
+        let area: f32 = tris
+            .iter()
+            .map(|t| {
+                let [a, b, c] = t.map(|i| pts[i as usize]);
+                ((b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0)) / 2.0
+            })
+            .sum();
+        let want = 400.0 - 100.0 * std::f32::consts::PI * 0.36 * 0.994;
+        assert!((area - want).abs() < 0.5, "{area} vs {want}");
+    }
 
     /// A closed mesh's signed volume, positive when its faces point outwards.
     pub fn volume(m: &Mesh) -> f32 {

@@ -1,0 +1,22 @@
+[package]
+name = "circuiter-pcb"
+description = "Circuiter's printed circuit boards: footprints, boards, routing, copper pours, design rule checks and fabrication outputs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+circuiter-model.workspace = true
+circuiter-netlist.workspace = true
+circuiter-3d.workspace = true
+serde.workspace = true
+ron.workspace = true
+i_overlay = "9"
+
+[dev-dependencies]
+circuiter-stdlib.workspace = true
+
+[lints]
+workspace = true

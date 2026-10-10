@@ -13,6 +13,10 @@
 //!
 //! At an operating point, [`Monitor::assess`] reports which parts would overheat if
 //! left running, and how soon.
+//!
+//! A product in a case keeps its heat in: with a [`Case`], every part's power warms the
+//! air inside, which loses it through the case to the room, and each part's ambient is
+//! that air rather than the room.
 
 use circuiter_model::cell::{Effect, FailureMode, Limit};
 use circuiter_model::units::format_quantity;
@@ -100,14 +104,37 @@ pub struct Assessment {
     pub reason: String,
 }
 
+/// The enclosure a circuit runs in, thermally: the air inside and the case around it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Case {
+    /// From the air inside to the room, through the case's walls, K/W.
+    pub resistance: f64,
+    /// Of the air and the case together, J/K.
+    pub capacity: f64,
+    /// The air's temperature now, and the hottest it got, °C.
+    pub air: f64,
+    pub peak: f64,
+}
+
+impl Case {
+    pub fn new(resistance: f64, capacity: f64, room: f64) -> Case {
+        Case { resistance, capacity, air: room, peak: room }
+    }
+}
+
 /// Watches a transient run: an [`Observer`] for [`circuiter_sim::tran_observed`].
 #[derive(Debug, Clone)]
 pub struct Monitor {
     pub parts: Vec<Part>,
     pub events: Vec<Event>,
+    /// The room's temperature.
     pub ambient: f64,
     /// Each part's temperature at every accepted time point.
     pub temperatures: Vec<Vec<f32>>,
+    /// The case the circuit is in, if it is in one.
+    pub case: Option<Case>,
+    /// The air in the case at every accepted time point.
+    pub air: Vec<f32>,
 }
 
 fn value(text: &Option<String>) -> Result<Option<f64>, String> {
@@ -185,7 +212,25 @@ impl Monitor {
                 failed: false,
             });
         }
-        Ok(Monitor { parts, events: Vec::new(), ambient, temperatures: Vec::new() })
+        Ok(Monitor {
+            parts,
+            events: Vec::new(),
+            ambient,
+            temperatures: Vec::new(),
+            case: None,
+            air: Vec::new(),
+        })
+    }
+
+    /// The same, for a circuit inside `case`.
+    pub fn in_case(mut self, case: Case) -> Monitor {
+        self.case = Some(case);
+        self
+    }
+
+    /// What surrounds the parts: the air in the case, or the room.
+    pub fn surroundings(&self) -> f64 {
+        self.case.map_or(self.ambient, |c| c.air)
     }
 
     pub fn part(&self, path: &str) -> Option<&Part> {
@@ -197,6 +242,20 @@ impl Monitor {
     pub fn assess(&self, circuit: &Circuit, op: &OpResult) -> Vec<Assessment> {
         let mut out = Vec::new();
         let voltage = |node: usize| op.voltages[node];
+        // In a case, the air settles where the whole circuit's power holds it.
+        let power_of = |p: &Part| -> f64 {
+            p.devices
+                .iter()
+                .filter_map(|&d| op.device(&circuit.devices[d].name))
+                .map(|o| o.power)
+                .sum()
+        };
+        let surroundings = match self.case {
+            Some(c) => {
+                self.ambient + self.parts.iter().map(power_of).sum::<f64>().max(0.0) * c.resistance
+            }
+            None => self.ambient,
+        };
         for p in &self.parts {
             let ops: Vec<(usize, circuiter_sim::DeviceOp)> = p
                 .devices
@@ -218,14 +277,14 @@ impl Monitor {
             let (Some(rth), Some(tmax)) = (p.thermal_resistance, p.max_temperature) else {
                 continue;
             };
-            let settle = self.ambient + power * rth;
+            let settle = surroundings + power * rth;
             if settle <= tmax {
                 continue;
             }
             // T(t) = ambient + P·Rth·(1 − e^(−t/τ)) reaches tmax at t = −τ ln(1 − ΔT/(P·Rth)).
             let time_to_failure = p.heat_capacity.map(|cth| {
                 let tau = rth * cth;
-                -tau * (1.0 - (tmax - self.ambient) / (power * rth)).ln()
+                -tau * (1.0 - (tmax - surroundings) / (power * rth)).ln()
             });
             out.push(Assessment {
                 path: p.path.clone(),
@@ -248,7 +307,7 @@ impl Monitor {
         let power: f64 = ops.iter().map(|(_, o)| o.power).sum();
         let current_into = |node: usize| current_into(step.circuit(), &ops, node);
         // Exact for constant power over the step: T → Tss with time constant τ.
-        let settle = self.ambient + power * part.thermal_resistance.unwrap_or(0.0);
+        let settle = self.surroundings() + power * part.thermal_resistance.unwrap_or(0.0);
         let temperature = match (part.thermal_resistance, part.heat_capacity) {
             (Some(rth), Some(cth)) if step.dt > 0.0 => {
                 settle + (part.temperature - settle) * (-step.dt / (rth * cth)).exp()
@@ -386,6 +445,21 @@ impl Observer for Monitor {
                 });
                 replace.extend(self.failure(&self.parts[k], step.circuit()));
             }
+        }
+        // The case's air: warmed by every part, cooled through the case to the room.
+        if let Some(case) = &mut self.case {
+            let power: f64 =
+                self.parts.iter().filter(|p| !p.failed).map(|p| p.power.max(0.0)).sum();
+            let settle = self.ambient + power * case.resistance;
+            let tau = case.resistance * case.capacity;
+            // No time passing (the starting point), no change.
+            case.air = if tau > 0.0 {
+                settle + (case.air - settle) * (-step.dt.max(0.0) / tau).exp()
+            } else {
+                settle
+            };
+            case.peak = case.peak.max(case.air);
+            self.air.push(case.air as f32);
         }
         self.temperatures.push(self.parts.iter().map(|p| p.temperature as f32).collect());
         replace

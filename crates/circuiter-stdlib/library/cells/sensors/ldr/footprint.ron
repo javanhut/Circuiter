@@ -1,0 +1,4 @@
+(
+    package: "disc",
+    params: {"diameter": "5", "pitch": "3.4", "thickness": "2"},
+)

@@ -1,0 +1,24 @@
+(
+    graphics: [
+        Rect(a: (-2.54, -2.54), b: (0.0, 17.78)),
+        Text(at: (-2.54, -3.81), text: "${name}"),
+        Rect(a: (-1.778, -0.381), b: (-1.016, 0.381), fill: true),
+        Rect(a: (-1.778, 2.159), b: (-1.016, 2.921), fill: true),
+        Rect(a: (-1.778, 4.699), b: (-1.016, 5.461), fill: true),
+        Rect(a: (-1.778, 7.239), b: (-1.016, 8.001), fill: true),
+        Rect(a: (-1.778, 9.779), b: (-1.016, 10.541), fill: true),
+        Rect(a: (-1.778, 12.319), b: (-1.016, 13.081), fill: true),
+        Rect(a: (-1.778, 14.859), b: (-1.016, 15.621), fill: true),
+        Rect(a: (-1.778, 17.399), b: (-1.016, 18.161), fill: true),
+    ],
+    pins: [
+        (port: "p1", at: (-5.08, 0.0), direction: Right),
+        (port: "p2", at: (-5.08, 2.54), direction: Right),
+        (port: "p3", at: (-5.08, 5.08), direction: Right),
+        (port: "p4", at: (-5.08, 7.62), direction: Right),
+        (port: "p5", at: (-5.08, 10.16), direction: Right),
+        (port: "p6", at: (-5.08, 12.7), direction: Right),
+        (port: "p7", at: (-5.08, 15.24), direction: Right),
+        (port: "p8", at: (-5.08, 17.78), direction: Right),
+    ],
+)

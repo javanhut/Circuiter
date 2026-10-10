@@ -9,7 +9,7 @@ use crate::digital;
 use circuiter_logic::{Simulator, Time, Value};
 use circuiter_model::{CellDef, CellId, Design, STD_LIBRARY};
 use circuiter_netlist::Netlist;
-use circuiter_physics::{AMBIENT, Monitor};
+use circuiter_physics::Monitor;
 use circuiter_sim::{Circuit, Inputs, NoObserver, Options, Transient};
 use std::collections::{BTreeMap, VecDeque};
 use std::path::Path;
@@ -366,6 +366,8 @@ impl Session {
     ) -> Result<Session, String> {
         let digital_only = Netlist::is_digital(design, top);
         let mixed = !digital_only && Netlist::is_mixed(design, top);
+        // In its case, if it has one: the air inside warms as it runs.
+        let case = crate::simulation::case_of(design, top);
         let netlist = if digital_only {
             Netlist::build_digital(design, top)?
         } else if mixed {
@@ -426,7 +428,7 @@ impl Session {
             let prepared = cosim::prepare(&netlist, root, &initial)?;
             digital_handles = prepared.digital_inputs.clone();
             let cosim::Prepared { circuit, inputs, mut cosim, .. } = prepared;
-            cosim.monitor = Monitor::new(&netlist, &circuit, AMBIENT).ok();
+            cosim.monitor = crate::simulation::monitor(&netlist, &circuit, case).ok();
             let mut cosim = Box::new(cosim);
             let run = Transient::start(
                 &circuit,
@@ -442,7 +444,7 @@ impl Session {
                 Circuit::parse(&netlist.to_spice()).map_err(|e| format!("netlist: {e}"))?;
             let names: Vec<(&str, f64)> = initial.iter().map(|(n, v)| (n.as_str(), *v)).collect();
             let inputs = Arc::new(Inputs::new(&names));
-            let mut monitor = Monitor::new(&netlist, &circuit, AMBIENT).ok();
+            let mut monitor = crate::simulation::monitor(&netlist, &circuit, case).ok();
             let run = match &mut monitor {
                 Some(m) => Transient::start(&circuit, tstep, f64::INFINITY, &o(inputs.clone()), m),
                 None => Transient::start(

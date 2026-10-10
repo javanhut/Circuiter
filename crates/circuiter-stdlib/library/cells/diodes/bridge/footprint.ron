@@ -1,0 +1,4 @@
+(
+    package: "bridge",
+    pins: {"ac1": "2", "ac2": "3", "minus": "4", "plus": "1"},
+)

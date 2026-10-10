@@ -618,3 +618,145 @@ fn the_hand_tool_drags_the_view() {
     assert!(after.x < center.x - 1.0 && after.y < center.y - 0.3, "{center:?} → {after:?}");
     assert_eq!(ws.current_def().unwrap(), &before, "nothing on the sheet moved");
 }
+
+/// Where board point `q` (millimetres) is on screen in the PCB view.
+fn on_board(h: &Harness<'_, CircuiterApp>, q: [f64; 2]) -> Pos2 {
+    let view = h.state().pcb_view();
+    view.camera.expect("fitted").to_screen(view.rect.expect("drawn"), Pt::new(q[0], q[1]))
+}
+
+fn board(h: &Harness<'_, CircuiterApp>) -> circuiter_model::board::Board {
+    let ws = h.state().workspace().expect("open");
+    ws.current_def().and_then(|d| d.board.clone()).expect("a board")
+}
+
+/// A board made from the blinker's schematic: routed with a click per corner, a via
+/// to the back, parts moved, turned and flipped, and undone.
+#[test]
+fn a_board_is_made_routed_and_rearranged() {
+    let tmp = example_copy("analog_lab");
+    let args = Args {
+        project: Some(tmp.path().to_owned()),
+        cell: Some("blinker".into()),
+        theme: None,
+        view: Some("pcb".into()),
+        select: None,
+        simulate: None,
+        heat: false,
+        program: None,
+        live: false,
+        results: None,
+        screenshot: None,
+    };
+    let mut h = Harness::builder()
+        .with_size(Vec2::new(1600.0, 1000.0))
+        .build_eframe(move |cc| CircuiterApp::new(cc, args));
+    h.run_steps(4);
+    // Start from no board (the example comes with one).
+    h.state_mut()
+        .workspace_mut()
+        .unwrap()
+        .edit_board(|_, _, b| {
+            *b = None;
+            Ok(())
+        })
+        .unwrap();
+    h.run_steps(3);
+    h.get_by_label(&format!("{}  Create Board from Schematic", crate::style::icon::SPARKLE))
+        .click();
+    h.run_steps(4);
+    let made = board(&h);
+    assert_eq!(made.footprints.len(), 8, "every part with a footprint is placed");
+    let unrouted = |h: &Harness<'_, CircuiterApp>| {
+        h.state()
+            .pcb_view()
+            .analysis
+            .as_ref()
+            .and_then(|a| a.checked.as_ref())
+            .expect("checked")
+            .connectivity
+            .unrouted()
+    };
+    let before = unrouted(&h);
+    assert!(before > 5);
+
+    // Route the first ratsnest line: X, click its start, click its end.
+    let (net, a, b) = h
+        .state()
+        .pcb_view()
+        .analysis
+        .as_ref()
+        .unwrap()
+        .checked
+        .as_ref()
+        .unwrap()
+        .connectivity
+        .ratsnest[0]
+        .clone();
+    h.hover_at(on_board(&h, a));
+    h.step();
+    h.key_press(egui::Key::X);
+    h.run_steps(2);
+    let start = on_board(&h, a);
+    click_at(&mut h, start);
+    assert!(
+        matches!(&h.state().pcb_view().tool, crate::app::pcb::PcbTool::Route { net: n, .. } if *n == net),
+        "routing {net}"
+    );
+    let b_screen = on_board(&h, b);
+    h.hover_at(b_screen);
+    h.run_steps(2);
+    click_at(&mut h, b_screen);
+    let routed = board(&h);
+    assert!(!routed.tracks.is_empty() && routed.tracks.iter().all(|t| t.net == net));
+    assert_eq!(unrouted(&h), before - 1, "the line is routed");
+    assert!(
+        matches!(&h.state().pcb_view().tool, crate::app::pcb::PcbTool::Route { points, .. } if points.is_empty()),
+        "the route finished on the pad"
+    );
+
+    // Another: start, then V for a via and the back layer.
+    let (_, c, _) = h
+        .state()
+        .pcb_view()
+        .analysis
+        .as_ref()
+        .unwrap()
+        .checked
+        .as_ref()
+        .unwrap()
+        .connectivity
+        .ratsnest[0]
+        .clone();
+    let start = on_board(&h, c);
+    click_at(&mut h, start);
+    let mid = on_board(&h, [c[0] + 3.0, c[1] + 3.0]);
+    h.hover_at(mid);
+    h.run_steps(2);
+    h.key_press(egui::Key::V);
+    h.run_steps(2);
+    assert_eq!(board(&h).vias.len(), 1);
+    assert_eq!(h.state().pcb_view().layer, circuiter_model::board::Layer::BCu);
+    h.key_press(egui::Key::Escape);
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    assert_eq!(h.state().pcb_view().tool, crate::app::pcb::PcbTool::Select);
+
+    // Drag U1 by 10 mm, turn it, flip it; undo the flip.
+    let u1 = board(&h).placed("U1").unwrap().clone();
+    let at = [u1.at.x.mm(), u1.at.y.mm()];
+    let (from, to) = (on_board(&h, at), on_board(&h, [at[0] + 10.0, at[1]]));
+    drag(&mut h, from, to);
+    let moved = board(&h).placed("U1").unwrap().clone();
+    assert!((moved.at.x.mm() - at[0] - 10.0).abs() < 0.4, "{} → {}", at[0], moved.at.x.mm());
+    h.key_press(egui::Key::R);
+    h.run_steps(2);
+    assert_eq!(board(&h).placed("U1").unwrap().rotation, 90.0);
+    h.key_press(egui::Key::F);
+    h.run_steps(2);
+    assert!(board(&h).placed("U1").unwrap().back);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.run_steps(3);
+    let undone = board(&h).placed("U1").unwrap().clone();
+    assert!(!undone.back && undone.rotation == 90.0, "undo takes back the flip only");
+}

@@ -20,6 +20,7 @@ fn build(parts: &[Part<'_>]) -> (Netlist, Circuit) {
     let mut schematic = Schematic::default();
     for (k, (name, cell, params, nets)) in parts.iter().enumerate() {
         let inst = Instance {
+            fields: Default::default(),
             name: (*name).into(),
             cell: format!("std:{cell}").parse().unwrap(),
             placement: Transform::at(Point::mils(2000 * k as i64, 0)),
@@ -30,7 +31,7 @@ fn build(parts: &[Part<'_>]) -> (Netlist, Circuit) {
         let ports: Vec<String> = def.cell.ports.iter().map(|p| p.name.clone()).collect();
         for (at, port) in placed_pins(def, &inst) {
             let i = ports.iter().position(|p| *p == port).unwrap();
-            schematic.labels.push(NetLabel { net: nets[i].into(), at });
+            schematic.labels.push(NetLabel { global: false, net: nets[i].into(), at });
         }
         schematic.instances.push(inst);
     }

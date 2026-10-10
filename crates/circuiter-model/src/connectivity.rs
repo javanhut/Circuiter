@@ -12,7 +12,9 @@
 //!   connected), so routing a wire past a part never shorts it by accident.
 //! - Two wires that merely cross, with no vertex at the crossing, are *not* connected.
 //! - Net labels with the same name are connected, and so are global-net symbols (ground)
-//!   with the same net name. A label named like a global net joins that global net.
+//!   with the same net name. A label named like a global net joins that global net, and
+//!   a global label joins its net across the whole design.
+//! - A pin under a no-connect flag is meant to be open, so isn't reported as dangling.
 //!
 //! A junction dot is drawn wherever three or more connections meet at a point.
 
@@ -93,7 +95,7 @@ impl Connectivity {
             let Some((_, def)) = design.resolve(&inst.cell, library) else { continue };
             for (at, port) in placed_pins(def, inst) {
                 pins.push(PlacedPin { instance: index, port, at });
-                global_of_pin.push(def.cell.global_net.clone());
+                global_of_pin.push(def.cell.global_net_for(&inst.params));
                 probe_pin.push(def.cell.probe);
             }
         }
@@ -194,8 +196,12 @@ impl Connectivity {
         }
         let junctions = degree.iter().filter(|(_, d)| **d >= 3).map(|(p, _)| *p).collect();
 
-        let attached =
-            |p: &Point| at_point[p].iter().any(|i| matches!(i, Item::Label(_) | Item::Port(_)));
+        // Labels and ports end a wire; a no-connect flag says a pin is meant to be open.
+        let flagged: BTreeSet<Point> = schematic.no_connects.iter().copied().collect();
+        let attached = |p: &Point| {
+            flagged.contains(p)
+                || at_point[p].iter().any(|i| matches!(i, Item::Label(_) | Item::Port(_)))
+        };
         let mut dangling_wire_ends = Vec::new();
         for wire in wires {
             let ends = [wire.points.first(), wire.points.last()];
@@ -269,7 +275,10 @@ fn name_net(items: Vec<Item>, global_of_pin: &[Option<String>], schematic: &Sche
                 candidates.insert((NetNameSource::Port, schematic.ports[i].port.clone()));
             }
             Item::Label(i) => {
-                candidates.insert((NetNameSource::Label, schematic.labels[i].net.clone()));
+                let label = &schematic.labels[i];
+                let source =
+                    if label.global { NetNameSource::Global } else { NetNameSource::Label };
+                candidates.insert((source, label.net.clone()));
             }
             Item::Wire(_) => {}
         }

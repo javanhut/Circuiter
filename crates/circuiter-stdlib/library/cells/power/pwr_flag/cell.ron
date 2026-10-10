@@ -1,0 +1,6 @@
+(
+    description: "Power flag: tells the electrical rules check that its net is supplied, when the supply comes through something it can\'t follow (a switch, a fuse, a connector), as KiCad\'s PWR_FLAG does. It does nothing in simulation",
+    prefix: "FLG",
+    ports: [(name: "pwr", kind: PowerOut)],
+    power_flag: true,
+)

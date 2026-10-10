@@ -1,0 +1,4 @@
+(
+    package: "terminal",
+    params: {"pins": "2"},
+)

@@ -419,33 +419,40 @@ impl CircuiterApp {
                 ui.set_height(38.0);
                 ui.add_space(8.0);
                 let has_schematic = ws.has_schematic();
-                let active = match (self.show_3d, self.show_netlist, ws.mode) {
-                    (true, _, _) => 2,
-                    (_, true, _) => 3,
-                    (_, false, Mode::Schematic) => 0,
-                    (_, false, Mode::Symbol) => 1,
+                let active = match (self.show_pcb, self.show_3d, self.show_netlist, ws.mode) {
+                    (true, _, _, _) => 2,
+                    (_, true, _, _) => 3,
+                    (_, _, true, _) => 4,
+                    (_, _, false, Mode::Schematic) => 0,
+                    (_, _, false, Mode::Symbol) => 1,
                 };
                 let views = [
                     ("Schematic", has_schematic),
                     ("Symbol", true),
+                    ("PCB", has_schematic),
                     ("3D", true),
                     ("Netlist", has_schematic),
                 ];
                 match style::segmented(ui, &views, active) {
                     Some(0) => {
-                        (self.show_netlist, self.show_3d) = (false, false);
+                        (self.show_netlist, self.show_3d, self.show_pcb) = (false, false, false);
                         ws.set_mode(Mode::Schematic);
                     }
                     Some(1) => {
-                        (self.show_netlist, self.show_3d) = (false, false);
+                        (self.show_netlist, self.show_3d, self.show_pcb) = (false, false, false);
                         ws.set_mode(Mode::Symbol);
                     }
                     Some(2) => {
-                        (self.show_netlist, self.show_3d) = (false, true);
+                        (self.show_netlist, self.show_3d, self.show_pcb) = (false, false, true);
                     }
                     Some(3) => {
+                        (self.show_netlist, self.show_3d, self.show_pcb) = (false, true, false);
+                        // From the board, its 3D view shows the board.
+                        self.viewer3d.board = active == 2;
+                    }
+                    Some(4) => {
                         ws.set_mode(Mode::Schematic);
-                        (self.show_netlist, self.show_3d) = (true, false);
+                        (self.show_netlist, self.show_3d, self.show_pcb) = (true, false, false);
                     }
                     _ => {}
                 }
@@ -485,8 +492,8 @@ impl CircuiterApp {
                 }
             });
             style::trailing(ui, |ui| {
-                // The 3D view has its own controls.
-                if self.show_3d {
+                // The 3D and board views have their own controls.
+                if self.show_3d || self.show_pcb {
                     return;
                 }
                 ui.spacing_mut().item_spacing.x = 2.0;
@@ -577,8 +584,16 @@ impl CircuiterApp {
                     ) {
                         prompt = Some(new_port_prompt(true));
                     }
+                    if tool(
+                        ui,
+                        icon::X,
+                        "No connect",
+                        "No-connect flag  (Q): marks a pin as meant to be left open",
+                    ) {
+                        ws.tool = Tool::NoConnect;
+                    }
                     if tool(ui, icon::TAG, "Label", "Net label  (L)") {
-                        prompt = Some(Prompt::Label { net: String::new() });
+                        prompt = Some(Prompt::Label { net: String::new(), global: false });
                     }
                     if tool(ui, icon::LINE_SEGMENTS, "Wire", "Wire  (W), or drag from a pin's end")
                     {

@@ -25,6 +25,7 @@ circuiter-scene.workspace = true
 circuiter-sim.workspace = true
 circuiter-stdlib.workspace = true
 circuiter-3d.workspace = true
+circuiter-pcb.workspace = true
 clap.workspace = true
 eframe = { version = "0.36", default-features = false, features = ["wgpu", "default_fonts", "wayland", "x11"] }
 image = { version = "0.25", default-features = false, features = ["png"] }

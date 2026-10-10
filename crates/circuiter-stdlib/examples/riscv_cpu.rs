@@ -34,7 +34,7 @@ fn io(sh: &mut Sheet<'_>, entries: &[(&str, &str)]) {
         let end = Point::mm(-18.0 * GRID, y);
         sh.s.wires.push(Wire { points: vec![at, end] });
         sh.s.ports.push(SchematicPort { port: name.to_string(), at });
-        sh.s.labels.push(NetLabel { net: net.to_string(), at: end });
+        sh.s.labels.push(NetLabel { global: false, net: net.to_string(), at: end });
     }
 }
 

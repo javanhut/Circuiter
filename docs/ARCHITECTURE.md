@@ -212,16 +212,42 @@ schematic hierarchy ──► netlister ──► flat netlist ──┬─► c
 | `circuiter-model` | Data model, file format, libraries, projects, hierarchy, structural checks | done |
 | `circuiter-stdlib` | Built-in `std` library | done (grows each milestone) |
 | `circuiter-scene` | Schematic → display list (shared by screen, SVG and print), themes, SVG export | done |
-| `circuiter-app` | The one binary, `circuiter`. Desktop GUI (egui on wgpu): headless operations (`edit` for schematics, `symbol_edit`, `interface`), `workspace` (session, tools, undo), `canvas`, `style` (colours, icons, shared widgets), `app` with `chrome` (title bar, toolbar, tabs), `explorer` (trees, components) and `panels` (properties, simulation, physics, results) | schematic and symbol editors done |
-| `circuiter-netlist` | Hierarchy flattening, net naming, SPICE emission with merged model cards, whole-circuit ERC (sheet connectivity is in the model) | done |
+| `circuiter-app` | The one binary, `circuiter`. Desktop GUI (egui on wgpu): headless operations (`edit` for schematics, `symbol_edit`, `interface`), `workspace` (session, tools, undo), `canvas`, `style` (colours, icons, shared widgets), `app` with `chrome` (title bar, toolbar, tabs), `explorer` (trees, components), `panels` (properties, simulation, physics, results), `pcb` (the board editor), `viewer3d` and `body_editor` (3D, the board in its case, modelling) | schematic, symbol, board and body editors done |
+| `circuiter-netlist` | Hierarchy flattening (for the analog and digital simulators, and the physical flattening a board is made from), net naming, SPICE emission with merged model cards, whole-circuit checks, and the electrical rules check (`erc`: KiCad's pin-type rules on the flattened circuit as it will run, sheet checks for labels and no-connect flags) | done |
 | `circuiter-sim` | Pure-Rust SPICE-compatible simulator: deck parser (R, C, L, K, V, I, E, F, G, H incl. `POLY`, S, W switches, D, MOSFET Level 1 with Meyer capacitance, Gummel-Poon BJT; `.subckt` with parameters, `.param`, `{}` expressions with functions; DC, AC, PULSE, SIN, PWL sources; JFETs (Shichman-Hodges); behavioural `B` sources whose expressions of node voltages, branch currents and time are differentiated exactly for Newton), sparse LU (KLU-style: minimum-degree ordering, threshold pivoting, refactorisation), operating point (Newton, dynamic gmin and source stepping), DC sweep, transient (switch event location), AC; progress and cancellation; model-library scanning for import; later the co-simulation scheduler | done for Milestone 1's analyses |
-| `circuiter-physics` | Per-part thermal model (exact RC update each step), instant limits (voltage, current, I²t), failure modes swapped into the running simulation, events with causes, operating-point assessment | done (first version) |
+| `circuiter-physics` | Per-part thermal model (exact RC update each step), instant limits (voltage, current, I²t), failure modes swapped into the running simulation, events with causes, operating-point assessment; an optional case: an air node warmed by every part and cooled through the case to the room, which is then each part's ambient | done (first version) |
 | `circuiter-render` | Custom wgpu renderer for very large sheets and 3D | when egui's painter runs out |
 | `circuiter-logic` | Digital simulator: four-state values up to 64 bits, event queue with delta cycles and propagation delays, net resolution of several drivers, history of every net; parts from gates to register files, memories and the RV32I control unit | done (first version) |
 | `circuiter-riscv` | RV32I assembler (matches LLVM's encodings), ELF loader, reference instruction-set simulator used to check processors built from parts | done for RV32I |
 | `circuiter-hdl` | Verilog/SystemVerilog: lexer, parser and an interpreter for the synthesizable subset, running each module as a digital part. Instances of other modules are flattened into their parent when compiled (connected through continuous assignments), `for` and `generate` loops are unrolled, functions run on values of their own | done (no tasks, `while`, `initial`) |
-| `circuiter-3d` | 3D geometry: meshes with normals and colours; boxes, cylinders, lathes, extrusions, wires; solid booleans by BSP trees (csg.js's method, in double precision); part bodies generated from packages and parameters; modelled bodies evaluated from feature histories with expressions; sheet assemblies; STL export. Rendered in the app with wgpu (offscreen, multisampled, then composited into egui) | first version (meshes, not yet B-rep: no STEP or fillets of arbitrary edges) |
-| `circuiter-pcb`, `circuiter-mfg` | Layout, DRC, Gerber/drill/BOM/pick-and-place | M3 |
+| `circuiter-3d` | 3D geometry: meshes with normals and colours; boxes, cylinders, lathes, extrusions, wires; solid booleans by BSP trees (csg.js's method, in double precision); part bodies generated from packages and parameters; modelled bodies evaluated from feature histories with expressions; sheet assemblies; polygons with holes triangulated in slabs; inside tests for closed meshes (ray parity over a grid); sections; outlines from DXF and SVG drawings; STL export. Rendered in the app with wgpu (offscreen, multisampled, then composited into egui) | first version (meshes, not yet B-rep: no STEP or fillets of arbitrary edges) |
+| `circuiter-pcb` | Printed circuit boards: footprints generated from packages (pads, silkscreen, courtyard, fab; KiCad's library names where the same), boards resolved against their schematics (`layout`), copper as polygons (`geometry`, booleans and offsets by `i_overlay`), connectivity and the ratsnest (union-find, then Prim between islands), pours (clearance, thermal spokes, minimum width, island removal, priority), the design rule check, fabrication (Gerber RS-274X/X2 per layer, Excellon, placement, BOM, an SVG plot with a stroke font), KiCad netlists, update from the schematic and automatic placement, the board in 3D, and cases made to fit with fit checks and thermal figures | first version (no interactive push-and-shove, no autorouter, through-hole footprints from generators) |
+
+## Boards and enclosures
+
+A board belongs to the cell whose schematic it lays out (`board.ron` beside
+`schematic.ron`): the outline, placed footprints keyed by instance path (`R1`,
+`X1.R2`), tracks, vias, zones, design rules and the case. Nothing on it is derived:
+pads, nets and pours are worked out each time from the schematic (the physical
+flattening: a cell with a footprint is a part on the board, a cell without one is
+opened, anything else, like a source or a meter, is off the board), so the board can't
+disagree with the schematic about connectivity. Annotation renames footprints with
+their parts; Update from Schematic places new parts in free space and removes orphans.
+
+Copper is polygons in millimetres. Clearances, shorts and edge distances are measured
+between polygons; pours are boolean differences of the zone outline and everything
+else grown by its clearance, with spokes added back and an opening by half the minimum
+width. The same polygons feed the Gerber writer (pours as regions with clear holes,
+pads flashed where an aperture fits) and the 3D board. Body and footprint conventions
+agree (a test checks that every part's leads go into its pads' holes): Y down on the
+board is −Y in 3D, the board's top face at z = 0.
+
+A case made to fit is a feature history (shell, cavity, standoffs, openings, lid with
+lip and vents), so it can be handed to the body editor as two ordinary 3D parts. The
+fit check casts rays through the case's mesh to find part vertices inside its walls.
+Its thermal model is lumped: convection and radiation outside, conduction through the
+wall, still air inside, vents halving the resistance; the heat capacity of the air and
+the shell. Simulations of a cell whose board has a case run with that air node.
 
 ## Roadmap
 
@@ -284,9 +310,9 @@ schematic hierarchy ──► netlister ──► flat netlist ──┬─► c
 | Milestone | Scope |
 |---|---|
 | M2 | ~~RISC-V ISS running C, Rust and assembly; a processor built from parts, and from gates alone, running the same firmware; SystemVerilog parts~~ (done, RV32I); next: pipelined cores, interrupts, peripherals, SystemVerilog through Verilator for speed |
-| M3 | PCB layout, DRC, manufacturing outputs; ~~3D part bodies, a 3D view, a feature-based modeller for parts and enclosures, STL~~ (done, on meshes); next a 3D board view from the layout, a B-rep kernel (fillets and chamfers of any edge, STEP export), sketch constraints, 3MF |
-| M4 | Board and enclosure thermal simulation |
-| M5 | Mechanical and product simulation: rigid bodies, sensors, actuators |
+| M3 | ~~PCB layout (placement, 45° routing with vias, pours), DRC, Gerber/Excellon/placement/BOM, KiCad netlists; 3D part bodies, a 3D view, a feature-based modeller for parts and enclosures, STL; the board in 3D; cases made to fit, fit checks; DXF/SVG import; ERC, annotation, global labels, power flags, fields~~ (done, first versions); next SMD footprints and a footprint editor, push-and-shove routing, differential pairs, length tuning, an autorouter, ODB++/IPC-2581, a B-rep kernel (fillets and chamfers of any edge, STEP export), sketch constraints beyond dimensions, 3MF, buses with KiCad's `D[0..7]` syntax, PDF schematics with title blocks |
+| M4 | ~~The air in a product's case, coupled to every part's temperature~~ (done, lumped); next board and enclosure thermal fields (copper spreading heat, conduction to the case) |
+| M5 | Mechanical and product simulation: rigid bodies, sensors, actuators (first steps: a case's lid opening, and the board's switches, pots and buttons moving in 3D as a live circuit runs) |
 | M6 | Signal integrity and EM: impedance, crosstalk, field solver |
 | M7 | Acoustics (Thiele/Small driver models, for example headphones), parts ordering, KiCad import |
 | Later | Physical-level component design: device parameters derived from geometry and materials (MOSFET dimensions and doping, transformer core and windings) |

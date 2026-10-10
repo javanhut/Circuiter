@@ -18,6 +18,7 @@ fn build(parts: &[Part<'_>]) -> (Netlist, Circuit) {
     let mut schematic = Schematic::default();
     for (k, (name, cell, params, nets)) in parts.iter().enumerate() {
         let inst = Instance {
+            fields: Default::default(),
             name: (*name).into(),
             cell: format!("std:{cell}").parse().unwrap(),
             placement: Transform::at(Point::mils(2000 * k as i64, 0)),
@@ -28,7 +29,7 @@ fn build(parts: &[Part<'_>]) -> (Netlist, Circuit) {
         let ports: Vec<String> = def.cell.ports.iter().map(|p| p.name.clone()).collect();
         for (at, port) in placed_pins(def, &inst) {
             let i = ports.iter().position(|p| *p == port).unwrap();
-            schematic.labels.push(NetLabel { net: nets[i].into(), at });
+            schematic.labels.push(NetLabel { global: false, net: nets[i].into(), at });
         }
         schematic.instances.push(inst);
     }
@@ -138,4 +139,42 @@ fn an_overvolted_capacitor_cracks_shorted() {
     assert_eq!(m.events[0].mode, FailureMode::Short("a".into(), "b".into()));
     let vb = r.voltage(&c, "b").unwrap();
     assert!(vb.last().unwrap().abs() < 0.5, "shorted: {}", vb.last().unwrap());
+}
+
+/// In a closed case the air warms, and every part with it: a resistor that is fine in
+/// the open gets hotter inside a small box, and the box's air settles where the power
+/// it holds in says.
+#[test]
+fn a_case_keeps_the_heat_in() {
+    // 0.2 W in a quarter-watt resistor: 129 °C in the open air.
+    let (netlist, c) = build(&[
+        ("V1", "vdc", &[("V", "10")], &["a", "GND"]),
+        ("R1", "resistor", &[("R", "500")], &["a", "GND"]),
+    ]);
+    let open = Monitor::new(&netlist, &c, AMBIENT).unwrap();
+    let op_result = op(&c, &Options::default()).unwrap();
+    assert!(open.assess(&c, &op_result).is_empty(), "fine in the open");
+    // A tiny sealed box, 700 K/W from its air to the room, cooks it: 25 + 0.2 × 700 +
+    // 0.2 × 520 = 269 °C, past its 250 °C.
+    let tiny = circuiter_physics::Case::new(700.0, 5.0, AMBIENT);
+    let boxed = Monitor::new(&netlist, &c, AMBIENT).unwrap().in_case(tiny);
+    let found = boxed.assess(&c, &op_result);
+    assert_eq!(found.len(), 1, "too hot in the box");
+    assert!(found[0].reason.contains("269 °C"), "{}", found[0].reason);
+    // A roomier one, 100 K/W, holds the air 20 °C above the room.
+    let case = circuiter_physics::Case::new(100.0, 5.0, AMBIENT);
+
+    // Over time the air approaches 25 + 0.2 × 100 = 45 °C with τ = 500 s.
+    let mut m = Monitor::new(&netlist, &c, AMBIENT).unwrap().in_case(case);
+    tran_observed(&c, 500.0, 5.0, &Options::default(), &mut m).unwrap();
+    let air = m.case.unwrap().air;
+    let expected = 25.0 + 20.0 * (1.0 - (-1.0f64).exp());
+    assert!((air - expected).abs() < 0.5, "{air} vs {expected}");
+    assert_eq!(m.air.len(), m.temperatures.len());
+    let r1 = m.part("R1").unwrap();
+    assert!(
+        r1.temperature > 25.0 + 0.2 * 520.0 + 10.0,
+        "R1 sits in the warm air: {}",
+        r1.temperature
+    );
 }

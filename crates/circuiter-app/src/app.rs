@@ -6,6 +6,7 @@ mod chrome;
 mod code;
 mod explorer;
 mod panels;
+pub(crate) mod pcb;
 mod viewer3d;
 
 use crate::Args;
@@ -64,6 +65,9 @@ pub struct CircuiterApp {
     show_netlist: bool,
     /// Showing the 3D view instead of the sheet.
     show_3d: bool,
+    /// Showing the board editor instead of the sheet.
+    show_pcb: bool,
+    pcb: pcb::PcbView,
     viewer3d: viewer3d::Viewer3d,
     /// The netlist shown, for which cell and design revision.
     netlist: Option<(CellId, u64, String)>,
@@ -119,6 +123,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("G, Shift+V", "Place ground / VDD"),
     ("W", "Wire (or drag from a pin's end)"),
     ("L", "Net label"),
+    ("Q", "No-connect flag"),
     ("P", "Port"),
     ("R, X", "Rotate, mirror"),
     ("Del", "Delete"),
@@ -139,6 +144,13 @@ enum Prompt {
     },
     Label {
         net: String,
+        global: bool,
+    },
+    /// Renumbering the sheet's parts: across rows or down columns, keeping numbers or
+    /// starting over.
+    Annotate {
+        columns: bool,
+        reset: bool,
     },
     /// A new port: placed as a flag on the schematic (`place`), or added to the
     /// interface directly.
@@ -392,6 +404,11 @@ impl CircuiterApp {
     }
 
     #[cfg(test)]
+    pub fn pcb_view(&self) -> &pcb::PcbView {
+        &self.pcb
+    }
+
+    #[cfg(test)]
     pub fn canvas_view(&self) -> Option<egui::Rect> {
         self.canvas.view
     }
@@ -428,6 +445,8 @@ impl CircuiterApp {
             show_bottom: true,
             show_netlist: false,
             show_3d: false,
+            show_pcb: false,
+            pcb: pcb::PcbView::default(),
             viewer3d: viewer3d::Viewer3d::default(),
             netlist: None,
             component_query: String::new(),
@@ -477,6 +496,20 @@ impl CircuiterApp {
             if args.view.as_deref() == Some("symbol") {
                 ws.set_mode(Mode::Symbol);
             }
+            if args.view.as_deref() == Some("pcb") {
+                app.show_pcb = true;
+            }
+            if args.view.as_deref() == Some("board3d") {
+                app.show_3d = true;
+                app.viewer3d.board = true;
+                // How to show the case: closed, open, section or none.
+                app.viewer3d.case_view = match args.select.as_deref() {
+                    Some("open") => viewer3d::CaseView::Open,
+                    Some("section") => viewer3d::CaseView::Section,
+                    Some("none") => viewer3d::CaseView::Hidden,
+                    _ => viewer3d::CaseView::Closed,
+                };
+            }
             if args.view.as_deref() == Some("3d") {
                 app.show_3d = true;
                 // A feature of the body to open in the editor.
@@ -505,6 +538,9 @@ impl CircuiterApp {
         }
         if args.live {
             app.live_action(chrome::LiveAction::Start);
+        }
+        if args.results.as_deref() == Some("none") {
+            app.show_bottom = false;
         }
         if let Some(tab) = args.results.as_deref() {
             app.bottom_tab = match tab {
@@ -670,6 +706,54 @@ impl CircuiterApp {
         }
     }
 
+    /// The sheet's parts and nets as a KiCad netlist, to lay the board out in KiCad.
+    fn export_kicad_netlist(&mut self) {
+        let Some(ws) = &self.workspace else { return };
+        let cell = ws.current().cell.clone();
+        let text = match circuiter_pcb::kicad::netlist(&ws.design, &cell, ws.project.name()) {
+            Ok(t) => t,
+            Err(e) => {
+                self.error = Some(e);
+                return;
+            }
+        };
+        let name = format!("{}.net", cell.cell);
+        if let Some(path) = rfd::FileDialog::new()
+            .set_file_name(name)
+            .add_filter("KiCad netlist", &["net"])
+            .save_file()
+        {
+            if let Err(e) = std::fs::write(&path, text) {
+                self.error = Some(format!("writing {}: {e}", path.display()));
+            }
+        }
+    }
+
+    /// The sheet's bill of materials as CSV: parts grouped by value and footprint.
+    fn export_bom(&mut self) {
+        let Some(ws) = &self.workspace else { return };
+        let cell = ws.current().cell.clone();
+        let board = ws
+            .current_def()
+            .and_then(|d| d.board.clone())
+            .unwrap_or_else(|| circuiter_model::board::Board::new(1.0, 1.0));
+        let text = match circuiter_pcb::layout::Layout::new(&ws.design, &cell, &board) {
+            Ok(layout) => circuiter_pcb::fab::bom(&layout),
+            Err(e) => {
+                self.error = Some(e);
+                return;
+            }
+        };
+        let name = format!("{}-bom.csv", cell.cell);
+        if let Some(path) =
+            rfd::FileDialog::new().set_file_name(name).add_filter("CSV", &["csv"]).save_file()
+        {
+            if let Err(e) = std::fs::write(&path, text) {
+                self.error = Some(format!("writing {}: {e}", path.display()));
+            }
+        }
+    }
+
     fn apply_theme(&mut self, ctx: &egui::Context) {
         if self.applied_theme == Some(self.theme.name) {
             return;
@@ -790,6 +874,7 @@ impl CircuiterApp {
                 rect: !cmd && i.key_pressed(Key::B),
                 circle: !cmd && i.key_pressed(Key::C),
                 text: !cmd && i.key_pressed(Key::T),
+                no_connect: !cmd && i.key_pressed(Key::Q),
             }
         });
         if keys.open {
@@ -844,6 +929,10 @@ impl CircuiterApp {
         if keys.redo {
             ws.redo();
         }
+        // The board and 3D views take their own keys.
+        if self.show_pcb || self.show_3d {
+            return;
+        }
         if keys.view {
             ws.set_mode(match ws.mode {
                 Mode::Schematic => Mode::Symbol,
@@ -891,11 +980,14 @@ impl CircuiterApp {
         if keys.wire {
             ws.tool = Tool::Wire { points: Vec::new(), horizontal_first: true };
         }
+        if keys.no_connect {
+            ws.tool = Tool::NoConnect;
+        }
         if keys.hand {
             ws.tool = if ws.tool == Tool::Pan { Tool::Select } else { Tool::Pan };
         }
         if keys.label {
-            self.prompt = Some(Prompt::Label { net: String::new() });
+            self.prompt = Some(Prompt::Label { net: String::new(), global: false });
         }
         if keys.port {
             self.prompt = Some(new_port_prompt(true));
@@ -1083,10 +1175,16 @@ impl CircuiterApp {
                     ws.tool = Tool::Wire { points: Vec::new(), horizontal_first: true };
                 }
                 if ui.add_enabled(sheet, egui::Button::new("Net Label…   L")).clicked() {
-                    self.prompt = Some(Prompt::Label { net: String::new() });
+                    self.prompt = Some(Prompt::Label { net: String::new(), global: false });
+                }
+                if ui.add_enabled(sheet, egui::Button::new("Global Label…")).clicked() {
+                    self.prompt = Some(Prompt::Label { net: String::new(), global: true });
                 }
                 if ui.add_enabled(sheet, egui::Button::new("Port…   P")).clicked() {
                     self.prompt = Some(new_port_prompt(true));
+                }
+                if ui.add_enabled(sheet, egui::Button::new("No-Connect Flag   Q")).clicked() {
+                    ws.tool = Tool::NoConnect;
                 }
                 ui.separator();
                 if ui.add_enabled(sheet, egui::Button::new("Ground   G")).clicked() {
@@ -1094,6 +1192,60 @@ impl CircuiterApp {
                 }
                 if ui.add_enabled(sheet, egui::Button::new("VDD   Shift+V")).clicked() {
                     ws.start_placing(&CellId::new(circuiter_model::STD_LIBRARY, "vdd"));
+                }
+                if ui
+                    .add_enabled(sheet, egui::Button::new("Power Rail (+5V, +3V3, -12V…)"))
+                    .clicked()
+                {
+                    ws.start_placing(&CellId::new(circuiter_model::STD_LIBRARY, "rail"));
+                }
+                if ui
+                    .add_enabled(sheet, egui::Button::new("Power Flag"))
+                    .on_hover_text(
+                        "Tells the rules check a net is supplied through something it can't follow",
+                    )
+                    .clicked()
+                {
+                    ws.start_placing(&CellId::new(circuiter_model::STD_LIBRARY, "pwr_flag"));
+                }
+            });
+            ui.menu_button("Tools", |ui| {
+                let Some(ws) = &mut self.workspace else { return };
+                let sheet = ws.has_schematic();
+                let editable = ws.editable();
+                if ui
+                    .add_enabled(sheet && editable, egui::Button::new("Annotate Schematic…"))
+                    .clicked()
+                {
+                    self.prompt = Some(Prompt::Annotate { columns: false, reset: false });
+                }
+                if ui
+                    .add_enabled(sheet, egui::Button::new("Electrical Rules Check"))
+                    .on_hover_text("What the pins on each net say about it, in Problems")
+                    .clicked()
+                {
+                    (self.show_pcb, self.show_3d, self.show_netlist) = (false, false, false);
+                    self.show_bottom = true;
+                    self.bottom_tab = 2;
+                }
+                ui.separator();
+                if ui.add_enabled(sheet, egui::Button::new("Board (PCB)")).clicked() {
+                    (self.show_pcb, self.show_3d, self.show_netlist) = (true, false, false);
+                }
+                if ui
+                    .add_enabled(sheet && editable, egui::Button::new("Update PCB from Schematic"))
+                    .clicked()
+                {
+                    (self.show_pcb, self.show_3d, self.show_netlist) = (true, false, false);
+                    self.pcb_update_from_schematic();
+                }
+                ui.separator();
+                if ui.add_enabled(sheet, egui::Button::new("Export KiCad Netlist…")).clicked() {
+                    self.export_kicad_netlist();
+                }
+                if ui.add_enabled(sheet, egui::Button::new("Export Bill of Materials…")).clicked()
+                {
+                    self.export_bom();
                 }
             });
             ui.menu_button("View", |ui| {
@@ -1177,6 +1329,10 @@ impl CircuiterApp {
     }
 
     fn inspector(&mut self, ui: &mut egui::Ui) {
+        if self.show_pcb {
+            pcb::board_inspector(self, ui);
+            return;
+        }
         let Some(ws) = &mut self.workspace else { return };
         ui.add_space(4.0);
         let field = &mut self.field;
@@ -1246,6 +1402,7 @@ impl CircuiterApp {
     /// Shows the cell being edited in the 3D view with its Body panel, to model it.
     fn open_body_3d(&mut self) {
         self.show_3d = true;
+        self.show_pcb = false;
         self.show_netlist = false;
         self.viewer3d.body_mode = true;
     }
@@ -1307,7 +1464,13 @@ impl CircuiterApp {
                 }
                 ui.separator();
                 let Some(ws) = &self.workspace else { return };
-                if let Some(notice) = &ws.notice {
+                if self.show_pcb {
+                    ui.label(RichText::new(self.pcb.tool.name()).strong());
+                    ui.add(
+                        egui::Label::new(RichText::new(pcb::hint(&self.pcb.tool)).weak())
+                            .truncate(),
+                    );
+                } else if let Some(notice) = &ws.notice {
                     let text = RichText::new(format!("{}  {notice}", style::icon::LIGHTNING));
                     ui.add(egui::Label::new(text.color(ACCENT)).truncate());
                 } else if ws.editable() {
@@ -1378,8 +1541,9 @@ impl CircuiterApp {
         if let (true, Some(m), Some(Results::Tran { result, tstop, .. })) =
             (heat, &sim.monitor, &sim.results)
         {
-            // One trace per part that warmed by more than a degree.
-            let series: Vec<(String, Vec<f64>)> = m
+            // One trace per part that warmed by more than a degree, and the air in the
+            // case when it's in one.
+            let mut series: Vec<(String, Vec<f64>)> = m
                 .parts
                 .iter()
                 .enumerate()
@@ -1390,6 +1554,12 @@ impl CircuiterApp {
                     (p.path.clone(), temps)
                 })
                 .collect();
+            if !m.air.is_empty() {
+                series.push((
+                    "air in the case".to_owned(),
+                    m.air.iter().map(|t| f64::from(*t)).collect(),
+                ));
+            }
             let n = result.time.len();
             let traces: Vec<Trace<'_>> = series
                 .iter()
@@ -1553,6 +1723,7 @@ impl CircuiterApp {
         let mut save_first = false;
         let mut program: Option<String> = None;
         let mut open_3d = false;
+        let mut failed: Option<String> = None;
         let ws = &mut self.workspace;
 
         egui::Modal::new(egui::Id::new("prompt")).show(ctx, |ui| {
@@ -1608,14 +1779,38 @@ impl CircuiterApp {
                         close = true;
                     }
                 }
-                Prompt::Label { net } => {
+                Prompt::Annotate { columns, reset } => {
+                    ui.heading("Annotate");
+                    ui.label("Gives every part on this sheet its reference: its prefix and the next number, in reading order.");
+                    ui.radio_value(columns, false, "Across rows, top to bottom");
+                    ui.radio_value(columns, true, "Down columns, left to right");
+                    ui.checkbox(reset, "Renumber every part (otherwise numbered parts keep theirs)");
+                    ui.add_space(6.0);
+                    if ui.button("Annotate").clicked() || enter {
+                        if let Some(ws) = ws {
+                            let order = if *columns {
+                                circuiter_model::annotate::Order::Columns
+                            } else {
+                                circuiter_model::annotate::Order::Rows
+                            };
+                            match ws.annotate(order, *reset) {
+                                Ok(0) => ws.notice = Some("Every part already has its reference".into()),
+                                Ok(n) => ws.notice = Some(format!("Renamed {n} part(s); the board follows")),
+                                Err(e) => failed = Some(e),
+                            }
+                        }
+                        close = true;
+                    }
+                }
+                Prompt::Label { net, global } => {
                     ui.heading("Net Label");
-                    ui.label("Labels with the same name are connected.");
+                    ui.label("Labels with the same name on a sheet are connected.");
                     let r = ui.add(egui::TextEdit::singleline(net).hint_text("VDD, CLK, DATA0…"));
                     r.request_focus();
+                    ui.checkbox(global, "Global: joins this net on every sheet of the design");
                     if enter && !net.trim().is_empty() {
                         if let Some(ws) = ws {
-                            ws.tool = Tool::Label { net: net.trim().to_owned() };
+                            ws.tool = Tool::Label { net: net.trim().to_owned(), global: *global };
                         }
                         close = true;
                     }
@@ -2135,6 +2330,9 @@ impl CircuiterApp {
         if open_3d {
             self.open_body_3d();
         }
+        if let Some(e) = failed {
+            self.error = Some(e);
+        }
         if let Some(name) = program {
             match self.new_program(&name) {
                 Ok(()) => self.prompt = None,
@@ -2192,6 +2390,7 @@ struct Keys {
     rect: bool,
     circle: bool,
     text: bool,
+    no_connect: bool,
 }
 
 fn ac_prompt() -> Prompt {
@@ -2389,6 +2588,79 @@ fn instance_panel(ui: &mut egui::Ui, ws: &mut Workspace, index: usize, field: &m
         style::value(ui, &format!("{degrees}°{mirror}"), 150.0);
         ui.end_row();
     });
+
+    // KiCad's fields: the value and footprint the board and the BOM use, and the
+    // part's numbers for buying it.
+    if def.footprint.is_some() || !inst.fields.is_empty() {
+        section(ui, "Fields");
+        style::properties(ui, "fields", |ui| {
+            style::name(ui, "Value");
+            style::value(ui, &circuiter_pcb::layout::value_of(&def, &inst.params), 150.0);
+            ui.end_row();
+            if let Some(view) = &def.footprint {
+                let ports: Vec<String> = def.cell.ports.iter().map(|p| p.name.clone()).collect();
+                let param = |n: &str| {
+                    inst.params.get(n).cloned().or_else(|| def.cell.param(n)?.default.clone())
+                };
+                let name = circuiter_pcb::footprints::resolve(view, &ports, &param)
+                    .map_or_else(|e| e, |f| f.name);
+                style::name(ui, "Footprint");
+                style::value(ui, &name, 150.0).on_hover_text(&name);
+                ui.end_row();
+            }
+            const STANDARD: [&str; 3] = ["MPN", "Manufacturer", "Datasheet"];
+            let mut names: Vec<String> = STANDARD.map(str::to_owned).to_vec();
+            names.extend(
+                inst.fields
+                    .keys()
+                    .filter(|k| !STANDARD.contains(&k.as_str()) && *k != "DNP")
+                    .cloned(),
+            );
+            for name in names {
+                style::name(ui, &name);
+                let current = inst.fields.get(&name).cloned().unwrap_or_default();
+                if editable {
+                    let key = format!("{key_base}/field/{name}");
+                    if let Some(v) = field.edit(ui, &key, &current, 150.0) {
+                        let result = ws.edit(|_, _, d| {
+                            let s = d.schematic.as_mut().ok_or("no schematic")?;
+                            let i = s.instances.get_mut(index).ok_or("no part")?;
+                            match v.trim() {
+                                "" => drop(i.fields.remove(&name)),
+                                v => drop(i.fields.insert(name.clone(), v.to_owned())),
+                            }
+                            Ok(())
+                        });
+                        if let Err(e) = result {
+                            field.error = Some((key, e));
+                        }
+                    }
+                } else {
+                    style::value(ui, &current, 150.0);
+                }
+                ui.end_row();
+            }
+            style::name(ui, "Do not populate");
+            let mut dnp = inst.dnp();
+            if ui
+                .add_enabled(editable, egui::Checkbox::without_text(&mut dnp))
+                .on_hover_text("Left off the assembled board: listed as DNP in the bill of materials, left out of the placement file")
+                .changed()
+            {
+                let _ = ws.edit(|_, _, d| {
+                    let s = d.schematic.as_mut().ok_or("no schematic")?;
+                    let i = s.instances.get_mut(index).ok_or("no part")?;
+                    if dnp {
+                        i.fields.insert("DNP".into(), "true".into());
+                    } else {
+                        i.fields.remove("DNP");
+                    }
+                    Ok(())
+                });
+            }
+            ui.end_row();
+        });
+    }
 
     section(ui, "Model");
     let model = match ws.design.select_view(&def, inst.view) {
@@ -3272,7 +3544,8 @@ impl eframe::App for CircuiterApp {
             .show(ui, |ui| self.status_bar(ui));
         let running =
             self.workspace.as_mut().and_then(|ws| ws.sim.as_mut()).is_some_and(|s| s.poll());
-        if running {
+        let checking = self.workspace.as_mut().is_some_and(|ws| ws.poll_erc());
+        if running || checking {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
         if self.workspace.is_some() {
@@ -3339,6 +3612,13 @@ impl eframe::App for CircuiterApp {
                 self.cursor = None;
                 self.hovered = None;
                 self.view_3d(ui);
+                return;
+            }
+            if self.show_pcb && self.workspace.is_some() {
+                self.cursor = None;
+                self.hovered = None;
+                self.view_pcb(ui);
+                self.error_toast(&ui.ctx().clone(), ui.max_rect());
                 return;
             }
             match &mut self.workspace {

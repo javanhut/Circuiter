@@ -34,6 +34,7 @@
             params: {"R": "50"},
         ),
         (name: "DMM1", cell: "std:multimeter", placement: (position: (307.34, -5.08))),
+        (name: "FLG1", cell: "std:pwr_flag", placement: (position: (162.56, 45.72))),
     ],
     wires: [
         (points: [(0.0, 0.0), (0.0, -5.08)]),
@@ -58,6 +59,7 @@
         (points: [(274.32, 0.0), (279.4, 0.0)]),
         (points: [(304.8, 0.0), (304.8, 5.08)]),
         (points: [(309.88, 0.0), (309.88, 5.08)]),
+        (points: [(162.56, 45.72), (162.56, 50.8)]),
     ],
     labels: [
         (net: "live", at: (0.0, -5.08)),
@@ -82,5 +84,6 @@
         (net: "GND", at: (279.4, 0.0)),
         (net: "5v", at: (304.8, 5.08)),
         (net: "GND", at: (309.88, 5.08)),
+        (net: "raw", at: (162.56, 50.8)),
     ],
 )

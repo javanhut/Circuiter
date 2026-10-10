@@ -259,6 +259,34 @@ impl CircuiterApp {
 
     pub(super) fn bottom_panel(&mut self, ui: &mut egui::Ui) {
         let p = style::palette(ui);
+        // Under the board: what the design rule check found.
+        if self.show_pcb {
+            let count = self
+                .pcb
+                .analysis
+                .as_ref()
+                .and_then(|a| a.checked.as_ref())
+                .map_or(0, |c| c.violations.len());
+            let title = format!("Design Rules ({count})");
+            let mut hide = false;
+            style::strip(ui, |ui| {
+                ui.horizontal(|ui| {
+                    style::tab_strip(ui, &[&title], 0);
+                    style::trailing(ui, |ui| {
+                        hide = style::icon_button(ui, icon::X, "Hide this panel", true, false)
+                            .clicked();
+                    });
+                })
+            });
+            if hide {
+                self.show_bottom = false;
+                return;
+            }
+            egui::Frame::new()
+                .inner_margin(egui::Margin::symmetric(12, 8))
+                .show(ui, |ui| super::pcb::drc_panel(self, ui));
+            return;
+        }
         let problems = self.workspace.as_ref().map_or(0, |ws| ws.problems().len());
         let problems_tab = format!("Problems ({problems})");
         let mut hide = false;

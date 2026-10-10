@@ -130,6 +130,7 @@ fn subcircuit(
         params,
         global_net: None,
         probe: false,
+        power_flag: false,
         physics: None,
     };
     let symbol = builder::generate(name, &cell);
@@ -146,6 +147,8 @@ fn subcircuit(
         spice: Some(SpiceView { template, models: vec![lines.join("\n")], choose: None }),
         digital: None,
         model3d: None,
+        footprint: None,
+        board: None,
     };
     Ok((def, trial))
 }
@@ -197,6 +200,8 @@ fn device(
         spice: Some(SpiceView { template: template.to_owned(), models: vec![card], choose: None }),
         digital: None,
         model3d: None,
+        footprint: None,
+        board: None,
     };
     Ok((def, format!("{trial_line}\n{text}")))
 }

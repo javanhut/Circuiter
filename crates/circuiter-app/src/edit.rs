@@ -40,7 +40,14 @@ pub fn place(
         design.resolve(&cell, library).map(|(_, d)| d.cell.prefix.clone()).unwrap_or_default();
     let s = def.schematic.get_or_insert_with(Schematic::default);
     let name = next_instance_name(s, &prefix);
-    s.instances.push(Instance { name, cell, placement, params: BTreeMap::new(), view: None });
+    s.instances.push(Instance {
+        fields: Default::default(),
+        name,
+        cell,
+        placement,
+        params: BTreeMap::new(),
+        view: None,
+    });
     s.instances.len() - 1
 }
 
@@ -82,14 +89,24 @@ fn simplify(points: &mut Vec<Point>) {
     }
 }
 
-pub fn add_label(def: &mut CellDef, net: &str, at: Point) -> Result<usize, String> {
+pub fn add_label(def: &mut CellDef, net: &str, at: Point, global: bool) -> Result<usize, String> {
     let net = net.trim();
     if net.is_empty() {
         return Err("a net label needs a name".into());
     }
     let s = def.schematic.get_or_insert_with(Schematic::default);
-    s.labels.push(NetLabel { net: net.to_owned(), at });
+    s.labels.push(NetLabel { global, net: net.to_owned(), at });
     Ok(s.labels.len() - 1)
+}
+
+/// Puts a no-connect flag at `at`, or takes off the one there.
+pub fn toggle_no_connect(def: &mut CellDef, at: Point) -> Result<(), String> {
+    let s = def.schematic.get_or_insert_with(Schematic::default);
+    match s.no_connects.iter().position(|&p| p == at) {
+        Some(k) => drop(s.no_connects.remove(k)),
+        None => s.no_connects.push(at),
+    }
+    Ok(())
 }
 
 /// Places a port of the cell on its schematic, adding it to the cell's interface if it's
@@ -995,7 +1012,7 @@ pub fn component_from(
         let end = away + shift;
         add_wire(&mut new, vec![start, end]);
         if net.source == NetNameSource::Global {
-            add_label(&mut new, &net.name, end)?;
+            add_label(&mut new, &net.name, end, false)?;
             continue;
         }
         let named = matches!(net.source, NetNameSource::Label | NetNameSource::Port)
@@ -1154,7 +1171,7 @@ mod tests {
             resistor_at(&d, &mut def, x, 0.0);
         }
         add_wire(&mut def, vec![mm(5.08, 0.0), mm(14.92, 0.0)]);
-        add_label(&mut def, "A", mm(5.08, 0.0)).unwrap();
+        add_label(&mut def, "A", mm(5.08, 0.0), false).unwrap();
         delete(&mut def, &BTreeSet::from([Owner::Instance(0), Owner::Instance(2), Owner::Wire(0)]));
         let s = def.schematic.as_ref().unwrap();
         assert_eq!(s.instances.len(), 1);
@@ -1220,10 +1237,10 @@ mod tests {
         add_wire(&mut def, vec![mm(5.08, 0.0), mm(5.08, 20.32), mm(10.16, 20.32)]);
         // A T into the middle of the first wire, from R3.b.
         add_wire(&mut def, vec![mm(20.32, 20.32), mm(15.24, 20.32), mm(15.24, 0.0)]);
-        add_label(&mut def, "MID", mm(10.16, 0.0)).unwrap();
+        add_label(&mut def, "MID", mm(10.16, 0.0), false).unwrap();
         // R1.a to nothing but a label.
         add_wire(&mut def, vec![mm(-5.08, 0.0), mm(-10.16, 0.0)]);
-        add_label(&mut def, "IN", mm(-10.16, 0.0)).unwrap();
+        add_label(&mut def, "IN", mm(-10.16, 0.0), false).unwrap();
         def
     }
 
@@ -1364,9 +1381,9 @@ mod tests_support {
         add_wire(&mut def, vec![mm(5.08, 0.0), mm(25.4, 0.0)]);
         add_wire(&mut def, vec![mm(5.08, 0.0), mm(5.08, 20.32), mm(10.16, 20.32)]);
         add_wire(&mut def, vec![mm(20.32, 20.32), mm(15.24, 20.32), mm(15.24, 0.0)]);
-        add_label(&mut def, "MID", mm(10.16, 0.0)).unwrap();
+        add_label(&mut def, "MID", mm(10.16, 0.0), false).unwrap();
         add_wire(&mut def, vec![mm(-5.08, 0.0), mm(-10.16, 0.0)]);
-        add_label(&mut def, "IN", mm(-10.16, 0.0)).unwrap();
+        add_label(&mut def, "IN", mm(-10.16, 0.0), false).unwrap();
         def
     }
 }

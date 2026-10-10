@@ -1,0 +1,4 @@
+(
+    package: "fuse",
+    params: {"diameter": "5", "length": "20", "pitch": "22.6"},
+)

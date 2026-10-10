@@ -1,0 +1,4 @@
+(
+    package: "radial",
+    params: {"diameter": "6.3", "pitch": "2.5"},
+)

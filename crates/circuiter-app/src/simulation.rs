@@ -6,7 +6,7 @@ use circuiter_model::check::{Diagnostic, Severity};
 use circuiter_model::units::format_quantity;
 use circuiter_model::{CellId, Design};
 use circuiter_netlist::Netlist;
-use circuiter_physics::{AMBIENT, Assessment, Event, Monitor};
+use circuiter_physics::{AMBIENT, Assessment, Case, Event, Monitor};
 use circuiter_sim::{
     AcResult, Circuit, Complex, Control, OpResult, Options, Problem, Spacing, TranResult,
 };
@@ -89,6 +89,8 @@ pub struct Simulation {
     pub job: Option<Job>,
     /// After a transient run: every rated part's heating and what was destroyed.
     pub monitor: Option<Monitor>,
+    /// The case the circuit runs in, if its board has one: its air warms with the parts.
+    pub case: Option<Case>,
     /// After an operating point: parts that would overheat if it held.
     pub assessments: Vec<Assessment>,
     /// Every part is digital: this runs in the digital simulator.
@@ -137,6 +139,7 @@ impl Simulation {
                 diagnostics,
                 job: None,
                 monitor: None,
+                case: case_of(design, top),
                 assessments: Vec::new(),
                 digital: true,
                 mixed: false,
@@ -206,6 +209,7 @@ impl Simulation {
             diagnostics,
             job: None,
             monitor: None,
+            case: case_of(design, top),
             assessments: Vec::new(),
             digital: false,
             mixed,
@@ -256,9 +260,9 @@ impl Simulation {
         let outcome = if self.digital {
             execute_digital(&self.netlist, &self.root, analysis, &Control::default())
         } else if self.mixed {
-            execute_mixed(&self.netlist, &self.root, analysis, Options::default())
+            execute_mixed(&self.netlist, &self.root, analysis, Options::default(), self.case)
         } else {
-            execute(&self.circuit, &self.netlist, analysis, Options::default())
+            execute(&self.circuit, &self.netlist, analysis, Options::default(), self.case)
         };
         self.finish(outcome);
     }
@@ -276,15 +280,15 @@ impl Simulation {
         let circuit = self.circuit.clone();
         let netlist = self.netlist.clone();
         let (tx, rx) = channel();
-        let (is_digital, is_mixed, root, c) =
-            (self.digital, self.mixed, self.root.clone(), control.clone());
+        let (is_digital, is_mixed, root, c, case) =
+            (self.digital, self.mixed, self.root.clone(), control.clone(), self.case);
         std::thread::spawn(move || {
             let outcome = if is_digital {
                 execute_digital(&netlist, &root, analysis, &c)
             } else if is_mixed {
-                execute_mixed(&netlist, &root, analysis, options)
+                execute_mixed(&netlist, &root, analysis, options, case)
             } else {
-                execute(&circuit, &netlist, analysis, options)
+                execute(&circuit, &netlist, analysis, options, case)
             };
             let _ = tx.send(outcome);
         });
@@ -321,7 +325,7 @@ impl Simulation {
         match outcome {
             Ok((r, monitor)) => {
                 if let Results::Op(op) = &r {
-                    if let Ok(m) = Monitor::new(&self.netlist, &self.circuit, AMBIENT) {
+                    if let Ok(m) = self::monitor(&self.netlist, &self.circuit, self.case) {
                         self.assessments = m.assess(&self.circuit, op);
                     }
                 }
@@ -452,6 +456,43 @@ pub fn plan(design: &Design, top: &CellId) -> Option<RunPlan> {
     Some(RunPlan { tstop, tstep, until_halt: false })
 }
 
+/// The physics engine's watch over a run, in the case if there is one.
+pub fn monitor(
+    netlist: &Netlist,
+    circuit: &Circuit,
+    case: Option<Case>,
+) -> Result<Monitor, String> {
+    let m = Monitor::new(netlist, circuit, case.map_or(AMBIENT, |c| c.air))?;
+    Ok(match case {
+        Some(c) => m.in_case(c),
+        None => m,
+    })
+}
+
+/// The case `top`'s board is in, thermally, when simulations are to run inside it.
+pub fn case_of(design: &Design, top: &CellId) -> Option<Case> {
+    let board = design.cell(top)?.board.as_ref()?;
+    let e = board.enclosure.as_ref().filter(|e| e.simulate)?;
+    let layout = circuiter_pcb::layout::Layout::new(design, top, board).ok()?;
+    let built = circuiter_pcb::board3d::build(design, &layout, &[]);
+    let (r, c) = match &e.part {
+        // A case of your own: its size from its body.
+        Some(part) => {
+            let (_, def) = design.resolve(part, &top.library)?;
+            let body = circuiter_3d::assembly::body(def, &Default::default()).ok()??;
+            let (lo, hi) = body.bounds()?;
+            let w = e.wall as f32;
+            let inner = ([lo[0] + w, lo[1] + w, lo[2] + w], [hi[0] - w, hi[1] - w, hi[2] - w]);
+            circuiter_pcb::enclosure::thermal_of((lo, hi), inner, e.wall, e)
+        }
+        None => {
+            let made = circuiter_pcb::enclosure::make(&layout, &built, e).ok()?;
+            circuiter_pcb::enclosure::thermal(&made, e)
+        }
+    };
+    Some(Case::new(r, c, e.room))
+}
+
 /// How long and how finely to run a mixed design: three periods of the slowest analog
 /// source, or 64 cycles of the slowest clock, whichever is longer.
 fn mixed_run(circuit: &Circuit, netlist: &Netlist) -> (f64, f64) {
@@ -471,7 +512,13 @@ fn mixed_run(circuit: &Circuit, netlist: &Netlist) -> (f64, f64) {
 }
 
 /// A mixed run: the analog transient with the digital simulator joined to it.
-fn execute_mixed(netlist: &Netlist, root: &Path, analysis: Analysis, o: Options) -> Outcome {
+fn execute_mixed(
+    netlist: &Netlist,
+    root: &Path,
+    analysis: Analysis,
+    o: Options,
+    case: Option<Case>,
+) -> Outcome {
     let prepared = crate::cosim::prepare(netlist, root, &[])?;
     let (tstop, tstep, power_on) = match analysis {
         Analysis::Tran { tstop, tstep, power_on } => (tstop, tstep, power_on),
@@ -481,7 +528,7 @@ fn execute_mixed(netlist: &Netlist, root: &Path, analysis: Analysis, o: Options)
         }
     };
     let crate::cosim::Prepared { circuit, inputs, mut cosim, .. } = prepared;
-    cosim.monitor = Monitor::new(netlist, &circuit, AMBIENT).ok();
+    cosim.monitor = monitor(netlist, &circuit, case).ok();
     let o = Options { power_on, inputs: Some(inputs), ..o };
     let mut run = circuiter_sim::Transient::start(&circuit, tstep, tstop, &o, &mut cosim)
         .map_err(|e| e.message)?;
@@ -512,15 +559,21 @@ fn execute_digital(
     Ok((Results::Logic(run), None))
 }
 
-fn execute(c: &Circuit, netlist: &Netlist, analysis: Analysis, o: Options) -> Outcome {
+fn execute(
+    c: &Circuit,
+    netlist: &Netlist,
+    analysis: Analysis,
+    o: Options,
+    case: Option<Case>,
+) -> Outcome {
     let r = match analysis {
         Analysis::Op => circuiter_sim::op(c, &o).map(|op| (Results::Op(op), None)),
         Analysis::Tran { tstop, tstep, power_on } => {
             // The physics engine watches every transient run: parts heat, and fail.
-            let mut monitor = Monitor::new(netlist, c, AMBIENT)?;
+            let mut m = monitor(netlist, c, case)?;
             let o = Options { power_on, ..o };
-            circuiter_sim::tran_observed(c, tstop, tstep, &o, &mut monitor)
-                .map(|(result, _)| (Results::Tran { result, tstop, tstep }, Some(monitor)))
+            circuiter_sim::tran_observed(c, tstop, tstep, &o, &mut m)
+                .map(|(result, _)| (Results::Tran { result, tstop, tstep }, Some(m)))
         }
         Analysis::Ac { fstart, fstop, per_decade } => {
             circuiter_sim::ac(c, Spacing::Decade(per_decade), fstart, fstop, &o)
@@ -704,6 +757,37 @@ mod tests {
         assert!((0.02..0.05).contains(&events[1].1), "fuse at {}", events[1].1);
         assert!((1.5..2.5).contains(&events[2].1), "resistor at {}", events[2].1);
         assert!(sim.failure("R3").is_some());
+    }
+
+    /// The power supply in a small sealed case: the regulator's watt or so warms the air
+    /// inside, which the run tracks; out of the case the air is the room's.
+    #[test]
+    fn a_circuit_in_its_case_warms_the_air() {
+        let (mut design, top) = load("analog_lab", "power_supply");
+        let mut board = circuiter_pcb::sync::new_board(&design, &top).unwrap();
+        board.enclosure = Some(Default::default());
+        design.cell_mut(&top).unwrap().board = Some(board);
+        let mut sim = Simulation::prepare(&design, &top).unwrap();
+        let case = sim.case.expect("the board's case");
+        assert!(case.resistance > 10.0 && (case.air - 25.0).abs() < 1e-9);
+        sim.run(Analysis::Tran { tstop: 2.0, tstep: 1e-3, power_on: true });
+        assert_eq!(sim.error, None);
+        let m = sim.monitor.as_ref().unwrap();
+        let air = m.case.unwrap();
+        assert!(air.peak > 25.05, "the air warms: {}", air.peak);
+        assert_eq!(m.air.len(), m.temperatures.len());
+        // Told not to simulate in it, the room is the parts' air.
+        design
+            .cell_mut(&top)
+            .unwrap()
+            .board
+            .as_mut()
+            .unwrap()
+            .enclosure
+            .as_mut()
+            .unwrap()
+            .simulate = false;
+        assert!(Simulation::prepare(&design, &top).unwrap().case.is_none());
     }
 
     /// Every circuit of the analog lab example runs from power-on and does its job.
@@ -1075,6 +1159,7 @@ pub mod sheet_builder {
             let at = Point::mm(100.0 * k as f64, 0.0);
             let placement = Transform { position: at, rotation: Rotation::R0, mirror: false };
             let inst = Instance {
+                fields: Default::default(),
                 name: name.to_string(),
                 cell: r,
                 placement,
@@ -1094,7 +1179,7 @@ pub mod sheet_builder {
                 let g = Length::from_mm(5.08).nm();
                 let end = Point::new(Length(p.x.nm() + dx * g), Length(p.y.nm() + dy * g));
                 s.wires.push(Wire { points: vec![p, end] });
-                s.labels.push(NetLabel { net: net.to_string(), at: end });
+                s.labels.push(NetLabel { global: false, net: net.to_string(), at: end });
             }
             s.instances.push(inst);
         }

@@ -1,0 +1,7 @@
+(
+    description: "Power rail: joins the global net it is named for (+5V, +3V3, +12V, -12V…), everywhere in the design, as KiCad\'s power symbols do. Drive it with a source or a regulator",
+    prefix: "PWR",
+    ports: [(name: "rail")],
+    params: [(name: "net", kind: Text, default: "+5V", description: "The rail\'s net")],
+    global_net: "${param.net}",
+)

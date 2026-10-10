@@ -17,9 +17,12 @@ to manufacture it.
 > parts to build processors (and an example RISC-V CPU, also made entirely of gates),
 > mixed analog and digital circuits, live runs you can operate with switches, buttons
 > and knobs while multimeters and an oscilloscope watch, programs in RISC-V assembly,
-> C, Rust and SystemVerilog, 3D bodies for parts, and a CAD modeller for your own
-> parts and enclosures. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design
-> and roadmap.
+> C, Rust and SystemVerilog, 3D bodies for parts, a CAD modeller for your own
+> parts and enclosures, an electrical rules check and annotation as in KiCad, a
+> printed circuit board editor (placement, 45° routing with vias, copper pours,
+> design rule checks, Gerber and drill files, KiCad netlists), and cases made to fit
+> a board, checked for fit and simulated thermally with the circuit inside. See
+> [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design and roadmap.
 
 ## Building
 
@@ -50,7 +53,13 @@ programs in assembly, C and Rust (built from digital parts, and again from gates
 alone), an electronics bench to run live (a supply to turn, switches, a button, LEDs,
 a counter, multimeters and an oscilloscope), and an analog lab of everyday circuits: an
 op-amp amplifier, a 555 blinker, a mains power supply with a 7805, a light switch, a
-motor driver and a relay driver.
+motor driver and a relay driver. The blinker is laid out on a board (PCB view) with a
+ground pour and the easy connections routed, in a vented case (3D view).
+
+```sh
+cargo run --release -p circuiter-app -- examples/analog_lab --cell blinker --view pcb
+cargo run --release -p circuiter-app -- examples/analog_lab --cell blinker --view board3d --select section
+```
 
 Start your own with File → New Project… (or the welcome screen): pick an empty folder
 and the project is named after it.
@@ -61,8 +70,8 @@ and the project is named after it.
   **Components**: every part by kind, with a search box. Click a part, then the sheet;
   or drag it onto the sheet.
 - Middle: open cells as **tabs**, each remembering where it was left. Above the sheet,
-  switch between **Schematic**, **Symbol**, **3D** and **Netlist** (the SPICE deck the
-  simulator runs), and pick drawing tools and zoom. The column of common parts beside
+  switch between **Schematic**, **Symbol**, **PCB** (the board), **3D** and **Netlist**
+  (the SPICE deck the simulator runs), and pick drawing tools and zoom. The column of common parts beside
   the sheet works like Components.
 - Right: **Properties** of what's selected (or the cell), **Simulation** (run, results,
   plotted signals) and **Physics** (ratings, temperatures, what failed).
@@ -90,7 +99,9 @@ and the project is named after it.
 |---|---|
 | Add a part | Drag it from Components or the parts column onto the sheet; or click it there, then click the sheet; or `A` / `Ctrl+K` and search (by name, folder or description). After one click you're back to selecting; Shift+click places several. `G` places a ground, `Shift+V` a VDD symbol. `R` rotates, `X` mirrors, `Esc` cancels |
 | Draw a wire | Drag out of a pin's end or a wire's end (it's marked when the pointer is over it) and let go on another pin or wire, or click the end and click onwards: that's how a loose wire is joined up. Double-click a wire to start a branch off it there. Or `W`, then click. Wires route at right angles (`/` flips the corner) and finish when they reach a pin or wire, or on double-click. A wire connects to a pin only at the wire's end or a corner: running past a pin doesn't connect it (Problems points it out). The status bar says what each edit connected or disconnected |
-| Net label | `L`, type a name, click on a wire. Same-named labels are connected |
+| Net label | `L`, type a name, click on a wire. Same-named labels on a sheet are connected; tick Global (or Place → Global Label…) to join the net on every sheet of the design, drawn as a flag |
+| No-connect flag | `Q`, then click a pin meant to be left open: it isn't reported as unconnected (click again to take the flag off) |
+| Power | `G` ground, `Shift+V` VDD; Place → Power Rail for any named rail (`+5V`, `+3V3`, `-12V`: set its net), joined everywhere by name; Place → Power Flag to tell the rules check a net is supplied through a switch, fuse or connector it can't see through |
 | Port | `P`, name and direction, then click. Ports are how a cell connects to the sheets that use it |
 | Select | Click; Shift+click adds; drag across empty space to box-select. Selecting a wire highlights its whole net |
 | Move | Drag a part (whatever tool is active): its wires stay attached, re-routing at right angles around it. Drag a wire to move the segment under the pointer sideways, as in other EDA tools: a horizontal run up or down, a vertical one left or right, the segments either side stretching to follow and a jog added where it ends on a pin. Whatever joins it part-way (a T, a label) stays joined. Select several things to move them together |
@@ -98,6 +109,8 @@ and the project is named after it.
 | Copy, cut, paste, duplicate | `Ctrl+C`, `Ctrl+X`, `Ctrl+V` (at the pointer), `Ctrl+D`. Parts come with the wires between them and get fresh names; paste works across sheets and between Circuiter windows |
 | Edit values | Change the name or any parameter in the inspector (`4k7`, `100n`, `2u`…); invalid values are refused. ↺ resets to the default |
 | Undo, redo | `Ctrl+Z`, `Ctrl+Y` (per sheet) |
+| Annotate | Tools → Annotate Schematic…: every part gets its prefix and the next number in reading order (across rows or down columns), keeping numbers already given or starting over; the board's footprints follow their parts |
+| Fields | Select a part: Fields shows the value and the KiCad footprint it will use, and holds its MPN, manufacturer and datasheet (and any field you add) for the bill of materials; Do not populate leaves it off the assembled board |
 | New cell | `Ctrl+N`: an empty schematic to build a new component in, optionally in a folder |
 | Folders | Cells sit in folders, as deep as you like (`cpu/alu/adders`). Right-click a folder (or the project) for New Folder, New Cell Here, Rename and Delete (when empty); drag a cell onto a folder to move it, or set its folder in Properties. Folders stay until deleted, even empty, and on disk they're ordinary directories. The standard library is sorted the same way (`gates/`, `resistors/`, `transistors/`…); imported models go in `imported/` |
 | Save | `Ctrl+S`. The title bar shows ● while there are unsaved changes, and you're asked before anything would discard them |
@@ -148,6 +161,79 @@ nothing to install. It speaks SPICE and is checked against ngspice.
 | Problems | No ground, nets with no DC path to ground and shorted voltage sources are reported under Problems. A circuit without ground still simulates, as a real one would, against board leakage |
 
 Results go stale when you edit the circuit; run the analysis again to refresh them.
+
+**Electrical rules check**
+
+As you edit, the rules check reads what each pin is (an input, an output, a supply,
+passive…) and reports under Problems, marked ERC:
+
+- outputs driving against each other, and an output shorted to a supply;
+- inputs nothing drives;
+- a chip's supply pin on a rail no source or regulator feeds (put a Power Flag on a
+  rail fed through a switch, fuse or connector, as in KiCad);
+- labels joined to nothing, global labels used once, and no-connect flags on pins that
+  are connected after all;
+
+alongside the sheet's own checks (unconnected pins and wire ends, wires passing over
+pins, conflicting net names). Big designs are checked in the background. Tools →
+Electrical Rules Check opens Problems.
+
+**Boards**
+
+Open a cell's **PCB** view and press Create Board from Schematic: a two-layer board
+sized for the parts, every part with a footprint placed on it, joined by the ratsnest
+(thin lines showing what's still to connect). Layers are drawn in KiCad's colours, the
+active one on top.
+
+| Action | How |
+|---|---|
+| Move a part | Drag it (snaps to the grid). `R` turns it 90°, `F` flips it to the back, `L` locks it, `Delete` takes it off |
+| Route | `X` (or the route tool), click a pad, then click to lay each corner: tracks run at 0°, 45° and 90° (`/` swaps which leg comes first), at the net's width, and a track that would come too close to other copper shows red with its clearance outline. Click a pad, track or via of the same net to finish. `V` drops a via and carries on on the other layer; `Backspace` takes back the last leg; `Esc` stops |
+| Layers | F.Cu / B.Cu in the toolbar, or `Page Up` / `Page Down`; Layers shows or hides each copper layer, pours, silkscreen, ratsnest and rule markers |
+| Copper pour | The zone tool, pick its net (GND by default), click its corners, double-click to finish. It fills to the board's edge, keeps the clearance from other nets, joins its own pads through thermal spokes and drops islands; select it to set priority, pad connection, relief gap and spoke width |
+| Board shape | Width and height in Properties, the outline tool to draw any shape, or Import Outline… from a DXF or SVG drawing |
+| Rules | Properties → Design rules: clearance, track width, via size, the board house's minimums, edge clearance, hole spacing |
+| Update | Update from Schematic places parts new to the schematic and takes off those deleted from it |
+| Undo | `Ctrl+Z`, as anywhere |
+
+The design rule check runs as you go and lists, under Design Rules below the board,
+shorts, clearances, narrow tracks, small drills, thin annular rings, copper too near
+the edge, holes too close, overlapping courtyards and unrouted connections; click one
+to go there. The status line counts what's unrouted and what's wrong.
+
+**Fabrication files** writes, into a folder you choose: a Gerber file per layer
+(RS-274X with X2 attributes: copper, solder mask, paste, silkscreen, board outline),
+Excellon drill files for plated and unplated holes, the placement file for the
+assembly machine, the bill of materials (grouped, with MPN and manufacturer, DNP parts
+apart), and an SVG picture of the board. Tools → Export KiCad Netlist… writes the
+design as a KiCad netlist with KiCad's library footprints where they're the same, to
+lay out in Pcbnew instead; Export Bill of Materials… writes the BOM on its own.
+
+**Cases and assemblies**
+
+The board's **3D** view (or 3D in the PCB toolbar) shows it as it'll be made: green
+mask over the copper, tinned pads, white silkscreen, every part standing in its holes.
+Make a Case gives it a base and lid made to fit: walls following the board's outline
+at a gap, standoffs under its mounting holes or corners tall enough to clear the leads,
+openings in the walls for connectors at the edge and in the lid for buttons, switches,
+pots and LEDs, a lip that locates the lid, and vent slots if you want them.
+
+- **Closed**, **Open** (the lid lifted off, by a slider), **Section** (cut through the
+  middle) or **No case**.
+- **Fit**: every part's body is checked against the case's walls, floor and lid, and
+  the board's edge against the walls: "Everything fits", or which parts don't and by
+  how much.
+- **Heat**: the case's walls, size and material (plastic or aluminium, with or without
+  vents) set how much the air inside warms per watt. Simulations run with the circuit
+  inside it: every part's power warms the air, the air warms every part, and Thermal
+  plots the air in the case with the parts. Turn Simulate in it off to run in the room.
+- **Your own case**: Make Editable 3D Parts turns the case into two 3D parts to change
+  in the body editor; or pick any 3D part (and lid) of the project, with where the
+  board sits in it, and it's checked the same way.
+- **Running it**: while the circuit runs live, the 3D board follows it: switch levers
+  flip, pots turn, buttons press, and LEDs light.
+
+The case's settings are in the PCB view's Properties, under Case.
 
 **Running live**
 
@@ -255,8 +341,13 @@ be hidden, reordered or deleted. Dimensions are expressions in millimetres that 
 use the cell's parameters (`width - 2*wall`), so changing a parameter reshapes the
 part. Outlines are drawn in a sketch editor: drag corners (snapping to 0.5 mm), click
 an edge's + to add a corner, right-click one to remove it, start from a rectangle,
-circle, slot or hexagon, or type the corners, with arcs between them. Every change can
-be undone. A cell with a standard package can switch to a modelled body (Model it
+circle, slot or hexagon, or type the corners, with arcs between them. Each edge shows
+its length; under Dimensions, type an edge's length and direction (the corners after
+it follow) or the outline's overall width and height. Every change can be undone.
+
+**From 2D**: Import Outline (DXF, SVG)… extrudes a drawing (lines, polylines with arcs,
+circles, rectangles, paths), its inner outlines cut through as holes; From the Symbol
+makes a body of the part's symbol outline, its inner drawings raised on top. A cell with a standard package can switch to a modelled body (Model it
 yourself instead), and a new cell can start from either.
 
 `examples/analog_lab` has an enclosure modelled this way (`case` and `case_lid`): a
@@ -409,7 +500,8 @@ current sheet, such as unconnected pins.
 | `crates/circuiter-logic` | The digital simulator and its parts |
 | `crates/circuiter-riscv` | RV32I assembler, ELF loader, reference instruction-set simulator |
 | `crates/circuiter-hdl` | Verilog/SystemVerilog parser and interpreter |
-| `crates/circuiter-3d` | Meshes, solid booleans, part bodies from parameters, modelled features, STL |
+| `crates/circuiter-3d` | Meshes, solid booleans, part bodies from parameters, modelled features, inside tests, DXF/SVG import, STL |
+| `crates/circuiter-pcb` | Footprints, boards linked to schematics, copper geometry, connectivity and ratsnest, pours, design rule checks, Gerber/Excellon/BOM/placement files, KiCad netlists, the board in 3D, cases made to fit |
 | `crates/circuiter-app` | The `circuiter` desktop app (egui on wgpu), the only binary |
 | `examples/` | Example projects |
 | `docs/` | Architecture and design notes |
