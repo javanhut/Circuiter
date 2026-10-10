@@ -15,6 +15,7 @@ pub mod error;
 mod format;
 pub mod geom;
 pub mod library;
+pub mod model3d;
 pub mod project;
 pub mod schematic;
 pub mod spice;

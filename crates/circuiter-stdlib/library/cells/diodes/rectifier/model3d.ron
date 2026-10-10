@@ -1,0 +1,10 @@
+(
+    package: "axial",
+    params: {
+        "color": "black",
+        "diameter": "2.7",
+        "length": "5.2",
+        "pitch": "10.16",
+        "style": "diode",
+    },
+)

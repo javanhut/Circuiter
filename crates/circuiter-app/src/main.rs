@@ -11,6 +11,7 @@ mod import;
 mod interface;
 mod live;
 mod plot;
+mod render3d;
 mod simulation;
 mod style;
 mod symbol_edit;
@@ -33,10 +34,11 @@ pub struct Args {
     /// Colour theme: `paper` or `bench`.
     #[arg(long)]
     pub theme: Option<String>,
-    /// View to show: `schematic` or `symbol`.
+    /// View to show: `schematic`, `symbol` or `3d`.
     #[arg(long)]
     pub view: Option<String>,
-    /// Select an instance (or, in the symbol view, a pin) by name after opening.
+    /// Select an instance (or, in the symbol view, a pin; in the 3D view, a feature of
+    /// the body) by name after opening.
     #[arg(long)]
     pub select: Option<String>,
     /// Run an analysis after opening: `op`, `tran` (or `tran:STOP`, e.g. `tran:3`) or `ac`.

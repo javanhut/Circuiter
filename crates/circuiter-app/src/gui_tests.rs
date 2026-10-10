@@ -533,3 +533,48 @@ fn clicking_a_switch_while_running_live_flips_it() {
     }
     assert!(h.state().workspace().unwrap().live.is_none(), "stopped");
 }
+
+/// Modelling a body in the 3D view: add a hole from the menu, undo it, hide a feature.
+#[test]
+fn modelling_a_body_adds_undoes_and_hides_features() {
+    let tmp = example_copy("analog_lab");
+    let args = Args {
+        project: Some(tmp.path().to_owned()),
+        cell: Some("case_lid".into()),
+        theme: None,
+        view: Some("3d".into()),
+        select: None,
+        simulate: None,
+        heat: false,
+        program: None,
+        live: false,
+        results: None,
+        screenshot: None,
+    };
+    let mut h = Harness::builder()
+        .with_size(Vec2::new(1600.0, 1000.0))
+        .build_eframe(move |cc| CircuiterApp::new(cc, args));
+    h.run_steps(4);
+    let features = |h: &Harness<'_, CircuiterApp>| {
+        let ws = h.state().workspace().expect("open");
+        ws.current_def().and_then(|d| d.model3d.clone()).expect("a body").features
+    };
+    let before = features(&h).len();
+    h.get_by_label(&format!("{}  Add feature", crate::style::icon::PLUS)).click();
+    h.run_steps(2);
+    h.get_by_label("Hole").click();
+    h.run_steps(3);
+    let after = features(&h);
+    assert_eq!(after.len(), before + 1);
+    let hole = after.last().unwrap();
+    assert_eq!(hole.name, "Hole");
+    assert_eq!(hole.operation, circuiter_model::model3d::Operation::Cut);
+    // Undo takes it away again.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.run_steps(3);
+    assert_eq!(features(&h).len(), before);
+    // The eye beside the first feature leaves it out.
+    h.get_all_by_label(crate::style::icon::EYE).next().expect("an eye").click();
+    h.run_steps(3);
+    assert!(features(&h)[0].hidden, "the plate is left out");
+}

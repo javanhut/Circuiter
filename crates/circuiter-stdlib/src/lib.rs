@@ -111,4 +111,18 @@ mod tests {
             );
         }
     }
+
+    /// Every physical part has a 3D body, and it builds from the part's defaults.
+    #[test]
+    fn physical_parts_have_3d_bodies() {
+        let lib = library();
+        for def in lib.cells.values() {
+            if let Some(mesh) = circuiter_3d::assembly::body(def, &Default::default()).unwrap() {
+                assert!(mesh.triangles() > 10, "{}", def.name);
+            }
+        }
+        for name in ["resistor", "led", "ne555", "relay", "lm7805", "electrolytic", "and"] {
+            assert!(lib.cell(name).unwrap().model3d.is_some(), "{name} has no 3D body");
+        }
+    }
 }

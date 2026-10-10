@@ -1,0 +1,11 @@
+(
+    description: "Enclosure for the blinker, modelled in the 3D view: a shell with screw posts, holes for the LED, switch and DC jack, and vents. Change width, depth, height or wall and it follows",
+    prefix: "X",
+    ports: [],
+    params: [
+        (name: "width", kind: Real(unit: "mm"), default: "70", description: "Outside width"),
+        (name: "depth", kind: Real(unit: "mm"), default: "50", description: "Outside depth"),
+        (name: "height", kind: Real(unit: "mm"), default: "30", description: "Outside height"),
+        (name: "wall", kind: Real(unit: "mm"), default: "2", description: "Wall thickness"),
+    ],
+)

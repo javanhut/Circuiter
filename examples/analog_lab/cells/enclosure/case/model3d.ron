@@ -1,0 +1,80 @@
+(
+    features: [
+        (name: "Shell", shape: Box(size: ("width", "depth", "height"), radius: "6")),
+        (
+            name: "Cavity",
+            shape: Box(size: ("width - 2*wall", "depth - 2*wall", "height"), radius: "4"),
+            operation: Cut,
+            at: ("0", "0", "wall"),
+        ),
+        (
+            name: "Post",
+            shape: Cylinder(radius: "3.5", height: "height - wall - 3"),
+            at: ("width/2 - 7", "depth/2 - 7", "wall"),
+        ),
+        (name: "Post 2", shape: Mirror(of: "Post", axis: X)),
+        (name: "Post 3", shape: Mirror(of: "Post", axis: Y)),
+        (name: "Post 4", shape: Mirror(of: "Post 2", axis: Y)),
+        (
+            name: "Screw hole",
+            shape: Cylinder(radius: "1.3", height: "height"),
+            operation: Cut,
+            at: ("width/2 - 7", "depth/2 - 7", "wall + 2"),
+        ),
+        (name: "Screw hole 2", shape: Mirror(of: "Screw hole", axis: X), operation: Cut),
+        (name: "Screw hole 3", shape: Mirror(of: "Screw hole", axis: Y), operation: Cut),
+        (name: "Screw hole 4", shape: Mirror(of: "Screw hole 2", axis: Y), operation: Cut),
+        (
+            name: "LED hole",
+            shape: Cylinder(radius: "2.6", height: "wall + 4"),
+            operation: Cut,
+            at: ("-12", "-depth/2 + 2", "height/2"),
+            turn: ("90", "0", "0"),
+        ),
+        (
+            name: "Switch slot",
+            shape: Extrude(
+                sketch: (
+                    points: [
+                        (x: "-4", y: "-2.25"),
+                        (x: "4", y: "-2.25", bulge: "1"),
+                        (x: "4", y: "2.25"),
+                        (x: "-4", y: "2.25", bulge: "1"),
+                    ],
+                ),
+                height: "wall + 4",
+            ),
+            operation: Cut,
+            at: ("10", "-depth/2 + 2", "height/2"),
+            turn: ("90", "0", "0"),
+        ),
+        (
+            name: "Jack hole",
+            shape: Cylinder(radius: "4", height: "wall + 4"),
+            operation: Cut,
+            at: ("width/2 - 2", "0", "height/2 - 3"),
+            turn: ("0", "90", "0"),
+        ),
+        (
+            name: "Vent",
+            shape: Extrude(
+                sketch: (
+                    points: [
+                        (x: "-9", y: "-1"),
+                        (x: "9", y: "-1", bulge: "1"),
+                        (x: "9", y: "1"),
+                        (x: "-9", y: "1", bulge: "1"),
+                    ],
+                ),
+                height: "wall + 2",
+            ),
+            operation: Cut,
+            at: ("0", "-10", "-1"),
+        ),
+        (
+            name: "Vents",
+            shape: Copies(of: "Vent", count: "5", step: ("0", "5", "0")),
+            operation: Cut,
+        ),
+    ],
+)

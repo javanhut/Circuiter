@@ -6,7 +6,8 @@
 //! cargo run -p circuiter-stdlib --example analog_lab -- examples/analog_lab
 //! ```
 
-use circuiter_model::cell::{Cell, CellDef};
+use circuiter_model::cell::{Cell, CellDef, ParamDef, ParamKind};
+use circuiter_model::model3d::{Axis, Feature, Model3d, Operation, Shape, Sketch};
 use circuiter_model::schematic::Schematic;
 use circuiter_model::{Design, Library, Project};
 use std::path::PathBuf;
@@ -212,6 +213,181 @@ fn relay_driver(design: &Design) -> CellDef {
     )
 }
 
+/// A feature of the enclosure.
+fn feat(name: &str, shape: Shape, op: Operation, at: [&str; 3], turn: [&str; 3]) -> Feature {
+    let mut f = Feature::new(name, shape);
+    f.operation = op;
+    f.at = at.map(str::to_owned);
+    f.turn = turn.map(str::to_owned);
+    f
+}
+
+fn s3(a: &str, b: &str, c: &str) -> [String; 3] {
+    [a.into(), b.into(), c.into()]
+}
+
+fn mm(name: &str, default: &str, description: &str) -> ParamDef {
+    ParamDef {
+        name: name.into(),
+        kind: ParamKind::Real { unit: "mm".into() },
+        default: Some(default.into()),
+        description: description.into(),
+    }
+}
+
+const NONE: [&str; 3] = ["0", "0", "0"];
+
+/// The enclosure for the blinker: a box modelled feature by feature, its size set by
+/// its parameters.
+fn case() -> CellDef {
+    use Operation::{Add, Cut};
+    let cyl = |r: &str, h: &str| Shape::Cylinder { radius: r.into(), height: h.into() };
+    let mirror = |of: &str, axis: Axis| Shape::Mirror { of: of.into(), axis };
+    let post_at = ["width/2 - 7", "depth/2 - 7", "wall"];
+    let features = vec![
+        feat(
+            "Shell",
+            Shape::Box { size: s3("width", "depth", "height"), radius: "6".into() },
+            Add,
+            NONE,
+            NONE,
+        ),
+        feat(
+            "Cavity",
+            Shape::Box {
+                size: s3("width - 2*wall", "depth - 2*wall", "height"),
+                radius: "4".into(),
+            },
+            Cut,
+            ["0", "0", "wall"],
+            NONE,
+        ),
+        feat("Post", cyl("3.5", "height - wall - 3"), Add, post_at, NONE),
+        feat("Post 2", mirror("Post", Axis::X), Add, NONE, NONE),
+        feat("Post 3", mirror("Post", Axis::Y), Add, NONE, NONE),
+        feat("Post 4", mirror("Post 2", Axis::Y), Add, NONE, NONE),
+        feat(
+            "Screw hole",
+            cyl("1.3", "height"),
+            Cut,
+            ["width/2 - 7", "depth/2 - 7", "wall + 2"],
+            NONE,
+        ),
+        feat("Screw hole 2", mirror("Screw hole", Axis::X), Cut, NONE, NONE),
+        feat("Screw hole 3", mirror("Screw hole", Axis::Y), Cut, NONE, NONE),
+        feat("Screw hole 4", mirror("Screw hole 2", Axis::Y), Cut, NONE, NONE),
+        // Through the front wall: a cylinder turned to point along −Y.
+        feat(
+            "LED hole",
+            cyl("2.6", "wall + 4"),
+            Cut,
+            ["-12", "-depth/2 + 2", "height/2"],
+            ["90", "0", "0"],
+        ),
+        feat(
+            "Switch slot",
+            Shape::Extrude { sketch: Sketch::slot(8.0, 4.5), height: "wall + 4".into() },
+            Cut,
+            ["10", "-depth/2 + 2", "height/2"],
+            ["90", "0", "0"],
+        ),
+        // Through the right-hand wall, for a DC jack.
+        feat(
+            "Jack hole",
+            cyl("4", "wall + 4"),
+            Cut,
+            ["width/2 - 2", "0", "height/2 - 3"],
+            ["0", "90", "0"],
+        ),
+        feat(
+            "Vent",
+            Shape::Extrude { sketch: Sketch::slot(18.0, 2.0), height: "wall + 2".into() },
+            Cut,
+            ["0", "-10", "-1"],
+            NONE,
+        ),
+        feat(
+            "Vents",
+            Shape::Copies { of: "Vent".into(), count: "5".into(), step: s3("0", "5", "0") },
+            Cut,
+            NONE,
+            NONE,
+        ),
+    ];
+    CellDef {
+        name: "case".into(),
+        folder: "enclosure".into(),
+        cell: Cell {
+            description: "Enclosure for the blinker, modelled in the 3D view: a shell with \
+                          screw posts, holes for the LED, switch and DC jack, and vents. \
+                          Change width, depth, height or wall and it follows"
+                .into(),
+            params: vec![
+                mm("width", "70", "Outside width"),
+                mm("depth", "50", "Outside depth"),
+                mm("height", "30", "Outside height"),
+                mm("wall", "2", "Wall thickness"),
+            ],
+            ..Cell::default()
+        },
+        model3d: Some(Model3d { features, ..Model3d::default() }),
+        ..CellDef::default()
+    }
+}
+
+/// The case's lid: a plate with a lip that fits inside, and countersunk screw holes.
+fn case_lid() -> CellDef {
+    use Operation::{Add, Cut};
+    let mirror = |of: &str, axis: Axis| Shape::Mirror { of: of.into(), axis };
+    let hole_at = ["width/2 - 7", "depth/2 - 7", "-3"];
+    let features = vec![
+        feat(
+            "Plate",
+            Shape::Box { size: s3("width", "depth", "wall"), radius: "6".into() },
+            Add,
+            NONE,
+            NONE,
+        ),
+        feat(
+            "Lip",
+            Shape::Box {
+                size: s3("width - 2*wall - 0.4", "depth - 2*wall - 0.4", "2"),
+                radius: "4".into(),
+            },
+            Add,
+            ["0", "0", "-2"],
+            NONE,
+        ),
+        feat(
+            "Recess",
+            Shape::Box {
+                size: s3("width - 2*wall - 4", "depth - 2*wall - 4", "2"),
+                radius: "3".into(),
+            },
+            Cut,
+            ["0", "0", "-2.5"],
+            NONE,
+        ),
+        feat(
+            "Countersink",
+            Shape::Cone { bottom: "1.6".into(), top: "3.2".into(), height: "wall + 3.01".into() },
+            Cut,
+            hole_at,
+            NONE,
+        ),
+        feat("Countersink 2", mirror("Countersink", Axis::X), Cut, NONE, NONE),
+        feat("Countersink 3", mirror("Countersink", Axis::Y), Cut, NONE, NONE),
+        feat("Countersink 4", mirror("Countersink 2", Axis::Y), Cut, NONE, NONE),
+    ];
+    let mut lid = case();
+    lid.name = "case_lid".into();
+    lid.cell.description = "Lid for the case: a plate with a lip that fits inside it and \
+                            countersunk holes for its four screws"
+        .into();
+    lid.model3d = Some(Model3d { features, ..Model3d::default() });
+    lid
+}
+
 fn main() {
     let dir =
         PathBuf::from(std::env::args().nth(1).unwrap_or_else(|| "examples/analog_lab".into()));
@@ -223,6 +399,8 @@ fn main() {
     for make in [amplifier, blinker, power_supply, light_switch, motor_driver, relay_driver] {
         library.insert(make(&design));
     }
+    library.insert(case());
+    library.insert(case_lid());
     let manifest = dir.join(circuiter_model::project::MANIFEST_FILE);
     let project = if manifest.is_file() {
         let mut p = Project::load(&dir).expect("existing project");

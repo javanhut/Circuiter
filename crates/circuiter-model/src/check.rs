@@ -98,6 +98,8 @@ pub fn check_cell(design: &Design, id: &CellId, def: &CellDef, out: &mut Vec<Dia
         && def.spice.is_none()
         && def.digital.is_none()
         && cell.global_net.is_none()
+        // A purely mechanical part (an enclosure, a bracket) has nothing to simulate.
+        && !(def.model3d.is_some() && cell.ports.is_empty())
     {
         report(
             Warning,

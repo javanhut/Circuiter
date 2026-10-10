@@ -1,0 +1,11 @@
+(
+    package: "axial",
+    params: {
+        "band": "black",
+        "color": "glass",
+        "diameter": "1.9",
+        "length": "3.9",
+        "pitch": "7.62",
+        "style": "diode",
+    },
+)

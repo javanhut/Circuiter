@@ -1,10 +1,12 @@
 //! Window layout: menus, toolbars, library browser, inspector, prompts and status bar.
 
 mod bench;
+mod body_editor;
 mod chrome;
 mod code;
 mod explorer;
 mod panels;
+mod viewer3d;
 
 use crate::Args;
 use crate::canvas::{self, CanvasState, Highlight};
@@ -60,6 +62,9 @@ pub struct CircuiterApp {
     show_bottom: bool,
     /// The Netlist view instead of the sheet.
     show_netlist: bool,
+    /// Showing the 3D view instead of the sheet.
+    show_3d: bool,
+    viewer3d: viewer3d::Viewer3d,
     /// The netlist shown, for which cell and design revision.
     netlist: Option<(CellId, u64, String)>,
     /// Filters the components list.
@@ -419,6 +424,8 @@ impl CircuiterApp {
             bottom_tab: 0,
             show_bottom: true,
             show_netlist: false,
+            show_3d: false,
+            viewer3d: viewer3d::Viewer3d::default(),
             netlist: None,
             component_query: String::new(),
             code_tabs: Vec::new(),
@@ -429,6 +436,10 @@ impl CircuiterApp {
             live_speed: None,
             drop_preview: false,
         };
+        if let Some(state) = &cc.wgpu_render_state {
+            crate::render3d::Renderer3d::install(state);
+            app.viewer3d.gpu = true;
+        }
         if let Some(path) = args.project {
             app.open(&path);
         }
@@ -462,6 +473,15 @@ impl CircuiterApp {
             }
             if args.view.as_deref() == Some("symbol") {
                 ws.set_mode(Mode::Symbol);
+            }
+            if args.view.as_deref() == Some("3d") {
+                app.show_3d = true;
+                // A feature of the body to open in the editor.
+                if let Some(name) = &args.select {
+                    let def = ws.current_def().and_then(|d| d.model3d.as_ref());
+                    app.viewer3d.editor.selected =
+                        def.and_then(|m| m.features.iter().position(|f| f.name == *name));
+                }
             }
             if let Some(name) = args.select {
                 let found = match ws.mode {
@@ -3201,7 +3221,8 @@ impl eframe::App for CircuiterApp {
                     self.right_panel(ui)
                 },
             );
-            if self.show_bottom {
+            // Results have nothing to show about a 3D body.
+            if self.show_bottom && !self.show_3d {
                 egui::Panel::bottom("results")
                     .resizable(true)
                     .default_size(280.0)
@@ -3243,6 +3264,12 @@ impl eframe::App for CircuiterApp {
             let show_grid = self.show_grid;
             let netlist = self.show_netlist
                 && self.workspace.as_ref().is_some_and(|ws| ws.has_schematic());
+            if self.show_3d && self.workspace.is_some() {
+                self.cursor = None;
+                self.hovered = None;
+                self.view_3d(ui);
+                return;
+            }
             match &mut self.workspace {
                 None => {
                     self.cursor = None;

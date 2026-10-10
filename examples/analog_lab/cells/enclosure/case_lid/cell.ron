@@ -1,0 +1,11 @@
+(
+    description: "Lid for the case: a plate with a lip that fits inside it and countersunk holes for its four screws",
+    prefix: "X",
+    ports: [],
+    params: [
+        (name: "width", kind: Real(unit: "mm"), default: "70", description: "Outside width"),
+        (name: "depth", kind: Real(unit: "mm"), default: "50", description: "Outside depth"),
+        (name: "height", kind: Real(unit: "mm"), default: "30", description: "Outside height"),
+        (name: "wall", kind: Real(unit: "mm"), default: "2", description: "Wall thickness"),
+    ],
+)

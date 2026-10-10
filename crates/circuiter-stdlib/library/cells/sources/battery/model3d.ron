@@ -1,0 +1,4 @@
+(
+    package: "battery",
+    params: {"V": "${param.V}"},
+)

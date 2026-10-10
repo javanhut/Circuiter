@@ -313,6 +313,8 @@ pub struct CellDef {
     pub schematic: Option<Schematic>,
     pub spice: Option<SpiceView>,
     pub digital: Option<crate::digital::DigitalView>,
+    /// The physical body, for 3D views.
+    pub model3d: Option<crate::model3d::Model3d>,
 }
 
 impl CellDef {

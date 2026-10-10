@@ -1,0 +1,4 @@
+(
+    package: "toggle_switch",
+    params: {"on": "${param.closed}"},
+)

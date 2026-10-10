@@ -220,6 +220,7 @@ schematic hierarchy ──► netlister ──► flat netlist ──┬─► c
 | `circuiter-logic` | Digital simulator: four-state values up to 64 bits, event queue with delta cycles and propagation delays, net resolution of several drivers, history of every net; parts from gates to register files, memories and the RV32I control unit | done (first version) |
 | `circuiter-riscv` | RV32I assembler (matches LLVM's encodings), ELF loader, reference instruction-set simulator used to check processors built from parts | done for RV32I |
 | `circuiter-hdl` | Verilog/SystemVerilog: lexer, parser and an interpreter for the synthesizable subset, running each module as a digital part. Instances of other modules are flattened into their parent when compiled (connected through continuous assignments), `for` and `generate` loops are unrolled, functions run on values of their own | done (no tasks, `while`, `initial`) |
+| `circuiter-3d` | 3D geometry: meshes with normals and colours; boxes, cylinders, lathes, extrusions, wires; solid booleans by BSP trees (csg.js's method, in double precision); part bodies generated from packages and parameters; modelled bodies evaluated from feature histories with expressions; sheet assemblies; STL export. Rendered in the app with wgpu (offscreen, multisampled, then composited into egui) | first version (meshes, not yet B-rep: no STEP or fillets of arbitrary edges) |
 | `circuiter-pcb`, `circuiter-mfg` | Layout, DRC, Gerber/drill/BOM/pick-and-place | M3 |
 
 ## Roadmap
@@ -283,7 +284,7 @@ schematic hierarchy ──► netlister ──► flat netlist ──┬─► c
 | Milestone | Scope |
 |---|---|
 | M2 | ~~RISC-V ISS running C, Rust and assembly; a processor built from parts, and from gates alone, running the same firmware; SystemVerilog parts~~ (done, RV32I); next: pipelined cores, interrupts, peripherals, SystemVerilog through Verilator for speed |
-| M3 | PCB layout, DRC, manufacturing outputs, 3D board view, B-rep CAD kernel, enclosures, STEP/STL/3MF |
+| M3 | PCB layout, DRC, manufacturing outputs; ~~3D part bodies, a 3D view, a feature-based modeller for parts and enclosures, STL~~ (done, on meshes); next a 3D board view from the layout, a B-rep kernel (fillets and chamfers of any edge, STEP export), sketch constraints, 3MF |
 | M4 | Board and enclosure thermal simulation |
 | M5 | Mechanical and product simulation: rigid bodies, sensors, actuators |
 | M6 | Signal integrity and EM: impedance, crosstalk, field solver |

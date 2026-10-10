@@ -33,7 +33,9 @@ const SYMBOL_FILE: &str = "symbol.ron";
 const SCHEMATIC_FILE: &str = "schematic.ron";
 const SPICE_FILE: &str = "spice.ron";
 const DIGITAL_FILE: &str = "digital.ron";
-const VIEW_FILES: [&str; 5] = [CELL_FILE, SYMBOL_FILE, SCHEMATIC_FILE, SPICE_FILE, DIGITAL_FILE];
+const MODEL3D_FILE: &str = "model3d.ron";
+const VIEW_FILES: [&str; 6] =
+    [CELL_FILE, SYMBOL_FILE, SCHEMATIC_FILE, SPICE_FILE, DIGITAL_FILE, MODEL3D_FILE];
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Library {
@@ -184,6 +186,7 @@ impl Library {
             save_view(&dir.join(SCHEMATIC_FILE), def.schematic.as_ref())?;
             save_view(&dir.join(SPICE_FILE), def.spice.as_ref())?;
             save_view(&dir.join(DIGITAL_FILE), def.digital.as_ref())?;
+            save_view(&dir.join(MODEL3D_FILE), def.model3d.as_ref())?;
         }
         self.tidy(root, &folders)
     }
@@ -252,11 +255,12 @@ fn parse_cell(name: &str, files: &[(&Path, &str)]) -> Result<CellDef> {
             SCHEMATIC_FILE => def.schematic = Some(from_ron(path, text)?),
             SPICE_FILE => def.spice = Some(from_ron(path, text)?),
             DIGITAL_FILE => def.digital = Some(from_ron(path, text)?),
+            MODEL3D_FILE => def.model3d = Some(from_ron(path, text)?),
             other => {
                 return Err(ModelError::parse(
                     path,
                     format!(
-                        "unknown view file `{other}`; expected {CELL_FILE}, {SYMBOL_FILE}, {SCHEMATIC_FILE}, {SPICE_FILE} or {DIGITAL_FILE}"
+                        "unknown view file `{other}`; expected {CELL_FILE}, {SYMBOL_FILE}, {SCHEMATIC_FILE}, {SPICE_FILE}, {DIGITAL_FILE} or {MODEL3D_FILE}"
                     ),
                 ));
             }

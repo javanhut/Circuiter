@@ -1,0 +1,15 @@
+[package]
+name = "circuiter-3d"
+description = "Circuiter's 3D geometry: meshes, solids, part bodies made from parameters, STL export"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+circuiter-model.workspace = true
+circuiter-sim.workspace = true
+
+[lints]
+workspace = true

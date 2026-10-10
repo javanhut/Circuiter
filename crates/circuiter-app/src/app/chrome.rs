@@ -419,25 +419,33 @@ impl CircuiterApp {
                 ui.set_height(38.0);
                 ui.add_space(8.0);
                 let has_schematic = ws.has_schematic();
-                let active = match (self.show_netlist, ws.mode) {
-                    (true, _) => 2,
-                    (false, Mode::Schematic) => 0,
-                    (false, Mode::Symbol) => 1,
+                let active = match (self.show_3d, self.show_netlist, ws.mode) {
+                    (true, _, _) => 2,
+                    (_, true, _) => 3,
+                    (_, false, Mode::Schematic) => 0,
+                    (_, false, Mode::Symbol) => 1,
                 };
-                let views =
-                    [("Schematic", has_schematic), ("Symbol", true), ("Netlist", has_schematic)];
+                let views = [
+                    ("Schematic", has_schematic),
+                    ("Symbol", true),
+                    ("3D", true),
+                    ("Netlist", has_schematic),
+                ];
                 match style::segmented(ui, &views, active) {
                     Some(0) => {
-                        self.show_netlist = false;
+                        (self.show_netlist, self.show_3d) = (false, false);
                         ws.set_mode(Mode::Schematic);
                     }
                     Some(1) => {
-                        self.show_netlist = false;
+                        (self.show_netlist, self.show_3d) = (false, false);
                         ws.set_mode(Mode::Symbol);
                     }
                     Some(2) => {
+                        (self.show_netlist, self.show_3d) = (false, true);
+                    }
+                    Some(3) => {
                         ws.set_mode(Mode::Schematic);
-                        self.show_netlist = true;
+                        (self.show_netlist, self.show_3d) = (true, false);
                     }
                     _ => {}
                 }
@@ -477,6 +485,10 @@ impl CircuiterApp {
                 }
             });
             style::trailing(ui, |ui| {
+                // The 3D view has its own controls.
+                if self.show_3d {
+                    return;
+                }
                 ui.spacing_mut().item_spacing.x = 2.0;
                 ui.add_space(8.0);
                 let view = self.canvas.view;
@@ -502,7 +514,7 @@ impl CircuiterApp {
                 {
                     zoom(0.8);
                 }
-                if self.show_netlist {
+                if self.show_netlist || self.show_3d {
                     return;
                 }
                 toolbar_gap(ui);

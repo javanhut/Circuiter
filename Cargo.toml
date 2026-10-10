@@ -19,6 +19,7 @@ circuiter-physics = { path = "crates/circuiter-physics" }
 circuiter-logic = { path = "crates/circuiter-logic" }
 circuiter-riscv = { path = "crates/circuiter-riscv" }
 circuiter-hdl = { path = "crates/circuiter-hdl" }
+circuiter-3d = { path = "crates/circuiter-3d" }
 
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

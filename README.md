@@ -16,9 +16,10 @@ to manufacture it.
 > engine in which overstressed parts heat up and fail, a digital simulator with the
 > parts to build processors (and an example RISC-V CPU, also made entirely of gates),
 > mixed analog and digital circuits, live runs you can operate with switches, buttons
-> and knobs while multimeters and an oscilloscope watch, and programs in RISC-V
-> assembly, C, Rust and SystemVerilog. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
-> for the design and roadmap.
+> and knobs while multimeters and an oscilloscope watch, programs in RISC-V assembly,
+> C, Rust and SystemVerilog, 3D bodies for parts, and a CAD modeller for your own
+> parts and enclosures. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design
+> and roadmap.
 
 ## Building
 
@@ -60,7 +61,7 @@ and the project is named after it.
   **Components**: every part by kind, with a search box. Click a part, then the sheet;
   or drag it onto the sheet.
 - Middle: open cells as **tabs**, each remembering where it was left. Above the sheet,
-  switch between **Schematic**, **Symbol** and **Netlist** (the SPICE deck the
+  switch between **Schematic**, **Symbol**, **3D** and **Netlist** (the SPICE deck the
   simulator runs), and pick drawing tools and zoom. The column of common parts beside
   the sheet works like Components.
 - Right: **Properties** of what's selected (or the cell), **Simulation** (run, results,
@@ -210,6 +211,48 @@ transistors, sources and fuses, the standard library has:
 Parts carry ratings like the others: a regulator with too much to drop overheats, a
 reversed electrolytic bursts, a motor stalled too long burns out.
 
+**3D**
+
+The **3D** view shows a part's physical body, or, on a sheet, every part's body placed
+where its symbol is, on a board (a preview until boards are laid out). Drag to orbit,
+right-drag or Shift-drag to pan, wheel to zoom, double-click (or `F`) to fit; Top,
+Front, Side and Iso set the angle. **Export STL…** saves what's shown for a slicer or
+another CAD program.
+
+Every physical standard part has a body made from its parameters: an axial resistor
+shows its value's colour bands, a DIP its pin count, a toggle switch's lever leans the
+way the switch is set; TO-92, TO-220, SOT-223, LEDs, electrolytic cans, relays, motors,
+transformers, crystals, batteries, solar panels and more. Sources, instruments and
+logic blocks have none.
+
+**Modelling parts and enclosures**
+
+Your own cells can have bodies too, modelled in the 3D view's **Body** panel as in a
+CAD program: a history of features, each adding to, cutting from or intersecting the
+body made so far.
+
+| Feature | What it makes |
+|---|---|
+| Box | A box, optionally with rounded vertical edges |
+| Cylinder, cone, sphere | The solids, a cone possibly truncated |
+| Extrude | An outline you draw, raised to a height |
+| Revolve | An outline turned about the vertical axis, all the way or part way |
+| Hole | A cylinder that cuts |
+| Copies, Ring, Mirror | Copies of an earlier feature in a row, around the axis, or reflected |
+
+Each feature has a placement (where, and turned about each axis) and a colour, and can
+be hidden, reordered or deleted. Dimensions are expressions in millimetres that may
+use the cell's parameters (`width - 2*wall`), so changing a parameter reshapes the
+part. Outlines are drawn in a sketch editor: drag corners (snapping to 0.5 mm), click
+an edge's + to add a corner, right-click one to remove it, start from a rectangle,
+circle, slot or hexagon, or type the corners, with arcs between them. Every change can
+be undone. A cell with a standard package can switch to a modelled body (Model it
+yourself instead), and a new cell can start from either.
+
+`examples/analog_lab` has an enclosure modelled this way (`case` and `case_lid`): a
+shell with screw posts, holes for an LED, a switch and a DC jack, vents, and a lid with
+countersunk screw holes, all following its width, depth, height and wall parameters.
+
 **Mixed analog and digital circuits**
 
 A circuit can mix analog parts (resistors, LEDs, transistors, sources) with digital
@@ -356,6 +399,7 @@ current sheet, such as unconnected pins.
 | `crates/circuiter-logic` | The digital simulator and its parts |
 | `crates/circuiter-riscv` | RV32I assembler, ELF loader, reference instruction-set simulator |
 | `crates/circuiter-hdl` | Verilog/SystemVerilog parser and interpreter |
+| `crates/circuiter-3d` | Meshes, solid booleans, part bodies from parameters, modelled features, STL |
 | `crates/circuiter-app` | The `circuiter` desktop app (egui on wgpu), the only binary |
 | `examples/` | Example projects |
 | `docs/` | Architecture and design notes |

@@ -1,0 +1,25 @@
+(
+    features: [
+        (name: "Plate", shape: Box(size: ("width", "depth", "wall"), radius: "6")),
+        (
+            name: "Lip",
+            shape: Box(size: ("width - 2*wall - 0.4", "depth - 2*wall - 0.4", "2"), radius: "4"),
+            at: ("0", "0", "-2"),
+        ),
+        (
+            name: "Recess",
+            shape: Box(size: ("width - 2*wall - 4", "depth - 2*wall - 4", "2"), radius: "3"),
+            operation: Cut,
+            at: ("0", "0", "-2.5"),
+        ),
+        (
+            name: "Countersink",
+            shape: Cone(bottom: "1.6", top: "3.2", height: "wall + 3.01"),
+            operation: Cut,
+            at: ("width/2 - 7", "depth/2 - 7", "-3"),
+        ),
+        (name: "Countersink 2", shape: Mirror(of: "Countersink", axis: X), operation: Cut),
+        (name: "Countersink 3", shape: Mirror(of: "Countersink", axis: Y), operation: Cut),
+        (name: "Countersink 4", shape: Mirror(of: "Countersink 2", axis: Y), operation: Cut),
+    ],
+)
