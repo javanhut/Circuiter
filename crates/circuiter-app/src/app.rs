@@ -1,15 +1,33 @@
-//! Application state and window layout.
+//! Window layout: menus, toolbars, library browser, inspector, prompts and status bar.
+
+mod chrome;
+mod explorer;
+mod panels;
 
 use crate::Args;
-use crate::canvas::{self, Camera, CanvasEvent, Highlight};
-use anyhow::{Context as _, Result};
-use circuiter_model::check::{Diagnostic, Severity, check_libraries};
+use crate::canvas::{self, CanvasState, Highlight};
+use crate::plot::{self, PlotState, Trace, XAxis};
+use crate::simulation::{Results, show};
+use crate::style;
+use crate::workspace::{Analysis, Mode, Tool, Workspace, graphic_name};
+use crate::{interface, symbol_edit};
+use circuiter_model::builder;
+use circuiter_model::cell::{ParamDef, ParamKind, PortKind};
+use circuiter_model::check::Severity;
 use circuiter_model::connectivity::{Item, NetNameSource};
-use circuiter_model::schematic::Schematic;
-use circuiter_model::{CellDef, CellId, Design, Project, ViewKind};
-use circuiter_scene::{Owner, Pt, Scene, Theme, param_display, to_svg};
+use circuiter_model::symbol::{Anchor, Graphic, PinDirection};
+use circuiter_model::{CellId, Length, ViewKind};
+use circuiter_scene::{Owner, Pt, Theme, param_display, to_svg};
 use eframe::egui::{self, Align, Color32, Key, Layout, RichText, ViewportCommand};
+use explorer::DraggedCell;
+#[cfg(test)]
+pub use explorer::folder_label;
 use std::path::{Path, PathBuf};
+
+const ERROR: Color32 = Color32::from_rgb(230, 80, 70);
+const WARNING: Color32 = Color32::from_rgb(230, 170, 60);
+const OK: Color32 = Color32::from_rgb(90, 190, 120);
+const ACCENT: Color32 = Color32::from_rgb(79, 179, 255);
 
 pub struct CircuiterApp {
     workspace: Option<Workspace>,
@@ -19,182 +37,336 @@ pub struct CircuiterApp {
     show_grid: bool,
     cursor: Option<Pt>,
     hovered: Option<Owner>,
+    canvas: CanvasState,
+    prompt: Option<Prompt>,
+    field: Field,
+    title: String,
+    allow_close: bool,
     screenshot: Option<PathBuf>,
     frames: u32,
+    plot: PlotState,
+    /// Plot part temperatures instead of signals after a transient run.
+    plot_heat: bool,
+    /// Symbols drawn as icons (parts lists, the palette), by cell.
+    icons: std::collections::BTreeMap<CellId, circuiter_scene::Scene>,
+    /// The design revision the project cells' icons were drawn from.
+    icons_revision: u64,
+    /// Which tab of the left, right and bottom panels is showing.
+    left_tab: usize,
+    right_tab: usize,
+    bottom_tab: usize,
+    show_bottom: bool,
+    /// The Netlist view instead of the sheet.
+    show_netlist: bool,
+    /// The netlist shown, for which cell and design revision.
+    netlist: Option<(CellId, u64, String)>,
+    /// Filters the components list.
+    component_query: String,
+    /// A part dragged in from the library is being previewed on the sheet.
+    drop_preview: bool,
 }
 
-/// What the canvas is showing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Mode {
-    Schematic,
-    /// A library part without a schematic: show its symbol.
-    Symbol,
+/// The parts on the quick-parts strip, with their shortcut keys if any.
+const PALETTE: &[(&str, &str)] = &[
+    ("resistor", ""),
+    ("capacitor", ""),
+    ("inductor", ""),
+    ("diode", ""),
+    ("led", ""),
+    ("npn", ""),
+    ("pnp", ""),
+    ("nmos", ""),
+    ("pmos", ""),
+    ("vdc", ""),
+    ("vsine", ""),
+    ("vpulse", ""),
+    ("clock", ""),
+    ("gnd", "G"),
+    ("vdd", "Shift+V"),
+    ("not", ""),
+    ("and", ""),
+    ("or", ""),
+    ("nand", ""),
+    ("nor", ""),
+    ("xor", ""),
+    ("xnor", ""),
+];
+
+/// Every keyboard shortcut, for Help.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Ctrl+R", "Run the simulation"),
+    ("F9 / F10", "Operating point / transient"),
+    ("Ctrl+K, A", "Search for a part to place"),
+    ("G, Shift+V", "Place ground / VDD"),
+    ("W", "Wire (or drag from a pin's end)"),
+    ("L", "Net label"),
+    ("P", "Port"),
+    ("R, X", "Rotate, mirror"),
+    ("Del", "Delete"),
+    ("Ctrl+C, X, V, D", "Copy, cut, paste, duplicate"),
+    ("Ctrl+Z, Ctrl+Y", "Undo, redo"),
+    ("V", "Schematic / symbol"),
+    ("F", "Fit to window"),
+    ("Alt+Left, Alt+Right", "Back, forward"),
+    ("Alt+Up", "Up a level"),
+    ("Ctrl+N, Ctrl+S, Ctrl+O", "New cell, save, open project"),
+    ("Esc", "Cancel, or stop a simulation"),
+];
+
+/// A modal dialog.
+enum Prompt {
+    AddPart {
+        query: String,
+    },
+    Label {
+        net: String,
+    },
+    /// A new port: placed as a flag on the schematic (`place`), or added to the
+    /// interface directly.
+    Port {
+        name: String,
+        kind: PortKind,
+        place: bool,
+        error: Option<String>,
+    },
+    SymbolText {
+        text: String,
+    },
+    Transient {
+        stop: String,
+        step: String,
+        power_on: bool,
+        error: Option<String>,
+    },
+    Ac {
+        start: String,
+        stop: String,
+        per_decade: String,
+        error: Option<String>,
+    },
+    /// Choosing which models in a library file to import, then the outcome.
+    Import {
+        file: String,
+        defs: Vec<circuiter_sim::parse::Definition>,
+        selected: Vec<bool>,
+        outcome: Option<Vec<crate::workspace::ImportOutcome>>,
+    },
+    AddParam {
+        name: String,
+        kind: ParamChoice,
+        unit: String,
+        options: String,
+        default: String,
+        error: Option<String>,
+    },
+    NewCell {
+        name: String,
+        folder: String,
+        error: Option<String>,
+    },
+    /// A new folder in `parent`, or renaming folder `renaming`.
+    Folder {
+        lib: String,
+        parent: String,
+        renaming: Option<String>,
+        name: String,
+        error: Option<String>,
+    },
+    MoveCell {
+        id: CellId,
+        folder: String,
+        error: Option<String>,
+    },
+    Shortcuts,
+    /// Unsaved changes would be lost by `then`.
+    Discard {
+        then: Pending,
+    },
 }
 
-/// One step of the hierarchy path being viewed.
-struct Level {
-    cell: CellId,
-    /// The instance in the parent level that was descended into.
-    via: Option<String>,
-    camera: Option<Camera>,
+/// The kinds of parameter offered when adding one.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ParamChoice {
+    Real,
+    Integer,
+    Bool,
+    Text,
+    Choice,
 }
 
-struct Workspace {
-    project: Project,
-    design: Design,
-    diagnostics: Vec<Diagnostic>,
-    levels: Vec<Level>,
-    mode: Mode,
-    scene: Scene,
-    selection: Option<Owner>,
-    net: Option<usize>,
+impl ParamChoice {
+    const ALL: [ParamChoice; 5] = [
+        ParamChoice::Real,
+        ParamChoice::Integer,
+        ParamChoice::Bool,
+        ParamChoice::Text,
+        ParamChoice::Choice,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            ParamChoice::Real => "Quantity",
+            ParamChoice::Integer => "Integer",
+            ParamChoice::Bool => "Yes/no",
+            ParamChoice::Text => "Text",
+            ParamChoice::Choice => "Choice",
+        }
+    }
 }
 
-impl Workspace {
-    fn open(path: &Path) -> Result<Workspace> {
-        let root = Project::find_root(path)
-            .with_context(|| format!("no Circuiter project found at {}", path.display()))?;
-        let project = Project::load(&root)?;
-        let design = Design::for_project(&project, circuiter_stdlib::load()?)?;
-        let mut libraries = vec![project.name()];
-        libraries.extend(project.manifest.libraries.keys().map(String::as_str));
-        let diagnostics = check_libraries(&design, &libraries);
-        let top = CellId::new(project.name(), &project.manifest.project.top);
-        let scene = Scene::build(&design, &top)
-            .or_else(|| Scene::symbol_preview(&design, &top))
-            .with_context(|| format!("top cell {top} has nothing to show"))?;
-        let mode = if design.cell(&top).is_some_and(|d| d.schematic.is_some()) {
-            Mode::Schematic
-        } else {
-            Mode::Symbol
-        };
-        Ok(Workspace {
-            project,
-            design,
-            diagnostics,
-            levels: vec![Level { cell: top, via: None, camera: None }],
-            mode,
-            scene,
-            selection: None,
-            net: None,
-        })
+const PORT_KINDS: [PortKind; 6] = [
+    PortKind::Input,
+    PortKind::Output,
+    PortKind::Bidirectional,
+    PortKind::Passive,
+    PortKind::PowerIn,
+    PortKind::PowerOut,
+];
+
+fn kind_label(kind: PortKind) -> &'static str {
+    match kind {
+        PortKind::Input => "Input",
+        PortKind::Output => "Output",
+        PortKind::Bidirectional => "Bidirectional",
+        PortKind::Passive => "Passive",
+        PortKind::PowerIn => "Power in",
+        PortKind::PowerOut => "Power out",
+    }
+}
+
+fn param_kind_label(kind: &ParamKind) -> String {
+    match kind {
+        ParamKind::Real { unit } if unit.is_empty() => "quantity".into(),
+        ParamKind::Real { unit } => format!("quantity, {unit}"),
+        ParamKind::Integer => "integer".into(),
+        ParamKind::Bool => "yes/no".into(),
+        ParamKind::Text => "text".into(),
+        ParamKind::Choice(options) => format!("one of {}", options.join(", ")),
+    }
+}
+
+/// The side of the body a pin is on, which is opposite the way it points.
+fn side_label(direction: PinDirection) -> &'static str {
+    match direction {
+        PinDirection::Right => "Left",
+        PinDirection::Left => "Right",
+        PinDirection::Down => "Top",
+        PinDirection::Up => "Bottom",
+    }
+}
+
+/// Parses a length typed by the user: millimetres, or mils with a `mil` suffix.
+fn parse_length(text: &str) -> Result<Length, String> {
+    let t = text.trim();
+    let (number, mils) = match t.strip_suffix("mil") {
+        Some(n) => (n, true),
+        None => (t.strip_suffix("mm").unwrap_or(t), false),
+    };
+    let v: f64 = number.trim().parse().map_err(|_| format!("`{t}` is not a length"))?;
+    if !(v > 0.0 && v.is_finite()) {
+        return Err("the length must be positive".into());
+    }
+    Ok(if mils { Length::from_mm(v * 0.0254) } else { Length::from_mm(v) })
+}
+
+fn parse_degrees(text: &str) -> Result<f64, String> {
+    let t = text.trim().trim_end_matches('°');
+    t.parse::<f64>()
+        .ok()
+        .filter(|v| v.is_finite())
+        .map(symbol_edit::normalize)
+        .ok_or_else(|| format!("`{t}` is not an angle in degrees"))
+}
+
+#[derive(Clone)]
+enum Pending {
+    Quit,
+    Reload,
+    OpenDialog,
+    NewProjectDialog,
+}
+
+/// The inspector text field being edited, with its working text and any error.
+#[derive(Default)]
+struct Field {
+    key: Option<String>,
+    buffer: String,
+    error: Option<(String, String)>,
+}
+
+impl Field {
+    /// A single-line field showing `current`. Returns the new text when the user commits a
+    /// change with Enter or by clicking away. Escape cancels.
+    fn edit(&mut self, ui: &mut egui::Ui, key: &str, current: &str, width: f32) -> Option<String> {
+        self.edit_hinted(ui, key, current, width, "")
     }
 
-    fn current(&self) -> &Level {
-        self.levels.last().expect("at least one level")
-    }
-
-    fn current_def(&self) -> Option<&CellDef> {
-        self.design.cell(&self.current().cell)
-    }
-
-    fn schematic(&self) -> Option<&Schematic> {
-        match self.mode {
-            Mode::Schematic => self.current_def()?.schematic.as_ref(),
-            Mode::Symbol => None,
+    /// [`Field::edit`] with greyed-out `hint` text in the field while it is empty.
+    fn edit_hinted(
+        &mut self,
+        ui: &mut egui::Ui,
+        key: &str,
+        current: &str,
+        width: f32,
+        hint: &str,
+    ) -> Option<String> {
+        let editing = self.key.as_deref() == Some(key);
+        let mut shown = current.to_owned();
+        let text = if editing { &mut self.buffer } else { &mut shown };
+        // Sized explicitly: inside a grid, a text field otherwise shrinks to the width
+        // its column had on the previous frame.
+        let size = egui::vec2(width, ui.spacing().interact_size.y);
+        let r = ui.add_sized(
+            size,
+            egui::TextEdit::singleline(text)
+                .desired_width(width)
+                .font(egui::TextStyle::Monospace)
+                .hint_text(hint),
+        );
+        if r.gained_focus() {
+            self.key = Some(key.to_owned());
+            self.buffer = current.to_owned();
         }
-    }
-
-    fn rebuild_scene(&mut self) {
-        let id = self.current().cell.clone();
-        let (scene, mode) = match Scene::build(&self.design, &id) {
-            Some(s) => (Some(s), Mode::Schematic),
-            None => (Scene::symbol_preview(&self.design, &id), Mode::Symbol),
-        };
-        if let Some(scene) = scene {
-            self.scene = scene;
-            self.mode = mode;
-        }
-        self.selection = None;
-        self.net = None;
-    }
-
-    fn open_cell(&mut self, id: CellId) {
-        self.levels = vec![Level { cell: id, via: None, camera: None }];
-        self.rebuild_scene();
-    }
-
-    fn descend(&mut self, instance: usize) {
-        let Some(schematic) = self.schematic() else { return };
-        let inst = &schematic.instances[instance];
-        let Some((child, _)) = self.design.resolve(&inst.cell, &self.current().cell.library) else {
-            return;
-        };
-        let via = Some(inst.name.clone());
-        self.levels.push(Level { cell: child, via, camera: None });
-        self.rebuild_scene();
-    }
-
-    fn ascend_to(&mut self, depth: usize) {
-        if depth < self.levels.len() {
-            let child = self.levels[depth].via.clone();
-            self.levels.truncate(depth);
-            self.rebuild_scene();
-            // Keep the instance we came out of selected, as a landmark.
-            if let (Some(name), Some(schematic)) = (child, self.schematic()) {
-                self.selection =
-                    schematic.instances.iter().position(|i| i.name == name).map(Owner::Instance);
+        if r.lost_focus() && editing {
+            self.key = None;
+            let text = std::mem::take(&mut self.buffer);
+            let cancelled = ui.input(|i| i.key_pressed(Key::Escape));
+            if !cancelled && text != current {
+                return Some(text);
             }
         }
-    }
-
-    fn select(&mut self, owner: Option<Owner>) {
-        let conn = &self.scene.connectivity;
-        self.net = match owner {
-            Some(Owner::Wire(i)) => conn.net_of(Item::Wire(i)),
-            Some(Owner::Label(i)) => conn.net_of(Item::Label(i)),
-            Some(Owner::Port(i)) => conn.net_of(Item::Port(i)),
-            _ => None,
-        };
-        self.selection = owner;
-    }
-
-    fn select_instance_named(&mut self, name: &str) {
-        let found = self
-            .schematic()
-            .and_then(|s| s.instances.iter().position(|i| i.name == name))
-            .map(Owner::Instance);
-        self.select(found);
-    }
-
-    fn problems(&self) -> Vec<(Severity, String)> {
-        let id = self.current().cell.to_string();
-        let mut out: Vec<(Severity, String)> = self
-            .diagnostics
-            .iter()
-            .filter(|d| d.location == id || d.location.starts_with(&format!("{id}/")))
-            .map(|d| (d.severity, d.message.clone()))
-            .collect();
-        if let Some(schematic) = self.schematic() {
-            let conn = &self.scene.connectivity;
-            for &i in &conn.dangling_pins {
-                let pin = &conn.pins[i];
-                let inst = &schematic.instances[pin.instance].name;
-                out.push((Severity::Warning, format!("pin {inst}.{} is not connected", pin.port)));
-            }
-            for p in &conn.dangling_wire_ends {
-                out.push((Severity::Warning, format!("wire end at {p} is not connected")));
-            }
-            for net in &conn.nets {
-                if net.names.len() > 1 {
-                    out.push((
-                        Severity::Warning,
-                        format!("net has conflicting names: {}", net.names.join(", ")),
-                    ));
-                }
+        if let Some((k, msg)) = &self.error {
+            if k == key {
+                ui.colored_label(ERROR, msg);
             }
         }
-        out
+        None
     }
 }
 
 impl CircuiterApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>, args: Args) -> Self {
-        let theme = match args.theme.as_deref() {
-            Some(t) => Theme::ALL.into_iter().find(|th| th.name.eq_ignore_ascii_case(t)),
-            None => None,
-        }
-        .unwrap_or(&Theme::BENCH);
+    #[cfg(test)]
+    pub fn workspace(&self) -> Option<&Workspace> {
+        self.workspace.as_ref()
+    }
+
+    #[cfg(test)]
+    pub fn workspace_mut(&mut self) -> Option<&mut Workspace> {
+        self.workspace.as_mut()
+    }
+
+    #[cfg(test)]
+    pub fn canvas_view(&self) -> Option<egui::Rect> {
+        self.canvas.view
+    }
+
+    pub fn new(cc: &eframe::CreationContext<'_>, args: Args) -> Self {
+        style::install_fonts(&cc.egui_ctx);
+        let theme = args
+            .theme
+            .as_deref()
+            .and_then(|t| Theme::ALL.into_iter().find(|th| th.name.eq_ignore_ascii_case(t)))
+            .unwrap_or(&Theme::BENCH);
         let mut app = CircuiterApp {
             workspace: None,
             error: None,
@@ -203,8 +375,25 @@ impl CircuiterApp {
             show_grid: true,
             cursor: None,
             hovered: None,
+            canvas: CanvasState::default(),
+            prompt: None,
+            field: Field::default(),
+            title: String::new(),
+            allow_close: false,
             screenshot: args.screenshot,
             frames: 0,
+            plot: PlotState::default(),
+            plot_heat: args.heat,
+            icons: std::collections::BTreeMap::new(),
+            icons_revision: 0,
+            left_tab: 0,
+            right_tab: 0,
+            bottom_tab: 0,
+            show_bottom: true,
+            show_netlist: false,
+            netlist: None,
+            component_query: String::new(),
+            drop_preview: false,
         };
         if let Some(path) = args.project {
             app.open(&path);
@@ -219,11 +408,46 @@ impl CircuiterApp {
                     Err(e) => app.error = Some(e),
                 }
             }
+            match args.simulate.as_deref() {
+                Some("op") => ws.simulate(Analysis::Op),
+                Some(t) if t == "tran" || t.starts_with("tran:") => {
+                    let (mut tstop, mut tstep) = ws.default_tran();
+                    if let Some(stop) = t.strip_prefix("tran:") {
+                        match circuiter_model::units::parse_quantity(stop, Some("s")) {
+                            Ok(v) => (tstop, tstep) = (v, v / 500.0),
+                            Err(e) => app.error = Some(e.to_string()),
+                        }
+                    }
+                    ws.simulate(Analysis::Tran { tstop, tstep, power_on: true });
+                }
+                Some("ac") => ws.simulate(Analysis::Ac { fstart: 1.0, fstop: 1e9, per_decade: 20 }),
+                Some(other) => {
+                    app.error = Some(format!("unknown analysis `{other}`; use op, tran or ac"))
+                }
+                None => {}
+            }
+            if args.view.as_deref() == Some("symbol") {
+                ws.set_mode(Mode::Symbol);
+            }
             if let Some(name) = args.select {
-                ws.select_instance_named(&name);
+                let found = match ws.mode {
+                    Mode::Schematic => ws
+                        .schematic()
+                        .and_then(|s| s.instances.iter().position(|i| i.name == name))
+                        .map(Owner::Instance),
+                    Mode::Symbol => ws
+                        .symbol()
+                        .and_then(|s| s.pins.iter().position(|p| p.port == name))
+                        .map(Owner::Pin),
+                };
+                ws.select_only(found);
             }
         }
         app
+    }
+
+    fn dirty(&self) -> bool {
+        self.workspace.as_ref().is_some_and(|ws| ws.dirty)
     }
 
     fn open(&mut self, path: &Path) {
@@ -236,10 +460,43 @@ impl CircuiterApp {
         }
     }
 
-    fn open_dialog(&mut self) {
-        if let Some(dir) = rfd::FileDialog::new().set_title("Open Circuiter project").pick_folder()
-        {
-            self.open(&dir);
+    /// Runs `action`, first asking what to do with unsaved changes if there are any.
+    fn guarded(&mut self, ctx: &egui::Context, action: Pending) {
+        if self.dirty() {
+            self.prompt = Some(Prompt::Discard { then: action });
+        } else {
+            self.run(ctx, action);
+        }
+    }
+
+    fn run(&mut self, ctx: &egui::Context, action: Pending) {
+        match action {
+            Pending::Quit => {
+                self.allow_close = true;
+                ctx.send_viewport_cmd(ViewportCommand::Close);
+            }
+            Pending::Reload => self.reload(),
+            Pending::OpenDialog => {
+                if let Some(dir) =
+                    rfd::FileDialog::new().set_title("Open Circuiter project").pick_folder()
+                {
+                    self.open(&dir);
+                }
+            }
+            Pending::NewProjectDialog => {
+                let picked = rfd::FileDialog::new()
+                    .set_title("New project: choose or create an empty folder")
+                    .pick_folder();
+                if let Some(dir) = picked {
+                    match Workspace::create(&dir) {
+                        Ok(ws) => {
+                            self.workspace = Some(ws);
+                            self.error = None;
+                        }
+                        Err(e) => self.error = Some(format!("{e:#}")),
+                    }
+                }
+            }
         }
     }
 
@@ -250,21 +507,80 @@ impl CircuiterApp {
             ws.levels.iter().map(|l| (l.cell.clone(), l.via.clone())).collect();
         self.open(&root);
         // Restore the hierarchy path as far as it still exists.
-        if let Some(ws) = &mut self.workspace {
-            if let Some((first, _)) = path.first() {
-                if ws.design.cell(first).is_some() {
-                    ws.open_cell(first.clone());
-                    for (_, via) in path.iter().skip(1) {
-                        let found = via.as_ref().and_then(|name| {
-                            ws.schematic()?.instances.iter().position(|i| &i.name == name)
-                        });
-                        match found {
-                            Some(i) => ws.descend(i),
-                            None => break,
-                        }
-                    }
-                }
+        let Some(ws) = &mut self.workspace else { return };
+        let Some((first, _)) = path.first() else { return };
+        if ws.design.cell(first).is_none() {
+            return;
+        }
+        ws.open_cell(first.clone());
+        for (_, via) in path.iter().skip(1) {
+            let found = via
+                .as_ref()
+                .and_then(|name| ws.schematic()?.instances.iter().position(|i| &i.name == name));
+            match found {
+                Some(i) => ws.descend(i),
+                None => break,
             }
+        }
+    }
+
+    fn save(&mut self) {
+        if let Some(ws) = &mut self.workspace {
+            if let Err(e) = ws.save() {
+                self.error = Some(format!("saving: {e:#}"));
+            }
+        }
+    }
+
+    fn simulate(&mut self, analysis: Analysis) {
+        if let Some(ws) = &mut self.workspace {
+            ws.simulate(analysis);
+            self.plot = PlotState::default();
+        }
+    }
+
+    fn transient_prompt(&mut self) {
+        let Some(ws) = &self.workspace else { return };
+        let (stop, step) = match ws.sim.as_ref().and_then(|s| s.results.as_ref()) {
+            Some(Results::Tran { tstop, tstep, .. }) => (*tstop, *tstep),
+            _ => ws.default_tran(),
+        };
+        self.prompt = Some(Prompt::Transient {
+            stop: show(stop, "s"),
+            step: show(step, "s"),
+            power_on: true,
+            error: None,
+        });
+    }
+
+    fn import_dialog(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Import SPICE models")
+            .add_filter(
+                "SPICE models",
+                &["lib", "mod", "sub", "cir", "sp", "spi", "spice", "txt", "inc"],
+            )
+            .add_filter("All files", &["*"])
+            .pick_file()
+        else {
+            return;
+        };
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                // Vendor files are often Latin-1; their models are ASCII either way.
+                let text = String::from_utf8_lossy(&bytes);
+                let defs = circuiter_sim::parse::definitions(&text);
+                if defs.is_empty() {
+                    self.error =
+                        Some(format!("{} has no .subckt or .model definitions", path.display()));
+                    return;
+                }
+                let selected = vec![true; defs.len()];
+                let file =
+                    path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+                self.prompt = Some(Prompt::Import { file, defs, selected, outcome: None });
+            }
+            Err(e) => self.error = Some(format!("reading {}: {e}", path.display())),
         }
     }
 
@@ -284,18 +600,41 @@ impl CircuiterApp {
         if self.applied_theme == Some(self.theme.name) {
             return;
         }
-        let mut visuals =
-            if self.theme.dark { egui::Visuals::dark() } else { egui::Visuals::light() };
-        let accent = canvas::color(self.theme.highlight);
-        visuals.selection.bg_fill = accent.gamma_multiply(0.6);
-        visuals.hyperlink_color = accent;
-        ctx.set_visuals(visuals);
+        style::apply(ctx, self.theme.dark);
         self.applied_theme = Some(self.theme.name);
+    }
+
+    fn update_title(&mut self, ctx: &egui::Context) {
+        let title = match &self.workspace {
+            Some(ws) => {
+                let dot = if ws.dirty { " ●" } else { "" };
+                format!("{}{dot} — Circuiter", ws.project.name())
+            }
+            None => "Circuiter".to_owned(),
+        };
+        if title != self.title {
+            ctx.send_viewport_cmd(ViewportCommand::Title(title.clone()));
+            self.title = title;
+        }
+    }
+
+    fn handle_close_request(&mut self, ctx: &egui::Context) {
+        if ctx.input(|i| i.viewport().close_requested()) && self.dirty() && !self.allow_close {
+            ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+            self.prompt = Some(Prompt::Discard { then: Pending::Quit });
+        }
     }
 
     fn handle_screenshot(&mut self, ctx: &egui::Context) {
         let Some(path) = self.screenshot.clone() else { return };
-        self.frames += 1;
+        // Wait for a simulation to finish before counting frames.
+        let busy = self
+            .workspace
+            .as_ref()
+            .is_some_and(|ws| ws.sim.as_ref().is_some_and(|s| s.job.is_some()));
+        if !busy {
+            self.frames += 1;
+        }
         ctx.request_repaint();
         if self.frames == 10 {
             ctx.send_viewport_cmd(ViewportCommand::Screenshot(egui::UserData::default()));
@@ -309,76 +648,372 @@ impl CircuiterApp {
         if let Some(image) = image {
             let [w, h] = image.size;
             let bytes: Vec<u8> = image.pixels.iter().flat_map(|c| c.to_array()).collect();
-            if let Err(e) = image::save_buffer(
+            let saved = image::save_buffer(
                 &path,
                 &bytes,
                 w as u32,
                 h as u32,
                 image::ExtendedColorType::Rgba8,
-            ) {
+            );
+            if let Err(e) = saved {
                 eprintln!("error: saving screenshot to {}: {e}", path.display());
             }
             self.screenshot = None;
+            self.allow_close = true;
             ctx.send_viewport_cmd(ViewportCommand::Close);
         }
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        if ctx.egui_wants_keyboard_input() {
+        if self.prompt.is_some() || ctx.egui_wants_keyboard_input() {
             return;
         }
-        let (fit, up, escape, reload, open) = ctx.input(|i| {
-            (
-                i.key_pressed(Key::F) || i.key_pressed(Key::Home),
-                i.key_pressed(Key::Backspace) || (i.modifiers.alt && i.key_pressed(Key::ArrowUp)),
-                i.key_pressed(Key::Escape),
-                i.key_pressed(Key::F5),
-                i.modifiers.command && i.key_pressed(Key::O),
-            )
+        let keys = ctx.input(|i| {
+            let cmd = i.modifiers.command;
+            let shift = i.modifiers.shift;
+            Keys {
+                open: cmd && i.key_pressed(Key::O),
+                save: cmd && i.key_pressed(Key::S),
+                new_cell: cmd && i.key_pressed(Key::N),
+                undo: cmd && !shift && i.key_pressed(Key::Z),
+                run: cmd && i.key_pressed(Key::R),
+                redo: cmd && (i.key_pressed(Key::Y) || (shift && i.key_pressed(Key::Z))),
+                reload: i.key_pressed(Key::F5),
+                op: i.key_pressed(Key::F9),
+                tran: i.key_pressed(Key::F10),
+                fit: !cmd && (i.key_pressed(Key::F) || i.key_pressed(Key::Home)),
+                up: i.modifiers.alt && i.key_pressed(Key::ArrowUp),
+                back: (i.modifiers.alt && i.key_pressed(Key::ArrowLeft))
+                    || i.pointer.button_pressed(egui::PointerButton::Extra1),
+                forward: (i.modifiers.alt && i.key_pressed(Key::ArrowRight))
+                    || i.pointer.button_pressed(egui::PointerButton::Extra2),
+                escape: i.key_pressed(Key::Escape),
+                delete: i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace),
+                rotate: !cmd && i.key_pressed(Key::R),
+                mirror: !cmd && i.key_pressed(Key::X),
+                wire: !cmd && i.key_pressed(Key::W),
+                label: !cmd && i.key_pressed(Key::L),
+                port: !cmd && i.key_pressed(Key::P),
+                add: !cmd && i.key_pressed(Key::A),
+                search: cmd && i.key_pressed(Key::K),
+                flip: i.key_pressed(Key::Slash),
+                view: !cmd && !shift && i.key_pressed(Key::V),
+                ground: !cmd && !shift && i.key_pressed(Key::G),
+                duplicate: cmd && i.key_pressed(Key::D),
+                vdd: !cmd && shift && i.key_pressed(Key::V),
+                rect: !cmd && i.key_pressed(Key::B),
+                circle: !cmd && i.key_pressed(Key::C),
+                text: !cmd && i.key_pressed(Key::T),
+            }
         });
-        if open {
-            self.open_dialog();
+        if keys.open {
+            self.guarded(ctx, Pending::OpenDialog);
         }
-        if reload {
-            self.reload();
+        if keys.reload {
+            self.guarded(ctx, Pending::Reload);
         }
-        if let Some(ws) = &mut self.workspace {
-            if fit {
-                ws.levels.last_mut().expect("level").camera = None;
+        if keys.op {
+            self.simulate(Analysis::Op);
+        }
+        if keys.run {
+            if let Some(ws) = &self.workspace {
+                let a = ws.run_analysis();
+                self.simulate(a);
             }
-            if up && ws.levels.len() > 1 {
-                ws.ascend_to(ws.levels.len() - 1);
+        }
+        if keys.tran {
+            self.transient_prompt();
+        }
+        if keys.save {
+            self.save();
+        }
+        let Some(ws) = &mut self.workspace else { return };
+        if keys.search && ws.editable() && ws.mode == Mode::Schematic {
+            self.prompt = Some(Prompt::AddPart { query: String::new() });
+        }
+        if keys.new_cell {
+            self.prompt = Some(new_cell_prompt(ws));
+        }
+        if keys.fit {
+            ws.levels.last_mut().expect("level").camera = None;
+        }
+        if keys.up && ws.levels.len() > 1 {
+            ws.ascend_to(ws.levels.len() - 1);
+        }
+        if keys.back {
+            ws.go_back();
+        }
+        if keys.forward {
+            ws.go_forward();
+        }
+        if keys.escape {
+            match ws.sim.as_mut().filter(|s| s.job.is_some()) {
+                Some(sim) => sim.cancel(),
+                None => ws.escape(),
             }
-            if escape {
-                ws.select(None);
+        }
+        if keys.undo {
+            ws.undo();
+        }
+        if keys.redo {
+            ws.redo();
+        }
+        if keys.view {
+            ws.set_mode(match ws.mode {
+                Mode::Schematic => Mode::Symbol,
+                Mode::Symbol => Mode::Schematic,
+            });
+        }
+        if !ws.editable() {
+            return;
+        }
+        if keys.delete && !ws.selection.is_empty() {
+            ws.delete_selection();
+        }
+        if keys.rotate {
+            ws.rotate();
+        }
+        if keys.mirror {
+            ws.mirror();
+        }
+        if ws.mode == Mode::Symbol {
+            if keys.label {
+                ws.tool = Tool::Line { points: Vec::new() };
             }
+            if keys.rect {
+                ws.tool = Tool::Rect { from: None };
+            }
+            if keys.circle {
+                ws.tool = Tool::Circle { center: None };
+            }
+            if keys.add {
+                ws.tool = Tool::Arc { center: None, start: None };
+            }
+            if keys.text {
+                self.prompt = Some(Prompt::SymbolText { text: String::new() });
+            }
+            if keys.port {
+                if let Err(e) = ws.start_pin(None) {
+                    self.error = Some(e);
+                }
+            }
+            return;
+        }
+        if keys.flip {
+            ws.flip_wire_corner();
+        }
+        if keys.wire {
+            ws.tool = Tool::Wire { points: Vec::new(), horizontal_first: true };
+        }
+        if keys.label {
+            self.prompt = Some(Prompt::Label { net: String::new() });
+        }
+        if keys.port {
+            self.prompt = Some(new_port_prompt(true));
+        }
+        if keys.add {
+            self.prompt = Some(Prompt::AddPart { query: String::new() });
+        }
+        if keys.duplicate {
+            if let Err(e) = ws.duplicate() {
+                self.error = Some(e);
+            }
+        }
+        // Copy, cut and paste arrive as events, not keys (egui takes them from the
+        // platform's shortcuts).
+        let events = ctx.input(|i| i.events.clone());
+        for e in events {
+            match e {
+                egui::Event::Copy => {
+                    if let Some(text) = ws.copy() {
+                        ctx.copy_text(text);
+                    }
+                }
+                egui::Event::Cut => {
+                    if let Some(text) = ws.cut() {
+                        ctx.copy_text(text);
+                    }
+                }
+                egui::Event::Paste(text) if ws.editable() => {
+                    if let Err(e) = ws.paste(Some(&text), self.cursor) {
+                        self.error = Some(e);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if keys.ground {
+            ws.start_placing(&CellId::new(circuiter_model::STD_LIBRARY, "gnd"));
+        }
+        if keys.vdd {
+            ws.start_placing(&CellId::new(circuiter_model::STD_LIBRARY, "vdd"));
+        }
+    }
+
+    /// A part dragged from the library or the strip: previewed under the pointer while
+    /// over the sheet, placed where it is let go.
+    fn drop_part(&mut self, ctx: &egui::Context, cursor: Option<Pt>, tolerance: f64) {
+        let Some(ws) = &mut self.workspace else { return };
+        let dragged = egui::DragAndDrop::payload::<DraggedCell>(ctx);
+        match (dragged, cursor) {
+            (Some(d), Some(at)) if ws.placeable(&d.0) => {
+                if !self.drop_preview || !matches!(ws.tool, Tool::Place { .. }) {
+                    ws.start_placing(&d.0);
+                    self.drop_preview = true;
+                }
+                if ctx.input(|i| i.pointer.any_released()) {
+                    egui::DragAndDrop::clear_payload(ctx);
+                    self.drop_preview = false;
+                    let placed = ws.gesture(canvas::Gesture::Click { at, shift: false }, tolerance);
+                    if let Some(e) = placed {
+                        self.error = Some(e);
+                    }
+                }
+            }
+            _ if self.drop_preview => {
+                // Dragged off the sheet again, or let go elsewhere.
+                self.drop_preview = false;
+                if matches!(ws.tool, Tool::Place { .. }) {
+                    ws.tool = Tool::Select;
+                }
+            }
+            _ => {}
         }
     }
 
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
         egui::MenuBar::new().ui(ui, |ui| {
+            let has_ws = self.workspace.is_some();
             ui.menu_button("File", |ui| {
-                if ui.button("Open Project…").clicked() {
-                    self.open_dialog();
+                if ui.button("New Project…").clicked() {
+                    self.guarded(&ctx, Pending::NewProjectDialog);
                 }
-                let has_ws = self.workspace.is_some();
-                if ui.add_enabled(has_ws, egui::Button::new("Reload")).clicked() {
-                    self.reload();
+                if ui.button("Open Project…   Ctrl+O").clicked() {
+                    self.guarded(&ctx, Pending::OpenDialog);
+                }
+                if ui.add_enabled(has_ws, egui::Button::new("New Cell…   Ctrl+N")).clicked() {
+                    self.prompt = self.workspace.as_ref().map(new_cell_prompt);
+                }
+                if ui.add_enabled(self.dirty(), egui::Button::new("Save   Ctrl+S")).clicked() {
+                    self.save();
+                }
+                if ui.add_enabled(has_ws, egui::Button::new("Reload   F5")).clicked() {
+                    self.guarded(&ctx, Pending::Reload);
                 }
                 ui.separator();
+                if ui.add_enabled(has_ws, egui::Button::new("Import SPICE Models…")).clicked() {
+                    self.import_dialog();
+                }
                 if ui.add_enabled(has_ws, egui::Button::new("Export SVG…")).clicked() {
                     self.export_svg();
                 }
                 ui.separator();
                 if ui.button("Quit").clicked() {
-                    ui.ctx().send_viewport_cmd(ViewportCommand::Close);
+                    self.guarded(&ctx, Pending::Quit);
+                }
+            });
+            ui.menu_button("Edit", |ui| {
+                let Some(ws) = &mut self.workspace else { return };
+                if ui.add_enabled(ws.can_undo(), egui::Button::new("Undo   Ctrl+Z")).clicked() {
+                    ws.undo();
+                }
+                if ui.add_enabled(ws.can_redo(), egui::Button::new("Redo   Ctrl+Y")).clicked() {
+                    ws.redo();
+                }
+                ui.separator();
+                let editable = ws.editable();
+                let has_sel = !ws.selection.is_empty();
+                if ui.add_enabled(editable && has_sel, egui::Button::new("Rotate   R")).clicked() {
+                    ws.rotate();
+                }
+                if ui.add_enabled(editable && has_sel, egui::Button::new("Mirror   X")).clicked() {
+                    ws.mirror();
+                }
+                if ui.add_enabled(editable && has_sel, egui::Button::new("Delete   Del")).clicked()
+                {
+                    ws.delete_selection();
+                }
+                ui.separator();
+                let sheet = ws.mode == Mode::Schematic;
+                if ui
+                    .add_enabled(editable && sheet && has_sel, egui::Button::new("Cut   Ctrl+X"))
+                    .clicked()
+                {
+                    if let Some(text) = ws.cut() {
+                        ui.ctx().copy_text(text);
+                    }
+                }
+                if ui.add_enabled(sheet && has_sel, egui::Button::new("Copy   Ctrl+C")).clicked() {
+                    if let Some(text) = ws.copy() {
+                        ui.ctx().copy_text(text);
+                    }
+                }
+                if ui.add_enabled(editable && sheet, egui::Button::new("Paste   Ctrl+V")).clicked()
+                {
+                    if let Err(e) = ws.paste(None, None) {
+                        self.error = Some(e);
+                    }
+                }
+                if ui
+                    .add_enabled(
+                        editable && sheet && has_sel,
+                        egui::Button::new("Duplicate   Ctrl+D"),
+                    )
+                    .clicked()
+                {
+                    if let Err(e) = ws.duplicate() {
+                        self.error = Some(e);
+                    }
+                }
+            });
+            ui.menu_button("Place", |ui| {
+                let Some(ws) = &mut self.workspace else { return };
+                let sheet = ws.editable() && ws.mode == Mode::Schematic;
+                if ui.add_enabled(sheet, egui::Button::new("Part…   A")).clicked() {
+                    self.prompt = Some(Prompt::AddPart { query: String::new() });
+                }
+                if ui.add_enabled(sheet, egui::Button::new("Wire   W")).clicked() {
+                    ws.tool = Tool::Wire { points: Vec::new(), horizontal_first: true };
+                }
+                if ui.add_enabled(sheet, egui::Button::new("Net Label…   L")).clicked() {
+                    self.prompt = Some(Prompt::Label { net: String::new() });
+                }
+                if ui.add_enabled(sheet, egui::Button::new("Port…   P")).clicked() {
+                    self.prompt = Some(new_port_prompt(true));
+                }
+                ui.separator();
+                if ui.add_enabled(sheet, egui::Button::new("Ground   G")).clicked() {
+                    ws.start_placing(&CellId::new(circuiter_model::STD_LIBRARY, "gnd"));
+                }
+                if ui.add_enabled(sheet, egui::Button::new("VDD   Shift+V")).clicked() {
+                    ws.start_placing(&CellId::new(circuiter_model::STD_LIBRARY, "vdd"));
                 }
             });
             ui.menu_button("View", |ui| {
-                if ui.button("Fit to Window").clicked() {
+                if ui.button("Fit to Window   F").clicked() {
                     if let Some(ws) = &mut self.workspace {
                         ws.levels.last_mut().expect("level").camera = None;
                     }
+                }
+                if let Some(ws) = &mut self.workspace {
+                    let has_schematic = ws.has_schematic();
+                    if ui
+                        .add_enabled(
+                            has_schematic,
+                            egui::Button::selectable(ws.mode == Mode::Schematic, "Schematic   V"),
+                        )
+                        .clicked()
+                    {
+                        ws.set_mode(Mode::Schematic);
+                    }
+                    if ui
+                        .add(egui::Button::selectable(ws.mode == Mode::Symbol, "Symbol   V"))
+                        .clicked()
+                    {
+                        ws.set_mode(Mode::Symbol);
+                    }
+                    ui.separator();
                 }
                 ui.checkbox(&mut self.show_grid, "Grid");
                 ui.separator();
@@ -388,134 +1023,82 @@ impl CircuiterApp {
                     }
                 }
             });
-            ui.menu_button("Navigate", |ui| {
-                let Some(ws) = &mut self.workspace else { return };
-                if ui.add_enabled(ws.levels.len() > 1, egui::Button::new("Up One Level")).clicked()
-                {
-                    ws.ascend_to(ws.levels.len() - 1);
+            ui.menu_button("Simulate", |ui| {
+                let has_ws = self.workspace.is_some();
+                if ui.add_enabled(has_ws, egui::Button::new("Operating Point   F9")).clicked() {
+                    self.simulate(Analysis::Op);
                 }
-                if ui.add_enabled(ws.levels.len() > 1, egui::Button::new("Top Level")).clicked() {
-                    ws.ascend_to(1);
+                if ui.add_enabled(has_ws, egui::Button::new("Transient…   F10")).clicked() {
+                    self.transient_prompt();
                 }
-            });
-        });
-    }
-
-    fn toolbar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            let Some(ws) = &mut self.workspace else {
-                ui.label(RichText::new("No project open").weak());
-                return;
-            };
-            let mut go_to = None;
-            for (depth, level) in ws.levels.iter().enumerate() {
-                if depth > 0 {
-                    ui.label(RichText::new("›").weak());
+                if ui.add_enabled(has_ws, egui::Button::new("AC Sweep…")).clicked() {
+                    self.prompt = Some(ac_prompt());
                 }
-                let label = match &level.via {
-                    Some(inst) => format!("{inst}  ({})", level.cell.cell),
-                    None => level.cell.to_string(),
-                };
-                let current = depth + 1 == ws.levels.len();
-                let text = RichText::new(label).monospace();
-                if ui
-                    .selectable_label(current, if current { text.strong() } else { text })
-                    .clicked()
-                    && !current
-                {
-                    go_to = Some(depth + 1);
-                }
-            }
-            if ws.mode == Mode::Symbol {
-                ui.label(RichText::new("symbol").weak().italics());
-            }
-            if let Some(depth) = go_to {
-                ws.ascend_to(depth);
-            }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                for theme in Theme::ALL.into_iter().rev() {
-                    if ui.selectable_label(std::ptr::eq(self.theme, theme), theme.name).clicked() {
-                        self.theme = theme;
+                ui.separator();
+                let has_sim = self.workspace.as_ref().is_some_and(|w| w.sim.is_some());
+                if ui.add_enabled(has_sim, egui::Button::new("Clear Results")).clicked() {
+                    if let Some(ws) = &mut self.workspace {
+                        ws.sim = None;
+                        ws.sim_error = None;
                     }
                 }
             });
+            ui.menu_button("Navigate", |ui| {
+                let Some(ws) = &mut self.workspace else { return };
+                let nested = ws.levels.len() > 1;
+                if ui.add_enabled(nested, egui::Button::new("Up One Level   Alt+Up")).clicked() {
+                    ws.ascend_to(ws.levels.len() - 1);
+                }
+                if ui.add_enabled(nested, egui::Button::new("Top Level")).clicked() {
+                    ws.ascend_to(1);
+                }
+                ui.separator();
+                let back = ws.back_to().is_some();
+                if ui.add_enabled(back, egui::Button::new("Back   Alt+Left")).clicked() {
+                    ws.go_back();
+                }
+                let forward = ws.forward_to().is_some();
+                if ui.add_enabled(forward, egui::Button::new("Forward   Alt+Right")).clicked() {
+                    ws.go_forward();
+                }
+            });
+            ui.menu_button("Help", |ui| {
+                if ui.button("Keyboard Shortcuts").clicked() {
+                    self.prompt = Some(Prompt::Shortcuts);
+                }
+            });
         });
-    }
-
-    fn browser(&mut self, ui: &mut egui::Ui) {
-        let Some(ws) = &mut self.workspace else { return };
-        ui.add_space(4.0);
-        ui.heading(ws.project.name());
-        if !ws.project.manifest.project.description.is_empty() {
-            ui.label(RichText::new(&ws.project.manifest.project.description).weak().small());
-        }
-        ui.separator();
-        let current = ws.current().cell.clone();
-        let mut open = None;
-        let mut order: Vec<&str> = vec![ws.project.name()];
-        order.extend(ws.project.manifest.libraries.keys().map(String::as_str));
-        order.push(circuiter_model::STD_LIBRARY);
-        egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
-            for lib_name in order {
-                let Some(lib) = ws.design.library(lib_name) else { continue };
-                egui::CollapsingHeader::new(RichText::new(lib_name).strong())
-                    .id_salt(lib_name)
-                    .default_open(true)
-                    .show(ui, |ui| {
-                        for def in lib.cells.values() {
-                            let id = CellId::new(lib_name, &def.name);
-                            let kind = if def.schematic.is_some() { "schematic" } else { "part" };
-                            ui.horizontal(|ui| {
-                                let r = ui.selectable_label(
-                                    id == current,
-                                    RichText::new(&def.name).monospace(),
-                                );
-                                ui.label(RichText::new(kind).weak().small());
-                                let r = if def.cell.description.is_empty() {
-                                    r
-                                } else {
-                                    r.on_hover_text(&def.cell.description)
-                                };
-                                if r.clicked() {
-                                    open = Some(id);
-                                }
-                            });
-                        }
-                    });
-            }
-        });
-        if let Some(id) = open {
-            ws.open_cell(id);
-        }
     }
 
     fn inspector(&mut self, ui: &mut egui::Ui) {
         let Some(ws) = &mut self.workspace else { return };
         ui.add_space(4.0);
-        let mut action: Option<InspectorAction> = None;
-        egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| match ws.selection {
-            Some(Owner::Instance(i)) => action = instance_panel(ui, ws, i),
-            Some(Owner::Wire(_) | Owner::Label(_) | Owner::Port(_)) => {
-                action = ws.net.and_then(|n| net_panel(ui, ws, n));
+        let field = &mut self.field;
+        let mut prompt = None;
+        egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
+            let mut sel = ws.selection.iter();
+            match (sel.next().copied(), sel.next()) {
+                (Some(Owner::Instance(i)), None) => instance_panel(ui, ws, i, field),
+                (Some(Owner::Pin(i)), None) => pin_panel(ui, ws, i, field),
+                (Some(Owner::Graphic(i)), None) => graphic_panel(ui, ws, i, field),
+                (Some(Owner::Wire(_) | Owner::Label(_) | Owner::Port(_)), None) => {
+                    if let Some(n) = ws.net {
+                        net_panel(ui, ws, n);
+                    }
+                }
+                (Some(_), Some(_)) => {
+                    ui.label(
+                        RichText::new(format!("{} objects selected", ws.selection.len())).strong(),
+                    );
+                    if ws.editable() && ui.button("Delete").clicked() {
+                        ws.delete_selection();
+                    }
+                }
+                _ => cell_panel(ui, ws, field, &mut prompt),
             }
-            _ => cell_panel(ui, ws),
         });
-        match action {
-            Some(InspectorAction::Descend(i)) => ws.descend(i),
-            Some(InspectorAction::SelectNet(n)) => {
-                ws.selection = None;
-                ws.net = Some(n);
-                // Select a wire on the net so the inspector shows it.
-                let wire = ws.scene.connectivity.nets[n].items.iter().find_map(|it| match it {
-                    Item::Wire(w) => Some(Owner::Wire(*w)),
-                    Item::Label(l) => Some(Owner::Label(*l)),
-                    Item::Port(p) => Some(Owner::Port(*p)),
-                    Item::Pin(_) => None,
-                });
-                ws.selection = wire;
-            }
-            Some(InspectorAction::SelectInstance(i)) => ws.select(Some(Owner::Instance(i))),
-            None => {}
+        if prompt.is_some() {
+            self.prompt = prompt;
         }
     }
 
@@ -540,32 +1123,198 @@ impl CircuiterApp {
                 }
             }
             ui.separator();
-            if let (Some(ws), Some(owner)) = (&self.workspace, self.hovered) {
-                ui.label(describe(ws, owner));
+            if let Some(ws) = &self.workspace {
+                if let Some(notice) = &ws.notice {
+                    ui.label(RichText::new(format!("⚡ {notice}")).color(ACCENT));
+                } else if ws.editable() {
+                    ui.label(RichText::new(ws.tool.name()).strong());
+                    ui.add(egui::Label::new(RichText::new(ws.hint()).weak()).truncate());
+                } else if let Some(owner) = self.hovered {
+                    ui.label(ws.describe(owner));
+                }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if let Some(ws) = &self.workspace {
-                    if let Some(cam) = ws.current().camera {
-                        ui.label(
-                            RichText::new(format!("{:.1} px/mm", cam.scale)).monospace().weak(),
-                        );
+                let Some(ws) = &self.workspace else { return };
+                if let Some(sim) = &ws.sim {
+                    let (text, c) = match (&sim.results, &sim.error, sim.stale) {
+                        _ if sim.job.is_some() => {
+                            let p = sim.job.as_ref().map_or(0.0, |j| j.control.progress());
+                            (format!("simulating… {:.0}%  (Esc cancels)", p * 100.0), ACCENT)
+                        }
+                        (_, Some(e), _) if e == "cancelled" => ("cancelled".to_owned(), WARNING),
+                        (_, Some(_), _) => ("simulation failed".to_owned(), ERROR),
+                        (Some(Results::Ac { result, .. }), None, false) => {
+                            (format!("AC sweep · {} frequencies", result.frequency.len()), ACCENT)
+                        }
+                        (Some(_), None, true) => ("results out of date".to_owned(), WARNING),
+                        (Some(Results::Op(_)), None, false) => {
+                            ("operating point".to_owned(), ACCENT)
+                        }
+                        (Some(Results::Tran { result, .. }), None, false) => {
+                            (format!("transient · {} points", result.time.len()), ACCENT)
+                        }
+                        (None, None, _) => (String::new(), ACCENT),
+                    };
+                    if !text.is_empty() {
+                        ui.label(RichText::new(text).color(c).small());
                         ui.separator();
                     }
-                    let problems = ws.problems();
-                    let errors = problems.iter().filter(|(s, _)| *s == Severity::Error).count();
-                    let text = match (errors, problems.len()) {
-                        (_, 0) => {
-                            RichText::new("✔ no problems").color(Color32::from_rgb(90, 190, 120))
-                        }
-                        (0, n) => RichText::new(format!("⚠ {n} warning(s)"))
-                            .color(Color32::from_rgb(230, 170, 60)),
-                        (e, n) => RichText::new(format!("✖ {e} error(s), {} warning(s)", n - e))
-                            .color(Color32::from_rgb(230, 80, 70)),
-                    };
-                    ui.label(text);
+                }
+                if let Some(cam) = ws.current().camera {
+                    ui.label(RichText::new(format!("{:.1} px/mm", cam.scale)).monospace().weak());
+                    ui.separator();
+                }
+                let problems = ws.problems();
+                let errors = problems.iter().filter(|(s, _)| *s == Severity::Error).count();
+                let text = match (errors, problems.len()) {
+                    (_, 0) => RichText::new("✔ no problems").color(OK),
+                    (0, n) => RichText::new(format!("⚠ {n} warning(s)")).color(WARNING),
+                    (e, n) => {
+                        RichText::new(format!("✖ {e} error(s), {} warning(s)", n - e)).color(ERROR)
+                    }
+                };
+                ui.label(text);
+                if let Some(owner) = self.hovered {
+                    if ws.editable() {
+                        ui.separator();
+                        ui.label(RichText::new(ws.describe(owner)).weak());
+                    }
                 }
             });
         });
+    }
+
+    /// The results panel under the schematic: waveforms, or a Bode plot.
+    fn results_panel(&mut self, ui: &mut egui::Ui) {
+        let Some(ws) = &mut self.workspace else { return };
+        let Some(sim) = &ws.sim else { return };
+        let ac = matches!(sim.results, Some(Results::Ac { .. }));
+        let has_heat = sim.monitor.as_ref().is_some_and(|m| !m.parts.is_empty());
+        let heat = self.plot_heat && !ac;
+        let mut remove = None;
+        let p = style::palette(ui);
+        ui.horizontal(|ui| {
+            if heat {
+                for e in sim.events() {
+                    ui.colored_label(
+                        p.error,
+                        format!("{}  {} at {}", style::icon::FIRE, e.path, show(e.time, "s")),
+                    )
+                    .on_hover_text(e.describe());
+                }
+                if !has_heat {
+                    ui.label(RichText::new("No part warmed up.").color(p.weak));
+                }
+            } else {
+                if sim.stale {
+                    ui.colored_label(p.warning, "Out of date: run the simulation again");
+                }
+                for (k, &probe) in sim.probes.iter().enumerate() {
+                    let name = &sim.netlist.nets[probe].name;
+                    let chip = egui::Button::new(
+                        RichText::new(format!(
+                            "{}  {name}   {}",
+                            style::icon::SQUARE,
+                            style::icon::X
+                        ))
+                        .color(plot::trace_color(k)),
+                    )
+                    .frame(false);
+                    if ui.add(chip).on_hover_text("Remove from the plot").clicked() {
+                        remove = Some(k);
+                    }
+                }
+                if sim.probes.is_empty() {
+                    ui.label(RichText::new("Select a wire and choose Add to Plot").color(p.weak));
+                }
+            }
+            style::trailing(ui, |ui| {
+                ui.label(
+                    RichText::new("wheel zooms · drag pans · double-click shows all")
+                        .small()
+                        .color(p.weak),
+                );
+            });
+        });
+        let area = ui.available_rect_before_wrap();
+        let names: Vec<String> =
+            sim.probes.iter().map(|&p| sim.netlist.nets[p].name.clone()).collect();
+        if let (true, Some(m), Some(Results::Tran { result, tstop, .. })) =
+            (heat, &sim.monitor, &sim.results)
+        {
+            // One trace per part that warmed by more than a degree.
+            let series: Vec<(String, Vec<f64>)> = m
+                .parts
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p.peak > m.ambient + 1.0)
+                .map(|(k, p)| {
+                    let temps: Vec<f64> =
+                        m.temperatures.iter().map(|row| f64::from(row[k])).collect();
+                    (p.path.clone(), temps)
+                })
+                .collect();
+            let n = result.time.len();
+            let traces: Vec<Trace<'_>> = series
+                .iter()
+                .map(|(name, t)| Trace {
+                    name,
+                    x: &result.time[..n.min(t.len())],
+                    y: &t[..n.min(t.len())],
+                })
+                .collect();
+            let axis = XAxis { unit: "s", range: (0.0, *tstop), log: false };
+            plot::show_lanes(ui, area, &mut self.plot, &traces, axis, "°C", self.theme);
+            return;
+        }
+        match &sim.results {
+            Some(Results::Tran { tstop, .. }) => {
+                let waves: Vec<(&[f64], Vec<f64>)> =
+                    sim.probes.iter().filter_map(|&p| sim.waveform(p)).collect();
+                let traces: Vec<Trace<'_>> = waves
+                    .iter()
+                    .zip(&names)
+                    .map(|((t, v), n)| Trace { name: n, x: t, y: v })
+                    .collect();
+                let axis = XAxis { unit: "s", range: (0.0, *tstop), log: false };
+                plot::show_lanes(ui, area, &mut self.plot, &traces, axis, "V", self.theme);
+            }
+            Some(Results::Ac { fstart, fstop, .. }) => {
+                let responses: Vec<(&[f64], Vec<f64>, Vec<f64>)> = sim
+                    .probes
+                    .iter()
+                    .filter_map(|&p| {
+                        let (f, v) = sim.response(p)?;
+                        let db = v.iter().map(|c| c.db()).collect();
+                        // Without signal the phase is noise; leave it out.
+                        let mut phase: Vec<f64> = v
+                            .iter()
+                            .map(|c| if c.abs() > 1e-15 { c.phase() } else { f64::NAN })
+                            .collect();
+                        plot::unwrap_phase(&mut phase);
+                        Some((f, db, phase))
+                    })
+                    .collect();
+                let axis = XAxis { unit: "Hz", range: (*fstart, *fstop), log: true };
+                let mag: Vec<Trace<'_>> = responses
+                    .iter()
+                    .zip(&names)
+                    .map(|((f, db, _), n)| Trace { name: n, x: f, y: db })
+                    .collect();
+                let phase: Vec<Trace<'_>> = responses
+                    .iter()
+                    .zip(&names)
+                    .map(|((f, _, ph), n)| Trace { name: n, x: f, y: ph })
+                    .collect();
+                let (top, bottom) = area.split_top_bottom_at_fraction(0.6);
+                plot::show_plot(ui, top, &mut self.plot, &mag, axis, "dB", self.theme);
+                plot::show_plot(ui, bottom, &mut self.plot, &phase, axis, "°", self.theme);
+            }
+            _ => {}
+        }
+        if let (Some(k), Some(sim)) = (remove, &mut ws.sim) {
+            sim.probes.remove(k);
+        }
     }
 
     fn welcome(&mut self, ui: &mut egui::Ui) {
@@ -574,118 +1323,880 @@ impl CircuiterApp {
             ui.label(RichText::new("Circuiter").size(40.0).strong());
             ui.label(RichText::new("Design, simulate and build hardware").weak());
             ui.add_space(24.0);
-            if ui.button(RichText::new("Open Project…").size(16.0)).clicked() {
-                self.open_dialog();
+            let ctx = ui.ctx().clone();
+            if ui.button(RichText::new("New Project…").size(16.0)).clicked() {
+                self.run(&ctx, Pending::NewProjectDialog);
             }
-            let example = Path::new("examples/cmos_inverter");
-            if example.join(circuiter_model::project::MANIFEST_FILE).is_file() {
-                ui.add_space(8.0);
-                if ui.link("Open the CMOS inverter example").clicked() {
-                    self.open(example);
+            ui.add_space(6.0);
+            if ui.button(RichText::new("Open Project…").size(16.0)).clicked() {
+                self.run(&ctx, Pending::OpenDialog);
+            }
+            // Example projects, when run from a source checkout.
+            let mut examples: Vec<PathBuf> = std::fs::read_dir("examples")
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.join(circuiter_model::project::MANIFEST_FILE).is_file())
+                .collect();
+            examples.sort();
+            if !examples.is_empty() {
+                ui.add_space(16.0);
+                ui.label(RichText::new("Examples").weak());
+            }
+            for example in examples {
+                let name = example.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+                let description = circuiter_model::Project::load(&example)
+                    .map(|p| p.manifest.project.description)
+                    .unwrap_or_default();
+                if ui.link(name.replace('_', " ")).on_hover_text(description).clicked() {
+                    self.open(&example);
                 }
             }
         });
     }
-}
 
-enum InspectorAction {
-    Descend(usize),
-    SelectNet(usize),
-    SelectInstance(usize),
-}
+    fn prompts(&mut self, ctx: &egui::Context) {
+        let Some(prompt) = &mut self.prompt else { return };
+        let mut close = ctx.input(|i| i.key_pressed(Key::Escape));
+        let enter = ctx.input(|i| i.key_pressed(Key::Enter));
+        let mut then: Option<Pending> = None;
+        let mut save_first = false;
+        let ws = &mut self.workspace;
 
-fn describe(ws: &Workspace, owner: Owner) -> String {
-    let conn = &ws.scene.connectivity;
-    let net_name = |item| conn.net_of(item).map(|n| conn.nets[n].name.clone()).unwrap_or_default();
-    let Some(schematic) = ws.schematic() else {
-        return ws.current().cell.to_string();
-    };
-    match owner {
-        Owner::Instance(i) => {
-            let inst = &schematic.instances[i];
-            let hint = if ws.scene.descendable[i] { "  (double-click to open)" } else { "" };
-            format!("{}  {}{hint}", inst.name, inst.cell)
+        egui::Modal::new(egui::Id::new("prompt")).show(ctx, |ui| {
+            ui.set_width(380.0);
+            match prompt {
+                Prompt::AddPart { query } => {
+                    ui.heading("Add Part");
+                    let r = ui.add(
+                        egui::TextEdit::singleline(query)
+                            .hint_text("Search parts: resistor, nmos, clock…")
+                            .desired_width(f32::INFINITY),
+                    );
+                    r.request_focus();
+                    let Some(ws) = ws else { return };
+                    let q = query.to_lowercase();
+                    // (cell, folder, description)
+                    let mut matches: Vec<(CellId, String, String)> = Vec::new();
+                    for lib in ws.design.libraries() {
+                        for def in lib.cells.values() {
+                            let id = CellId::new(&lib.name, &def.name);
+                            let hay =
+                                format!("{} {} {}", def.name, def.folder, def.cell.description)
+                                    .to_lowercase();
+                            if hay.contains(&q) && ws.placeable(&id) {
+                                matches.push((id, def.folder.clone(), def.cell.description.clone()));
+                            }
+                        }
+                    }
+                    ui.add_space(4.0);
+                    let mut pick = None;
+                    egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                        for (i, (id, folder, desc)) in matches.iter().enumerate() {
+                            let text = RichText::new(id.to_string()).monospace();
+                            let text = if i == 0 { text.strong() } else { text };
+                            ui.horizontal(|ui| {
+                                if ui.selectable_label(i == 0, text).on_hover_text(desc).clicked() {
+                                    pick = Some(id.clone());
+                                }
+                                if !folder.is_empty() {
+                                    ui.label(RichText::new(format!("{folder}/")).weak().small());
+                                }
+                            });
+                        }
+                        if matches.is_empty() {
+                            ui.label(RichText::new("No matching parts").weak());
+                        }
+                    });
+                    if enter {
+                        pick = pick.or_else(|| matches.first().map(|(id, ..)| id.clone()));
+                    }
+                    if let Some(id) = pick {
+                        ws.start_placing(&id);
+                        close = true;
+                    }
+                }
+                Prompt::Label { net } => {
+                    ui.heading("Net Label");
+                    ui.label("Labels with the same name are connected.");
+                    let r = ui.add(egui::TextEdit::singleline(net).hint_text("VDD, CLK, DATA0…"));
+                    r.request_focus();
+                    if enter && !net.trim().is_empty() {
+                        if let Some(ws) = ws {
+                            ws.tool = Tool::Label { net: net.trim().to_owned() };
+                        }
+                        close = true;
+                    }
+                }
+                Prompt::Port { name, kind, place, error } => {
+                    ui.heading("Port");
+                    ui.label("A connection to this cell from the sheets that use it.");
+                    let r = ui.add(egui::TextEdit::singleline(name).hint_text("in, out, vdd…"));
+                    r.request_focus();
+                    egui::ComboBox::from_label("Direction")
+                        .selected_text(kind_label(*kind))
+                        .show_ui(ui, |ui| {
+                            for k in PORT_KINDS {
+                                ui.selectable_value(kind, k, kind_label(k));
+                            }
+                        });
+                    if *place {
+                        ui.label(RichText::new("Then click where it connects.").weak());
+                    }
+                    if let Some(e) = error {
+                        ui.colored_label(ERROR, e.as_str());
+                    }
+                    if enter && !name.trim().is_empty() {
+                        if let Some(ws) = ws {
+                            let name = name.trim().to_owned();
+                            if *place {
+                                ws.tool = Tool::Port { name, kind: *kind };
+                                close = true;
+                            } else {
+                                let k = *kind;
+                                match ws.edit(|_, _, d| interface::add_port(d, &name, k)) {
+                                    Ok(()) => close = true,
+                                    Err(e) => *error = Some(e),
+                                }
+                            }
+                        }
+                    }
+                }
+                Prompt::Transient { stop, step, power_on, error } => {
+                    ui.heading("Transient Analysis");
+                    ui.label("Simulates the circuit over time.");
+                    egui::Grid::new("tran").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+                        ui.label("Stop time");
+                        let r = ui.add(egui::TextEdit::singleline(stop).hint_text("30n, 2m…"));
+                        if ui.memory(|m| m.focused().is_none()) {
+                            r.request_focus();
+                        }
+                        ui.end_row();
+                        ui.label("Resolution").on_hover_text(
+                            "The largest time step; it shrinks automatically on fast edges",
+                        );
+                        ui.add(egui::TextEdit::singleline(step).hint_text("50p, 1u…"));
+                        ui.end_row();
+                    });
+                    ui.checkbox(power_on, "Start from power-on").on_hover_text(
+                        "On: everything starts off and the sources switch on at 0 s, as when \
+                         you turn a real circuit on. Off: start from the steady state, as if it \
+                         had been on forever (SPICE's usual start).",
+                    );
+                    if let Some(e) = error {
+                        ui.colored_label(ERROR, e.as_str());
+                    }
+                    ui.add_space(4.0);
+                    let run = ui.button("Run").clicked();
+                    if enter || run {
+                        let parse = |t: &str| circuiter_model::units::parse_quantity(t, Some("s"));
+                        match (parse(stop), parse(step)) {
+                            (Ok(a), Ok(b)) if a > 0.0 && b > 0.0 && b <= a => {
+                                if let Some(ws) = ws {
+                                    ws.simulate(Analysis::Tran {
+                                        tstop: a,
+                                        tstep: b,
+                                        power_on: *power_on,
+                                    });
+                                }
+                                close = true;
+                            }
+                            (Ok(_), Ok(_)) => {
+                                *error = Some("both must be positive, the resolution no larger than the stop time".into())
+                            }
+                            (Err(e), _) | (_, Err(e)) => *error = Some(e.to_string()),
+                        }
+                    }
+                }
+                Prompt::Ac { start, stop, per_decade, error } => {
+                    ui.heading("AC Sweep");
+                    ui.label(
+                        "Small-signal gain and phase around the operating point, driven by \
+                         each source's AC value (a sine source's ac parameter).",
+                    );
+                    egui::Grid::new("ac").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+                        ui.label("From");
+                        let r = ui.add(egui::TextEdit::singleline(start).hint_text("1, 10…"));
+                        if ui.memory(|m| m.focused().is_none()) {
+                            r.request_focus();
+                        }
+                        ui.label("Hz");
+                        ui.end_row();
+                        ui.label("To");
+                        ui.add(egui::TextEdit::singleline(stop).hint_text("1G"));
+                        ui.label("Hz");
+                        ui.end_row();
+                        ui.label("Points per decade");
+                        ui.add(egui::TextEdit::singleline(per_decade));
+                        ui.end_row();
+                    });
+                    if let Some(e) = error {
+                        ui.colored_label(ERROR, e.as_str());
+                    }
+                    ui.add_space(4.0);
+                    let run = ui.button("Run").clicked();
+                    if enter || run {
+                        let parse = |t: &str| circuiter_model::units::parse_quantity(t, Some("Hz"));
+                        match (parse(start), parse(stop), per_decade.trim().parse::<usize>()) {
+                            (Ok(a), Ok(b), Ok(n)) if a > 0.0 && b > a && (1..=1000).contains(&n) => {
+                                if let Some(ws) = ws {
+                                    ws.simulate(Analysis::Ac { fstart: a, fstop: b, per_decade: n });
+                                }
+                                close = true;
+                            }
+                            (Err(e), _, _) | (_, Err(e), _) => *error = Some(e.to_string()),
+                            _ => {
+                                *error = Some(
+                                    "the start must be positive and below the stop, with 1 to 1000 points per decade"
+                                        .into(),
+                                )
+                            }
+                        }
+                    }
+                }
+                Prompt::Import { file, defs, selected, outcome } => {
+                    ui.heading(format!("Import from {file}"));
+                    match outcome {
+                        None => {
+                            ui.label("Each becomes a part in this project, with a symbol.");
+                            ui.add_space(4.0);
+                            egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                                for (d, on) in defs.iter().zip(selected.iter_mut()) {
+                                    ui.horizontal(|ui| {
+                                        ui.checkbox(on, RichText::new(crate::import::definition_name(d)).monospace());
+                                        ui.label(RichText::new(crate::import::describe(d)).weak());
+                                    });
+                                }
+                            });
+                            ui.add_space(6.0);
+                            ui.horizontal(|ui| {
+                                let count = selected.iter().filter(|s| **s).count();
+                                let go = ui.add_enabled(count > 0, egui::Button::new(format!("Import {count}"))).clicked();
+                                if go || (enter && count > 0) {
+                                    if let Some(ws) = ws {
+                                        let chosen: Vec<_> = defs
+                                            .iter()
+                                            .zip(selected.iter())
+                                            .filter(|(_, s)| **s)
+                                            .map(|(d, _)| d.clone())
+                                            .collect();
+                                        *outcome = Some(ws.import_models(&chosen));
+                                    }
+                                }
+                                if ui.button("Select none").clicked() {
+                                    selected.iter_mut().for_each(|s| *s = false);
+                                }
+                            });
+                        }
+                        Some(results) => {
+                            egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                                for r in results.iter() {
+                                    match r {
+                                        Ok((name, None)) => {
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.colored_label(OK, "✔");
+                                                ui.label(RichText::new(name).monospace());
+                                            });
+                                        }
+                                        Ok((name, Some(w))) => {
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.colored_label(WARNING, "⚠");
+                                                ui.label(RichText::new(name).monospace());
+                                                ui.label(RichText::new(format!("imported, but can't be simulated yet: {w}")).weak());
+                                            });
+                                        }
+                                        Err(e) => {
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.colored_label(ERROR, "✖");
+                                                ui.label(e.as_str());
+                                            });
+                                        }
+                                    }
+                                }
+                            });
+                            ui.add_space(6.0);
+                            if ui.button("Done").clicked() || enter {
+                                close = true;
+                            }
+                        }
+                    }
+                }
+                Prompt::SymbolText { text } => {
+                    ui.heading("Text");
+                    ui.label("${name} shows the reference (U1), ${param.X} a parameter's value.");
+                    let r = ui.add(
+                        egui::TextEdit::singleline(text)
+                            .hint_text("${name}, ${param.W}, or any text")
+                            .desired_width(f32::INFINITY),
+                    );
+                    r.request_focus();
+                    if enter && !text.trim().is_empty() {
+                        if let Some(ws) = ws {
+                            ws.tool = Tool::Text { text: text.trim().to_owned() };
+                        }
+                        close = true;
+                    }
+                }
+                Prompt::AddParam { name, kind, unit, options, default, error } => {
+                    ui.heading("Add Parameter");
+                    ui.label("A value set on each placed instance, like a resistance or width.");
+                    egui::Grid::new("add-param").num_columns(2).spacing([10.0, 6.0]).show(
+                        ui,
+                        |ui| {
+                            ui.label("Name");
+                            let r =
+                                ui.add(egui::TextEdit::singleline(name).hint_text("R, W, gain…"));
+                            if ui.memory(|m| m.focused().is_none()) {
+                                r.request_focus();
+                            }
+                            ui.end_row();
+                            ui.label("Kind");
+                            egui::ComboBox::from_id_salt("param-kind")
+                                .selected_text(kind.label())
+                                .show_ui(ui, |ui| {
+                                    for k in ParamChoice::ALL {
+                                        ui.selectable_value(kind, k, k.label());
+                                    }
+                                });
+                            ui.end_row();
+                            if *kind == ParamChoice::Real {
+                                ui.label("Unit");
+                                ui.add(egui::TextEdit::singleline(unit).hint_text("Ω, F, V, m…"));
+                                ui.end_row();
+                            }
+                            if *kind == ParamChoice::Choice {
+                                ui.label("Options");
+                                ui.add(
+                                    egui::TextEdit::singleline(options)
+                                        .hint_text("fast, typical, slow"),
+                                );
+                                ui.end_row();
+                            }
+                            ui.label("Default");
+                            ui.add(
+                                egui::TextEdit::singleline(default).hint_text("empty = required"),
+                            );
+                            ui.end_row();
+                        },
+                    );
+                    if let Some(e) = error {
+                        ui.colored_label(ERROR, e.as_str());
+                    }
+                    ui.add_space(4.0);
+                    let add = ui.button("Add").clicked();
+                    if (enter || add) && !name.trim().is_empty() {
+                        let param = ParamDef {
+                            name: name.trim().to_owned(),
+                            kind: match kind {
+                                ParamChoice::Real => {
+                                    ParamKind::Real { unit: unit.trim().to_owned() }
+                                }
+                                ParamChoice::Integer => ParamKind::Integer,
+                                ParamChoice::Bool => ParamKind::Bool,
+                                ParamChoice::Text => ParamKind::Text,
+                                ParamChoice::Choice => ParamKind::Choice(
+                                    options
+                                        .split(',')
+                                        .map(|o| o.trim().to_owned())
+                                        .filter(|o| !o.is_empty())
+                                        .collect(),
+                                ),
+                            },
+                            default: Some(default.trim().to_owned()).filter(|d| !d.is_empty()),
+                            description: String::new(),
+                        };
+                        if let Some(ws) = ws {
+                            match ws.edit(|_, _, d| interface::add_param(d, param)) {
+                                Ok(()) => close = true,
+                                Err(e) => *error = Some(e),
+                            }
+                        }
+                    }
+                }
+                Prompt::NewCell { name, folder, error } => {
+                    ui.heading("New Cell");
+                    ui.label(
+                        "An empty schematic in this project, ready to become a reusable part.",
+                    );
+                    let r =
+                        ui.add(egui::TextEdit::singleline(name).hint_text("nand2, dff, opamp…"));
+                    if !ui.memory(|m| m.focused().is_some()) {
+                        r.request_focus();
+                    }
+                    ui.label(RichText::new("Folder").small());
+                    let folders = ws
+                        .as_ref()
+                        .and_then(|ws| ws.design.library(ws.project.name()))
+                        .map(|l| l.all_folders())
+                        .unwrap_or_default();
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(folder)
+                                .hint_text("top level, or gates, analog/filters…")
+                                .desired_width(300.0),
+                        );
+                        if let Some(f) = folder_menu(ui, &folders) {
+                            *folder = f;
+                        }
+                    });
+                    if let Some(e) = error {
+                        ui.colored_label(ERROR, e.as_str());
+                    }
+                    if enter {
+                        if let Some(ws) = ws {
+                            match ws.new_cell(name.trim(), folder) {
+                                Ok(()) => close = true,
+                                Err(e) => *error = Some(e),
+                            }
+                        }
+                    }
+                }
+                Prompt::Folder { lib, parent, renaming, name, error } => {
+                    ui.heading(if renaming.is_some() { "Rename Folder" } else { "New Folder" });
+                    let place = if parent.is_empty() {
+                        format!("In {lib}")
+                    } else {
+                        format!("In {lib} › {parent}/")
+                    };
+                    ui.label(RichText::new(place).weak());
+                    let r = ui.add(
+                        egui::TextEdit::singleline(name)
+                            .hint_text("gates, cpu, analog/filters…")
+                            .desired_width(f32::INFINITY),
+                    );
+                    r.request_focus();
+                    ui.label(
+                        RichText::new("Folders can hold folders: `a/b` makes both.").weak().small(),
+                    );
+                    if let Some(e) = error {
+                        ui.colored_label(ERROR, e.as_str());
+                    }
+                    if enter {
+                        if let Some(ws) = ws {
+                            let path = if parent.is_empty() {
+                                name.trim().to_owned()
+                            } else {
+                                format!("{parent}/{}", name.trim())
+                            };
+                            let done = match renaming {
+                                Some(old) => ws.rename_folder(lib, old, &path),
+                                None => ws.new_folder(lib, &path).map(drop),
+                            };
+                            match done {
+                                Ok(()) => close = true,
+                                Err(e) => *error = Some(e),
+                            }
+                        }
+                    }
+                }
+                Prompt::MoveCell { id, folder, error } => {
+                    ui.heading(format!("Move {}", id.cell));
+                    ui.label(RichText::new(format!("To a folder in {}", id.library)).weak());
+                    let folders = ws
+                        .as_ref()
+                        .and_then(|ws| ws.design.library(&id.library))
+                        .map(|l| l.all_folders())
+                        .unwrap_or_default();
+                    ui.horizontal(|ui| {
+                        let r = ui.add(
+                            egui::TextEdit::singleline(folder)
+                                .hint_text("top level")
+                                .desired_width(300.0),
+                        );
+                        if !ui.memory(|m| m.focused().is_some()) {
+                            r.request_focus();
+                        }
+                        if let Some(f) = folder_menu(ui, &folders) {
+                            *folder = f;
+                        }
+                    });
+                    ui.label(
+                        RichText::new("A folder that doesn't exist yet is made.").weak().small(),
+                    );
+                    if let Some(e) = error {
+                        ui.colored_label(ERROR, e.as_str());
+                    }
+                    if enter {
+                        if let Some(ws) = ws {
+                            match ws.move_cell(id, folder) {
+                                Ok(()) => close = true,
+                                Err(e) => *error = Some(e),
+                            }
+                        }
+                    }
+                }
+                Prompt::Shortcuts => {
+                    ui.heading("Keyboard Shortcuts");
+                    ui.add_space(6.0);
+                    egui::Grid::new("shortcuts").num_columns(2).spacing([24.0, 4.0]).show(ui, |ui| {
+                        for (key, what) in SHORTCUTS {
+                            ui.label(RichText::new(*key).monospace().strong());
+                            ui.label(*what);
+                            ui.end_row();
+                        }
+                    });
+                    ui.add_space(6.0);
+                    if ui.button("Close").clicked() || enter {
+                        close = true;
+                    }
+                }
+                Prompt::Discard { then: pending } => {
+                    ui.heading("Unsaved Changes");
+                    ui.label("Save your changes before continuing?");
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Save").clicked() {
+                            save_first = true;
+                            then = Some(pending.clone());
+                        }
+                        if ui.button("Discard").clicked() {
+                            then = Some(pending.clone());
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                    });
+                }
+            }
+        });
+
+        if close || then.is_some() {
+            self.prompt = None;
         }
-        Owner::Wire(i) => format!("wire on net {}", net_name(Item::Wire(i))),
-        Owner::Label(i) => format!("label on net {}", net_name(Item::Label(i))),
-        Owner::Port(i) => format!("port {}", schematic.ports[i].port),
-        Owner::Derived => String::new(),
+        if save_first {
+            self.save();
+            if self.dirty() {
+                return; // Saving failed; the error is shown.
+            }
+        }
+        if let Some(action) = then {
+            if let Some(ws) = &mut self.workspace {
+                ws.dirty = false; // Discarded (or just saved).
+            }
+            self.run(ctx, action);
+        }
     }
 }
 
+struct Keys {
+    open: bool,
+    save: bool,
+    new_cell: bool,
+    undo: bool,
+    redo: bool,
+    reload: bool,
+    op: bool,
+    tran: bool,
+    run: bool,
+    fit: bool,
+    up: bool,
+    back: bool,
+    forward: bool,
+    escape: bool,
+    delete: bool,
+    rotate: bool,
+    mirror: bool,
+    wire: bool,
+    label: bool,
+    port: bool,
+    add: bool,
+    search: bool,
+    flip: bool,
+    view: bool,
+    ground: bool,
+    duplicate: bool,
+    vdd: bool,
+    rect: bool,
+    circle: bool,
+    text: bool,
+}
+
+fn ac_prompt() -> Prompt {
+    Prompt::Ac { start: "1".into(), stop: "1G".into(), per_decade: "20".into(), error: None }
+}
+
+fn new_port_prompt(place: bool) -> Prompt {
+    Prompt::Port { name: String::new(), kind: PortKind::Input, place, error: None }
+}
+
+/// The New Cell dialog, starting in the folder of the project cell being edited.
+fn new_cell_prompt(ws: &Workspace) -> Prompt {
+    let folder = ws
+        .current_def()
+        .filter(|_| ws.current().cell.library == ws.project.name())
+        .map(|d| d.folder.clone())
+        .unwrap_or_default();
+    Prompt::NewCell { name: String::new(), folder, error: None }
+}
+
+/// A menu of a library's folders; returns the one picked (empty for the top level).
+fn folder_menu(ui: &mut egui::Ui, folders: &[String]) -> Option<String> {
+    let mut picked = None;
+    ui.menu_button("…", |ui| {
+        for f in std::iter::once(String::new()).chain(folders.iter().cloned()) {
+            let label = if f.is_empty() { "(top level)".to_owned() } else { format!("{f}/") };
+            if ui.button(label).clicked() {
+                picked = Some(f);
+                ui.close();
+            }
+        }
+    })
+    .response
+    .on_hover_text("Existing folders");
+    picked
+}
+
+/// A section heading in the inspector, with a rule under it.
 fn section(ui: &mut egui::Ui, title: &str) {
-    ui.add_space(10.0);
-    ui.label(RichText::new(title.to_uppercase()).small().strong().weak());
-    ui.add_space(2.0);
+    let p = style::palette(ui);
+    ui.add_space(12.0);
+    ui.label(RichText::new(title).strong().size(13.5).color(p.text));
+    let rect = ui.available_rect_before_wrap();
+    ui.painter().hline(rect.x_range(), rect.top() + 1.0, egui::Stroke::new(1.0, p.border));
+    ui.add_space(6.0);
 }
 
-fn instance_panel(ui: &mut egui::Ui, ws: &Workspace, index: usize) -> Option<InspectorAction> {
-    let schematic = ws.schematic()?;
-    let inst = &schematic.instances[index];
-    let resolved = ws.design.resolve(&inst.cell, &ws.current().cell.library);
-    let mut action = None;
-
-    ui.label(RichText::new(&inst.name).size(22.0).strong().monospace());
-    let Some((id, def)) = resolved else {
-        ui.colored_label(Color32::from_rgb(230, 80, 70), format!("unknown cell {}", inst.cell));
-        return None;
-    };
-    ui.label(RichText::new(id.to_string()).monospace().weak());
-    if !def.cell.description.is_empty() {
-        ui.label(&def.cell.description);
+/// The top of the inspector for a part: its symbol, name, cell and description.
+fn part_card(
+    ui: &mut egui::Ui,
+    design: &circuiter_model::Design,
+    id: &CellId,
+    title: impl FnOnce(&mut egui::Ui),
+    description: &str,
+) {
+    let p = style::palette(ui);
+    ui.horizontal(|ui| {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(64.0, 52.0), egui::Sense::hover());
+        ui.painter().rect(
+            rect,
+            6.0,
+            p.well,
+            egui::Stroke::new(1.0, p.border),
+            egui::StrokeKind::Inside,
+        );
+        if let Some(scene) = circuiter_scene::Scene::symbol_sheet(design, id) {
+            canvas::draw_icon(ui.painter(), rect.shrink(9.0), &scene, p.text);
+        }
+        ui.vertical(|ui| {
+            title(ui);
+            ui.label(RichText::new(id.to_string()).monospace().color(p.weak));
+        });
+    });
+    if !description.is_empty() {
+        ui.add_space(4.0);
+        ui.label(RichText::new(description).color(p.weak));
     }
+}
+
+fn instance_panel(ui: &mut egui::Ui, ws: &mut Workspace, index: usize, field: &mut Field) {
+    let Some(schematic) = ws.schematic() else { return };
+    let Some(inst) = schematic.instances.get(index).cloned() else { return };
+    let editable = ws.editable();
+    let lib = ws.current().cell.library.clone();
+    let Some((id, def)) = ws.design.resolve(&inst.cell, &lib).map(|(id, d)| (id, d.clone())) else {
+        ui.colored_label(ERROR, format!("unknown cell {}", inst.cell));
+        return;
+    };
+    let key_base = format!("{}/{index}", ws.current().cell);
+
+    part_card(
+        ui,
+        &ws.design,
+        &id,
+        |ui| {
+            ui.label(RichText::new(&inst.name).size(20.0).strong());
+        },
+        &def.cell.description,
+    );
+
+    section(ui, "General");
+    style::properties(ui, "general", |ui| {
+        style::name(ui, "Reference");
+        if editable {
+            if let Some(name) = field.edit(ui, &format!("{key_base}/name"), &inst.name, 150.0) {
+                match ws.edit(|_, _, d| crate::edit::rename(d, index, name.trim())) {
+                    Ok(()) => field.error = None,
+                    Err(e) => field.error = Some((format!("{key_base}/name"), e)),
+                }
+            }
+        } else {
+            style::value(ui, &inst.name, 150.0);
+        }
+        ui.end_row();
+        style::name(ui, "Component");
+        style::value(ui, &id.cell, 150.0);
+        ui.end_row();
+        let at = inst.placement.position;
+        style::name(ui, "Position");
+        style::value(ui, &format!("{:.2}, {:.2} mm", at.x.mm(), at.y.mm()), 150.0);
+        ui.end_row();
+        style::name(ui, "Rotation");
+        let degrees = match inst.placement.rotation {
+            circuiter_model::Rotation::R0 => 0,
+            circuiter_model::Rotation::R90 => 90,
+            circuiter_model::Rotation::R180 => 180,
+            circuiter_model::Rotation::R270 => 270,
+        };
+        let mirror = if inst.placement.mirror { ", mirrored" } else { "" };
+        style::value(ui, &format!("{degrees}°{mirror}"), 150.0);
+        ui.end_row();
+    });
 
     section(ui, "Model");
-    let view = ws.design.select_view(def, inst.view);
-    let model = match view {
+    let model = match ws.design.select_view(&def, inst.view) {
         Some(ViewKind::Schematic) => "Schematic (hierarchical)",
         Some(ViewKind::Spice) => "SPICE model",
         None if def.cell.global_net.is_some() => "Global net",
         None => "No simulation view",
     };
     ui.label(model);
-    if ws.scene.descendable[index] && ui.button("Open schematic  ⏎").clicked() {
-        action = Some(InspectorAction::Descend(index));
+    if ws.scene.descendable.get(index) == Some(&true) && ui.button("Open schematic").clicked() {
+        ws.descend(index);
+        return;
     }
 
     if !def.cell.params.is_empty() {
         section(ui, "Parameters");
-        egui::Grid::new("params").num_columns(2).striped(true).spacing([12.0, 4.0]).show(
+        let mut change: Option<(String, Option<String>)> = None;
+        egui::Grid::new("params").num_columns(3).striped(true).spacing([10.0, 4.0]).show(
             ui,
             |ui| {
                 for p in &def.cell.params {
                     let overridden = inst.params.contains_key(&p.name);
                     ui.label(RichText::new(&p.name).monospace()).on_hover_text(&p.description);
-                    let value = RichText::new(param_display(inst, def, &p.name)).monospace();
-                    ui.label(if overridden { value.strong() } else { value.weak() })
-                        .on_hover_text(if overridden { "Set on this instance" } else { "Default" });
+                    let raw = inst
+                        .params
+                        .get(&p.name)
+                        .or(p.default.as_ref())
+                        .cloned()
+                        .unwrap_or_default();
+                    if editable {
+                        let key = format!("{key_base}/param/{}", p.name);
+                        if let Some(text) = field.edit(ui, &key, &raw, 110.0) {
+                            let text = text.trim().to_owned();
+                            if text.is_empty() {
+                                change = Some((p.name.clone(), None));
+                                field.error = None;
+                            } else {
+                                match p.kind.validate(&text) {
+                                    Ok(()) => {
+                                        change = Some((p.name.clone(), Some(text)));
+                                        field.error = None;
+                                    }
+                                    Err(e) => field.error = Some((key, e)),
+                                }
+                            }
+                        }
+                    } else {
+                        ui.label(RichText::new(&raw).monospace());
+                    }
+                    let shown = RichText::new(param_display(&inst, &def, &p.name)).monospace();
+                    ui.horizontal(|ui| {
+                        ui.label(if overridden { shown.strong() } else { shown.weak() });
+                        if editable
+                            && overridden
+                            && ui.small_button("↺").on_hover_text("Reset to default").clicked()
+                        {
+                            change = Some((p.name.clone(), None));
+                        }
+                    });
                     ui.end_row();
                 }
             },
         );
+        if let Some((name, value)) = change {
+            let _ = ws.edit(|_, _, d| {
+                crate::edit::set_param(d, index, &name, value);
+                Ok(())
+            });
+        }
+    }
+
+    if let Some(sim) = ws.fresh_sim() {
+        let path = match ws.sheet_path() {
+            p if p.is_empty() => inst.name.clone(),
+            p => format!("{p}.{}", inst.name),
+        };
+        if let Some((currents, power)) = sim.element_op(&path) {
+            section(ui, "Operating point");
+            egui::Grid::new("op").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
+                for (port, i) in &currents {
+                    ui.label(RichText::new(format!("I({port})")).monospace())
+                        .on_hover_text("Current flowing into this terminal");
+                    ui.label(RichText::new(show(*i, "A")).monospace());
+                    ui.end_row();
+                }
+                ui.label(RichText::new("Power").monospace())
+                    .on_hover_text("Absorbed; negative when the part delivers power");
+                ui.label(RichText::new(show(power, "W")).monospace().color(ACCENT));
+                ui.end_row();
+            });
+        } else if let Some(power) = sim.power_under(&path) {
+            section(ui, "Operating point");
+            ui.label(RichText::new(format!("Total power  {}", show(power, "W"))).monospace());
+        }
+        if let Some(a) = sim.assessments.iter().find(|a| a.path == path) {
+            ui.add_space(4.0);
+            let when = match a.time_to_failure {
+                Some(0.0) => " at once".to_owned(),
+                Some(t) => format!(" in about {}", show(t, "s")),
+                None => String::new(),
+            };
+            ui.colored_label(WARNING, format!("⚠ Would fail{when}: {}", a.reason));
+        }
+    }
+    if let Some(sim) = ws.fresh_sim() {
+        let path = match ws.sheet_path() {
+            p if p.is_empty() => inst.name.clone(),
+            p => format!("{p}.{}", inst.name),
+        };
+        if let Some(part) = sim.monitor.as_ref().and_then(|m| m.part(&path)) {
+            section(ui, "Heat");
+            egui::Grid::new("heat").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
+                ui.label("Temperature");
+                ui.label(RichText::new(format!("{:.1} °C", part.temperature)).monospace());
+                ui.end_row();
+                ui.label("Peak");
+                ui.label(RichText::new(format!("{:.1} °C", part.peak)).monospace());
+                ui.end_row();
+                if let Some(max) = part.max_temperature() {
+                    ui.label("Destroyed at");
+                    ui.label(RichText::new(format!("{max:.0} °C")).monospace());
+                    ui.end_row();
+                }
+                ui.label(if part.failed { "Power when it failed" } else { "Power at the end" });
+                ui.label(RichText::new(show(part.power, "W")).monospace());
+                ui.end_row();
+            });
+        }
+        if let Some(e) = sim.failure(&path) {
+            ui.add_space(4.0);
+            ui.colored_label(ERROR, format!("✖ {}", e.describe()));
+        }
     }
 
     let conn = &ws.scene.connectivity;
-    let pins: Vec<(usize, &str)> = conn
+    let pins: Vec<(usize, String)> = conn
         .pins
         .iter()
         .enumerate()
         .filter(|(_, p)| p.instance == index)
-        .map(|(i, p)| (i, p.port.as_str()))
+        .map(|(i, p)| (i, p.port.clone()))
         .collect();
     if !pins.is_empty() {
         section(ui, "Connections");
+        let mut go_to_net = None;
         egui::Grid::new("pins").num_columns(2).striped(true).spacing([12.0, 4.0]).show(ui, |ui| {
-            for (pin, port) in pins {
+            for (pin, port) in &pins {
                 ui.label(RichText::new(port).monospace());
-                match conn.net_of(Item::Pin(pin)) {
-                    Some(n) if conn.dangling_pins.contains(&pin) => {
-                        let _ = n;
-                        ui.colored_label(Color32::from_rgb(230, 90, 70), "not connected");
+                match conn.net_of(Item::Pin(*pin)) {
+                    Some(_) if conn.dangling_pins.contains(pin) => {
+                        ui.colored_label(ERROR, "not connected");
                     }
                     Some(n) => {
                         if ui.link(RichText::new(&conn.nets[n].name).monospace()).clicked() {
-                            action = Some(InspectorAction::SelectNet(n));
+                            go_to_net = Some(n);
                         }
                     }
                     None => {
@@ -695,15 +2206,18 @@ fn instance_panel(ui: &mut egui::Ui, ws: &Workspace, index: usize) -> Option<Ins
                 ui.end_row();
             }
         });
+        if let Some(n) = go_to_net {
+            ws.select_net(n);
+        }
     }
-    action
 }
 
-fn net_panel(ui: &mut egui::Ui, ws: &Workspace, net: usize) -> Option<InspectorAction> {
-    let schematic = ws.schematic()?;
+fn net_panel(ui: &mut egui::Ui, ws: &mut Workspace, net: usize) {
+    if ws.schematic().is_none() {
+        return;
+    }
     let conn = &ws.scene.connectivity;
-    let n = &conn.nets[net];
-    let mut action = None;
+    let Some(n) = conn.nets.get(net) else { return };
     ui.label(RichText::new("Net").weak());
     ui.label(RichText::new(&n.name).size(22.0).strong().monospace());
     let source = match n.source {
@@ -714,12 +2228,32 @@ fn net_panel(ui: &mut egui::Ui, ws: &Workspace, net: usize) -> Option<InspectorA
     };
     ui.label(RichText::new(source).weak());
     if n.names.len() > 1 {
-        ui.colored_label(
-            Color32::from_rgb(230, 170, 60),
-            format!("⚠ conflicting names: {}", n.names.join(", ")),
-        );
+        ui.colored_label(WARNING, format!("⚠ conflicting names: {}", n.names.join(", ")));
     }
+    let mut toggle = false;
+    if let (Some(sim), Some(flat)) = (ws.fresh_sim(), ws.flat_net(net)) {
+        section(ui, "Simulation");
+        let flat_name = &sim.netlist.nets[flat].name;
+        if *flat_name != n.name {
+            ui.label(RichText::new(format!("Simulated as {flat_name}")).weak());
+        }
+        if let Some(v) = sim.voltage(flat) {
+            ui.label(RichText::new(show(v, "V")).size(18.0).monospace().color(ACCENT));
+        }
+        if sim.waveform(flat).is_some() || sim.response(flat).is_some() {
+            let plotted = sim.probes.contains(&flat);
+            let label = if plotted { "Remove from Plot" } else { "Add to Plot" };
+            toggle = ui.button(label).clicked();
+        }
+    }
+    if toggle {
+        ws.toggle_probe(net);
+    }
+    let Some(schematic) = ws.schematic() else { return };
+    let conn = &ws.scene.connectivity;
+    let Some(n) = conn.nets.get(net) else { return };
     section(ui, "Connected pins");
+    let mut select = None;
     for item in &n.items {
         match *item {
             Item::Pin(p) => {
@@ -727,7 +2261,7 @@ fn net_panel(ui: &mut egui::Ui, ws: &Workspace, net: usize) -> Option<InspectorA
                 let inst = &schematic.instances[pin.instance];
                 let text = RichText::new(format!("{}.{}", inst.name, pin.port)).monospace();
                 if ui.link(text).on_hover_text(inst.cell.to_string()).clicked() {
-                    action = Some(InspectorAction::SelectInstance(pin.instance));
+                    select = Some(pin.instance);
                 }
             }
             Item::Port(p) => {
@@ -736,25 +2270,236 @@ fn net_panel(ui: &mut egui::Ui, ws: &Workspace, net: usize) -> Option<InspectorA
             _ => {}
         }
     }
-    action
+    if let Some(i) = select {
+        ws.select_only(Some(Owner::Instance(i)));
+    }
 }
 
-fn cell_panel(ui: &mut egui::Ui, ws: &Workspace) {
-    let Some(def) = ws.current_def() else { return };
-    let id = &ws.current().cell;
+/// Deferred edits, collected while drawing a panel and applied after it.
+type CellChange = Box<dyn FnOnce(&mut circuiter_model::CellDef)>;
+type PinChange = Box<dyn FnOnce(&mut circuiter_model::symbol::SymbolPin)>;
+type GraphicChange = Box<dyn FnOnce(&mut Graphic)>;
+
+/// The cell itself: its interface (editable unless it's a library part), symbol status,
+/// contents and problems. Shown when nothing is selected.
+fn cell_panel(
+    ui: &mut egui::Ui,
+    ws: &mut Workspace,
+    field: &mut Field,
+    prompt: &mut Option<Prompt>,
+) {
+    let Some(def) = ws.current_def().cloned() else { return };
+    let id = ws.current().cell.clone();
+    let editable = ws.editable();
+    let key = |k: &str| format!("{id}/{k}");
+    let commit =
+        |ws: &mut Workspace,
+         field: &mut Field,
+         k: String,
+         f: &dyn Fn(&mut circuiter_model::CellDef) -> Result<(), String>| {
+            match ws.edit(|_, _, d| f(d)) {
+                Ok(()) => field.error = None,
+                Err(e) => field.error = Some((k, e)),
+            }
+        };
+
     ui.label(RichText::new(&def.name).size(22.0).strong().monospace());
-    ui.label(RichText::new(id.to_string()).monospace().weak());
-    if !def.cell.description.is_empty() {
+    let place =
+        if def.folder.is_empty() { id.to_string() } else { format!("{id}  ·  {}/", def.folder) };
+    ui.label(RichText::new(place).monospace().weak());
+    if editable {
+        egui::Grid::new("cell-meta").num_columns(2).spacing([10.0, 4.0]).show(ui, |ui| {
+            ui.label("Folder")
+                .on_hover_text("Where the cell is listed and stored: gates, analog/filters…");
+            let folders =
+                ws.design.library(&id.library).map(|l| l.all_folders()).unwrap_or_default();
+            let chosen = ui
+                .horizontal(|ui| {
+                    let typed =
+                        field.edit_hinted(ui, &key("folder"), &def.folder, 160.0, "top level");
+                    let picked = folder_menu(ui, &folders);
+                    typed.or(picked)
+                })
+                .inner;
+            if let Some(folder) = chosen {
+                match ws.move_cell(&id, &folder) {
+                    Ok(()) => field.error = None,
+                    Err(e) => field.error = Some((key("folder"), e)),
+                }
+            }
+            ui.end_row();
+            ui.label("Description");
+            if let Some(text) = field.edit(ui, &key("description"), &def.cell.description, 190.0) {
+                commit(ws, field, key("description"), &|d| {
+                    interface::set_description(d, &text);
+                    Ok(())
+                });
+            }
+            ui.end_row();
+            ui.label("Prefix").on_hover_text("Reference designators: U1, U2…");
+            if let Some(text) = field.edit(ui, &key("prefix"), &def.cell.prefix, 60.0) {
+                commit(ws, field, key("prefix"), &|d| interface::set_prefix(d, &text));
+            }
+            ui.end_row();
+        });
+    } else if !def.cell.description.is_empty() {
         ui.label(&def.cell.description);
     }
 
-    if !def.cell.ports.is_empty() {
+    // Ports.
+    if editable || !def.cell.ports.is_empty() {
         section(ui, "Ports");
-        egui::Grid::new("ports").num_columns(2).striped(true).spacing([12.0, 4.0]).show(ui, |ui| {
-            for p in &def.cell.ports {
+    }
+    let n_ports = def.cell.ports.len();
+    let mut action: Option<CellChange> = None;
+    egui::Grid::new("ports").num_columns(3).striped(true).spacing([8.0, 4.0]).show(ui, |ui| {
+        for (i, p) in def.cell.ports.iter().enumerate() {
+            if !editable {
                 ui.label(RichText::new(&p.name).monospace());
-                ui.label(RichText::new(format!("{:?}", p.kind)).weak());
+                ui.label(RichText::new(kind_label(p.kind)).weak());
                 ui.end_row();
+                continue;
+            }
+            let k = key(&format!("port/{}", p.name));
+            if let Some(new) = field.edit(ui, &k, &p.name, 80.0) {
+                let old = p.name.clone();
+                commit(ws, field, k, &|d| interface::rename_port(d, &old, new.trim()));
+            }
+            let mut kind = p.kind;
+            egui::ComboBox::from_id_salt(("port-kind", i))
+                .selected_text(kind_label(kind))
+                .width(100.0)
+                .show_ui(ui, |ui| {
+                    for k in PORT_KINDS {
+                        ui.selectable_value(&mut kind, k, kind_label(k));
+                    }
+                });
+            if kind != p.kind {
+                let name = p.name.clone();
+                action = Some(Box::new(move |d| interface::set_port_kind(d, &name, kind)));
+            }
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(i > 0, egui::Button::new("⏶").small())
+                    .on_hover_text("Move up")
+                    .clicked()
+                {
+                    action = Some(Box::new(move |d| interface::move_port(d, i, true)));
+                }
+                if ui
+                    .add_enabled(i + 1 < n_ports, egui::Button::new("⏷").small())
+                    .on_hover_text("Move down")
+                    .clicked()
+                {
+                    action = Some(Box::new(move |d| interface::move_port(d, i, false)));
+                }
+                if ui.small_button("✖").on_hover_text("Remove port").clicked() {
+                    let name = p.name.clone();
+                    action = Some(Box::new(move |d| interface::remove_port(d, &name)));
+                }
+            });
+            ui.end_row();
+        }
+    });
+    if editable && ui.small_button("+ Add Port").clicked() {
+        *prompt = Some(new_port_prompt(ws.mode == Mode::Schematic && ws.has_schematic()));
+    }
+
+    // Parameters.
+    if editable || !def.cell.params.is_empty() {
+        section(ui, "Parameters");
+    }
+    egui::Grid::new("cell-params").num_columns(3).striped(true).spacing([8.0, 4.0]).show(
+        ui,
+        |ui| {
+            for p in &def.cell.params {
+                ui.label(RichText::new(&p.name).monospace())
+                    .on_hover_text(param_kind_label(&p.kind));
+                let current = p.default.clone().unwrap_or_default();
+                if editable {
+                    let k = key(&format!("param/{}", p.name));
+                    if let Some(text) = field.edit(ui, &k, &current, 90.0) {
+                        let name = p.name.clone();
+                        let value = Some(text.trim().to_owned()).filter(|t| !t.is_empty());
+                        commit(ws, field, k, &|d| {
+                            interface::set_param_default(d, &name, value.clone())
+                        });
+                    }
+                    ui.horizontal(|ui| {
+                        if p.default.is_none() {
+                            ui.label(RichText::new("required").weak().small());
+                        }
+                        if ui.small_button("✖").on_hover_text("Remove parameter").clicked() {
+                            let name = p.name.clone();
+                            action = Some(Box::new(move |d| interface::remove_param(d, &name)));
+                        }
+                    });
+                } else {
+                    ui.label(RichText::new(p.default.as_deref().unwrap_or("required")).monospace());
+                    ui.label(RichText::new(param_kind_label(&p.kind)).weak().small());
+                }
+                ui.end_row();
+            }
+        },
+    );
+    if editable && ui.small_button("+ Add Parameter").clicked() {
+        *prompt = Some(Prompt::AddParam {
+            name: String::new(),
+            kind: ParamChoice::Real,
+            unit: String::new(),
+            options: String::new(),
+            default: String::new(),
+            error: None,
+        });
+    }
+    if let Some(f) = action {
+        let _ = ws.edit(|_, _, d| {
+            f(d);
+            Ok(())
+        });
+    }
+
+    // Symbol.
+    if def.cell.global_net.is_none() {
+        section(ui, "Symbol");
+        let unpinned = symbol_edit::unpinned_ports(&def);
+        let status = match &def.symbol {
+            None if def.cell.ports.is_empty() => {
+                "None yet. Add a port and one is generated, so the cell can be placed."
+            }
+            None => "None, so the cell can't be placed on other sheets.",
+            Some(_) if builder::is_generated(&def) => "Generated from the ports; follows them.",
+            Some(_) => "Custom drawing.",
+        };
+        ui.label(RichText::new(status).weak());
+        if editable && !unpinned.is_empty() && def.symbol.is_some() {
+            ui.colored_label(WARNING, format!("No pin yet: {}", unpinned.join(", ")));
+        }
+        ui.horizontal(|ui| {
+            if ws.mode == Mode::Schematic && ui.button("Edit Symbol").on_hover_text("V").clicked() {
+                ws.set_mode(Mode::Symbol);
+            }
+            if editable
+                && !unpinned.is_empty()
+                && def.symbol.is_some()
+                && ui.button("Place Pins").clicked()
+            {
+                if let Err(e) = ws.start_pin(None) {
+                    field.error = Some((key("symbol"), e));
+                }
+            }
+            let generated = builder::is_generated(&def);
+            if editable && !def.cell.ports.is_empty() && !generated {
+                let label = if def.symbol.is_some() { "Regenerate" } else { "Generate" };
+                let r = ui.button(label).on_hover_text(
+                    "Replace the symbol with a box generated from the ports (undo with Ctrl+Z)",
+                );
+                if r.clicked() {
+                    let _ = ws.edit(|_, _, d| {
+                        symbol_edit::generate(d);
+                        Ok(())
+                    });
+                }
             }
         });
     }
@@ -768,33 +2513,305 @@ fn cell_panel(ui: &mut egui::Ui, ws: &Workspace) {
             conn.nets.len(),
             conn.junctions.len()
         ));
-    } else if !def.cell.params.is_empty() {
-        section(ui, "Parameters");
-        egui::Grid::new("cell-params").num_columns(2).striped(true).spacing([12.0, 4.0]).show(
-            ui,
-            |ui| {
-                for p in &def.cell.params {
-                    ui.label(RichText::new(&p.name).monospace()).on_hover_text(&p.description);
-                    ui.label(RichText::new(p.default.as_deref().unwrap_or("required")).monospace());
-                    ui.end_row();
-                }
-            },
-        );
+        if schematic.instances.is_empty() && ws.editable() {
+            ui.add_space(6.0);
+            ui.label(RichText::new("Press A to add a part, W to draw wires.").weak());
+        }
+    }
+
+    if ws.mode == Mode::Schematic && ws.has_schematic() {
+        section(ui, "Simulate");
+        let running = ws.sim.as_ref().is_some_and(|s| s.job.is_some());
+        let ran = ws.sim.as_ref().is_some_and(|s| s.results.is_some());
+        if !running && ui.button(RichText::new("▶ Run").strong().color(ACCENT)).clicked() {
+            let a = ws.run_analysis();
+            ws.simulate(a);
+        }
+        let (tstop, _) = ws.default_tran();
+        ui.label(format!(
+            "Run (Ctrl+R) switches {} on and watches it for {}: the waveforms appear \
+             below the sheet, each wire shows its voltage, and parts that overheat are marked.",
+            ws.sim_top(),
+            show(tstop, "s")
+        ));
+        if !ran {
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(
+                    "Analyses has more: Operating Point (steady-state voltages, currents and \
+                     power), Transient (a duration you choose) and AC Sweep (gain and phase \
+                     over frequency).",
+                )
+                .weak(),
+            );
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(
+                    "A circuit needs a source (std:vdc, std:vsine…) and a ground (std:gnd). \
+                     Logic gates draw their power from VDD: connect a source to a VDD symbol \
+                     (std:vdd).",
+                )
+                .weak(),
+            );
+        } else {
+            ui.label(
+                RichText::new("Select a wire to see its voltage; Add to Plot graphs it.").weak(),
+            );
+        }
     }
 
     section(ui, "Problems");
     let problems = ws.problems();
     if problems.is_empty() {
-        ui.label(RichText::new("✔ None").color(Color32::from_rgb(90, 190, 120)));
+        ui.label(RichText::new("✔ None").color(OK));
     }
     for (severity, message) in problems {
         let (icon, c) = match severity {
-            Severity::Error => ("✖", Color32::from_rgb(230, 80, 70)),
-            Severity::Warning => ("⚠", Color32::from_rgb(230, 170, 60)),
+            Severity::Error => ("✖", ERROR),
+            Severity::Warning => ("⚠", WARNING),
         };
         ui.horizontal_wrapped(|ui| {
             ui.colored_label(c, icon);
             ui.label(message);
+        });
+    }
+}
+
+/// A symbol pin: which port it is, the side it's on, its length and name display.
+fn pin_panel(ui: &mut egui::Ui, ws: &mut Workspace, index: usize, field: &mut Field) {
+    let Some(pin) = ws.symbol().and_then(|s| s.pins.get(index)).cloned() else { return };
+    let kind = ws.current_def().and_then(|d| d.cell.port(&pin.port)).map(|p| p.kind);
+    let editable = ws.editable();
+    ui.label(RichText::new("Pin").weak());
+    ui.label(RichText::new(&pin.port).size(22.0).strong().monospace());
+    if let Some(kind) = kind {
+        ui.label(RichText::new(kind_label(kind)).weak());
+    }
+    section(ui, "Placement");
+    let key = format!("{}/pin/{index}", ws.current().cell);
+    let mut change: Option<PinChange> = None;
+    egui::Grid::new("pin").num_columns(2).spacing([10.0, 4.0]).show(ui, |ui| {
+        ui.label("Side");
+        ui.add_enabled_ui(editable, |ui| {
+            let mut direction = pin.direction;
+            egui::ComboBox::from_id_salt("pin-side").selected_text(side_label(direction)).show_ui(
+                ui,
+                |ui| {
+                    for d in [
+                        PinDirection::Right,
+                        PinDirection::Left,
+                        PinDirection::Down,
+                        PinDirection::Up,
+                    ] {
+                        ui.selectable_value(&mut direction, d, side_label(d));
+                    }
+                },
+            );
+            if direction != pin.direction {
+                change = Some(Box::new(move |p| p.direction = direction));
+            }
+        });
+        ui.end_row();
+        ui.label("Connects at");
+        ui.label(RichText::new(format!("{} mm", pin.at)).monospace());
+        ui.end_row();
+        ui.label("Length");
+        if editable {
+            let k = format!("{key}/length");
+            if let Some(text) = field.edit(ui, &k, &format!("{}", pin.length.mm()), 70.0) {
+                match parse_length(&text) {
+                    Ok(len) => {
+                        field.error = None;
+                        change = Some(Box::new(move |p| p.length = len));
+                    }
+                    Err(e) => field.error = Some((k, e)),
+                }
+            }
+        } else {
+            ui.label(format!("{} mm", pin.length.mm()));
+        }
+        ui.end_row();
+        ui.label("");
+        let mut show = pin.show_name;
+        if ui.add_enabled(editable, egui::Checkbox::new(&mut show, "Show name")).changed() {
+            change = Some(Box::new(move |p| p.show_name = show));
+        }
+        ui.end_row();
+    });
+    if let Some(f) = change {
+        let _ = ws.edit(|_, _, d| {
+            let pin = d.symbol.as_mut().and_then(|s| s.pins.get_mut(index)).ok_or("no pin")?;
+            f(pin);
+            Ok(())
+        });
+    }
+}
+
+/// A symbol drawing primitive: fill, size and text.
+fn graphic_panel(ui: &mut egui::Ui, ws: &mut Workspace, index: usize, field: &mut Field) {
+    let Some(graphic) = ws.symbol().and_then(|s| s.graphics.get(index)).cloned() else { return };
+    let editable = ws.editable();
+    let key = format!("{}/graphic/{index}", ws.current().cell);
+    ui.label(RichText::new("Drawing").weak());
+    let name = graphic_name(&graphic);
+    let mut title = name.to_owned();
+    title[..1].make_ascii_uppercase();
+    ui.label(RichText::new(title).size(22.0).strong());
+    section(ui, "Properties");
+
+    let mut change: Option<GraphicChange> = None;
+    let length_row = |ui: &mut egui::Ui,
+                      field: &mut Field,
+                      label: &str,
+                      k: &str,
+                      value: Length,
+                      set: fn(&mut Graphic, Length)|
+     -> Option<GraphicChange> {
+        ui.label(label);
+        let k = format!("{key}/{k}");
+        let mut out: Option<GraphicChange> = None;
+        if !editable {
+            ui.label(format!("{} mm", value.mm()));
+        } else if let Some(text) = field.edit(ui, &k, &format!("{}", value.mm()), 70.0) {
+            match parse_length(&text) {
+                Ok(len) => {
+                    field.error = None;
+                    out = Some(Box::new(move |g| set(g, len)));
+                }
+                Err(e) => field.error = Some((k, e)),
+            }
+        }
+        ui.end_row();
+        out
+    };
+    egui::Grid::new("graphic").num_columns(2).spacing([10.0, 4.0]).show(ui, |ui| {
+        let closed = match &graphic {
+            Graphic::Polyline { points, .. } => points.len() > 2 && points.first() == points.last(),
+            Graphic::Rect { .. } | Graphic::Circle { .. } => true,
+            Graphic::Arc { .. } | Graphic::Text { .. } => false,
+        };
+        match &graphic {
+            Graphic::Polyline { points, .. } => {
+                ui.label("Points");
+                ui.label(points.len().to_string());
+                ui.end_row();
+            }
+            Graphic::Circle { radius, .. } => {
+                change =
+                    change.take().or(length_row(ui, field, "Radius", "radius", *radius, |g, r| {
+                        if let Graphic::Circle { radius, .. } = g {
+                            *radius = r;
+                        }
+                    }));
+            }
+            Graphic::Arc { radius, start, end, .. } => {
+                change =
+                    change.take().or(length_row(ui, field, "Radius", "radius", *radius, |g, r| {
+                        if let Graphic::Arc { radius, .. } = g {
+                            *radius = r;
+                        }
+                    }));
+                for (label, value, is_start) in [("Start °", *start, true), ("End °", *end, false)]
+                {
+                    ui.label(label);
+                    let k = format!("{key}/{label}");
+                    if !editable {
+                        ui.label(value.to_string());
+                    } else if let Some(text) = field.edit(ui, &k, &value.to_string(), 70.0) {
+                        match parse_degrees(&text) {
+                            Ok(a) => {
+                                field.error = None;
+                                change = Some(Box::new(move |g| {
+                                    if let Graphic::Arc { start, end, .. } = g {
+                                        *(if is_start { start } else { end }) = a;
+                                    }
+                                }));
+                            }
+                            Err(e) => field.error = Some((k, e)),
+                        }
+                    }
+                    ui.end_row();
+                }
+            }
+            Graphic::Text { text, size, anchor, .. } => {
+                ui.label("Text");
+                let k = format!("{key}/text");
+                if !editable {
+                    ui.label(RichText::new(text).monospace());
+                } else if let Some(new) = field.edit(ui, &k, text, 160.0) {
+                    if new.trim().is_empty() {
+                        field.error = Some((k, "text can't be empty; delete it instead".into()));
+                    } else {
+                        field.error = None;
+                        change = Some(Box::new(move |g| {
+                            if let Graphic::Text { text, .. } = g {
+                                *text = new;
+                            }
+                        }));
+                    }
+                }
+                ui.end_row();
+                change = change.take().or(length_row(ui, field, "Size", "size", *size, |g, s| {
+                    if let Graphic::Text { size, .. } = g {
+                        *size = s;
+                    }
+                }));
+                ui.label("Align");
+                let mut a = *anchor;
+                ui.add_enabled_ui(editable, |ui| {
+                    egui::ComboBox::from_id_salt("anchor").selected_text(format!("{a:?}")).show_ui(
+                        ui,
+                        |ui| {
+                            for x in [Anchor::Left, Anchor::Center, Anchor::Right] {
+                                ui.selectable_value(&mut a, x, format!("{x:?}"));
+                            }
+                        },
+                    );
+                });
+                if a != *anchor {
+                    change = Some(Box::new(move |g| {
+                        if let Graphic::Text { anchor, .. } = g {
+                            *anchor = a;
+                        }
+                    }));
+                }
+                ui.end_row();
+            }
+            Graphic::Rect { .. } => {}
+        }
+        if closed {
+            let filled = match &graphic {
+                Graphic::Polyline { fill, .. }
+                | Graphic::Rect { fill, .. }
+                | Graphic::Circle { fill, .. } => *fill,
+                _ => false,
+            };
+            let mut f = filled;
+            ui.label("");
+            if ui.add_enabled(editable, egui::Checkbox::new(&mut f, "Filled")).changed() {
+                change = Some(Box::new(move |g| match g {
+                    Graphic::Polyline { fill, .. }
+                    | Graphic::Rect { fill, .. }
+                    | Graphic::Circle { fill, .. } => *fill = f,
+                    _ => {}
+                }));
+            }
+            ui.end_row();
+        }
+    });
+    if let Graphic::Text { .. } = graphic {
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new("${name} shows the reference, ${param.X} a parameter's value.")
+                .weak()
+                .small(),
+        );
+    }
+    if let Some(f) = change {
+        let _ = ws.edit(|_, _, d| {
+            let g = d.symbol.as_mut().and_then(|s| s.graphics.get_mut(index)).ok_or("gone")?;
+            f(g);
+            Ok(())
         });
     }
 }
@@ -804,144 +2821,176 @@ impl eframe::App for CircuiterApp {
         let ctx = ui.ctx().clone();
         self.apply_theme(&ctx);
         self.handle_screenshot(&ctx);
+        self.handle_close_request(&ctx);
+        self.prompts(&ctx);
         self.shortcuts(&ctx);
+        self.update_title(&ctx);
+        if let Some(ws) = &self.workspace {
+            // Project cells' symbols change as they are edited; std's never do.
+            if ws.revision != self.icons_revision {
+                self.icons.retain(|id, _| id.library == circuiter_model::STD_LIBRARY);
+                self.icons_revision = ws.revision;
+            }
+        }
 
-        egui::Panel::top("menu").show(ui, |ui| self.menu_bar(ui));
-        egui::Panel::top("toolbar").show(ui, |ui| {
-            ui.add_space(2.0);
-            self.toolbar(ui);
-            ui.add_space(2.0);
-        });
-        egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
+        let p = style::palette_for(self.theme.dark);
+        let bar = |fill| egui::Frame::new().fill(fill).inner_margin(egui::Margin::symmetric(0, 0));
+        egui::Panel::top("titlebar").frame(bar(p.base)).show(ui, |ui| self.title_bar(ui));
+        egui::Panel::top("toolbar").frame(bar(p.raised)).show(ui, |ui| self.toolbar(ui));
+        egui::Panel::bottom("status")
+            .frame(egui::Frame::new().fill(p.raised).inner_margin(egui::Margin::symmetric(10, 3)))
+            .show(ui, |ui| self.status_bar(ui));
+        let running =
+            self.workspace.as_mut().and_then(|ws| ws.sim.as_mut()).is_some_and(|s| s.poll());
+        if running {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
         if self.workspace.is_some() {
-            egui::Panel::left("browser")
-                .resizable(true)
-                .default_size(250.0)
-                .show(ui, |ui| self.browser(ui));
-            egui::Panel::right("inspector")
-                .resizable(true)
-                .default_size(300.0)
-                .show(ui, |ui| self.inspector(ui));
+            let panel = egui::Frame::new().fill(p.panel);
+            egui::Panel::left("explorer").resizable(true).default_size(270.0).frame(panel).show(
+                ui,
+                |ui| {
+                    // Panels keep their size whatever their contents.
+                    ui.expand_to_include_rect(ui.max_rect());
+                    self.explorer(ui)
+                },
+            );
+            egui::Panel::right("inspector").resizable(true).default_size(360.0).frame(panel).show(
+                ui,
+                |ui| {
+                    ui.expand_to_include_rect(ui.max_rect());
+                    self.right_panel(ui)
+                },
+            );
+            if self.show_bottom {
+                egui::Panel::bottom("results")
+                    .resizable(true)
+                    .default_size(280.0)
+                    .frame(panel)
+                    .show(ui, |ui| {
+                        ui.expand_to_include_rect(ui.max_rect());
+                        self.bottom_panel(ui)
+                    });
+            }
         }
         egui::CentralPanel::no_frame().show(ui, |ui| {
-            if let Some(err) = &self.error {
-                ui.colored_label(Color32::from_rgb(230, 80, 70), err);
+            if self.workspace.is_some() {
+                egui::Panel::top("doc-tabs")
+                    .frame(egui::Frame::new().fill(p.raised).inner_margin(egui::Margin {
+                        left: 6,
+                        right: 6,
+                        top: 4,
+                        bottom: 0,
+                    }))
+                    .show(ui, |ui| self.doc_tabs(ui));
+                egui::Panel::top("canvas-header")
+                    .frame(egui::Frame::new().fill(p.panel))
+                    .show(ui, |ui| self.canvas_header(ui));
             }
             let theme = self.theme;
             let show_grid = self.show_grid;
+            let netlist = self.show_netlist
+                && self.workspace.as_ref().is_some_and(|ws| ws.has_schematic());
             match &mut self.workspace {
                 None => {
                     self.cursor = None;
                     self.hovered = None;
-                    self.welcome(ui);
+                    egui::Frame::new().fill(p.base).show(ui, |ui| {
+                        ui.set_min_size(ui.available_size());
+                        self.welcome(ui);
+                    });
+                }
+                Some(_) if netlist => {
+                    self.cursor = None;
+                    self.hovered = None;
+                    self.netlist_view(ui);
                 }
                 Some(ws) => {
-                    let highlight = Highlight { selection: ws.selection, net: ws.net };
+                    self.show_netlist = false;
+                    if ws.editable() && ws.mode == Mode::Schematic {
+                        egui::Panel::left("parts-column")
+                            .resizable(false)
+                            .exact_size(84.0)
+                            .frame(egui::Frame::new().fill(p.panel).inner_margin(egui::Margin::symmetric(4, 0)))
+                            .show(ui, |ui| self.parts_column(ui));
+                    }
+                    let Some(ws) = &mut self.workspace else { return };
+                    let canvas_rect = ui.available_rect_before_wrap();
+                    let overlay = ws.overlay(self.cursor);
+                    let selection = ws.selection.clone();
+                    let highlight = Highlight { selection: Some(&selection), net: ws.net };
                     let level = ws.levels.last_mut().expect("level");
-                    let out =
-                        canvas::show(ui, &ws.scene, &mut level.camera, theme, highlight, show_grid);
+                    let out = canvas::show(
+                        ui,
+                        &ws.scene,
+                        &mut level.camera,
+                        &mut self.canvas,
+                        theme,
+                        highlight,
+                        &overlay,
+                        show_grid,
+                    );
                     self.cursor = out.cursor;
                     self.hovered = out.hovered;
-                    for event in out.events {
-                        match event {
-                            CanvasEvent::Select(owner) => ws.select(owner),
-                            CanvasEvent::Descend(i) => ws.descend(i),
+                    ws.pick_tolerance = out.tolerance;
+                    let ctx = ui.ctx().clone();
+                    let (cursor, tolerance) = (out.cursor, out.tolerance);
+                    let gestures = out.gestures;
+                    self.drop_part(&ctx, cursor, tolerance);
+                    let Some(ws) = &mut self.workspace else { return };
+                    if ws.mode == Mode::Symbol && ws.symbol().is_none() && ws.tool == Tool::Select {
+                        let text = if ws.editable() {
+                            "No symbol yet.\nAdd a port in the inspector and one is generated,\nor draw one with the tools above."
+                        } else {
+                            "This cell has no symbol."
+                        };
+                        ui.painter().text(
+                            canvas_rect.center() + egui::vec2(0.0, 80.0),
+                            egui::Align2::CENTER_TOP,
+                            text,
+                            egui::FontId::proportional(15.0),
+                            canvas::color(theme.pin_name),
+                        );
+                    }
+                    for g in gestures {
+                        if let Some(err) = ws.gesture(g, tolerance) {
+                            self.error = Some(err);
                         }
                     }
+                    self.error_toast(&ctx, canvas_rect);
                 }
             }
         });
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn example() -> Workspace {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/cmos_inverter");
-        Workspace::open(&path).unwrap()
-    }
-
-    fn instance(ws: &Workspace, name: &str) -> usize {
-        ws.schematic().unwrap().instances.iter().position(|i| i.name == name).unwrap()
-    }
-
-    #[test]
-    fn opens_the_top_cell_without_problems() {
-        let ws = example();
-        assert_eq!(ws.current().cell, CellId::new("cmos_inverter", "testbench"));
-        assert_eq!(ws.mode, Mode::Schematic);
-        assert!(ws.problems().is_empty(), "{:?}", ws.problems());
-    }
-
-    #[test]
-    fn descends_into_an_instance_and_back_out() {
-        let mut ws = example();
-        let u1 = instance(&ws, "U1");
-        assert!(ws.scene.descendable[u1]);
-        ws.descend(u1);
-        assert_eq!(ws.levels.len(), 2);
-        assert_eq!(ws.current().cell, CellId::new("cmos_inverter", "inverter"));
-        assert_eq!(ws.current().via.as_deref(), Some("U1"));
-        assert_eq!(ws.schematic().unwrap().instances.len(), 2);
-
-        ws.ascend_to(1);
-        assert_eq!(ws.levels.len(), 1);
-        assert_eq!(ws.selection, Some(Owner::Instance(u1)), "the instance we left is selected");
-    }
-
-    #[test]
-    fn primitives_are_not_descendable_and_open_as_symbols() {
-        let mut ws = example();
-        let vdd = instance(&ws, "VDD");
-        assert!(!ws.scene.descendable[vdd]);
-        ws.descend(vdd);
-        assert_eq!(ws.levels.len(), 2, "descend still records the level");
-        assert_eq!(ws.mode, Mode::Symbol);
-
-        ws.open_cell(CellId::new("std", "nmos"));
-        assert_eq!(ws.levels.len(), 1);
-        assert_eq!(ws.mode, Mode::Symbol);
-    }
-
-    #[test]
-    fn selecting_a_wire_highlights_its_net() {
-        let mut ws = example();
-        let out_wire = ws
-            .schematic()
-            .unwrap()
-            .wires
-            .iter()
-            .position(|w| w.points.first() == Some(&circuiter_model::Point::mm(40.64, 0.0)))
-            .unwrap();
-        ws.select(Some(Owner::Wire(out_wire)));
-        let net = ws.net.expect("net selected");
-        assert_eq!(ws.scene.connectivity.nets[net].name, "OUT");
-        ws.select(None);
-        assert_eq!(ws.net, None);
-    }
-
-    #[test]
-    fn reload_restores_the_hierarchy_path() {
-        let mut app = CircuiterApp {
-            workspace: Some(example()),
-            error: None,
-            theme: &Theme::BENCH,
-            applied_theme: None,
-            show_grid: true,
-            cursor: None,
-            hovered: None,
-            screenshot: None,
-            frames: 0,
-        };
-        let ws = app.workspace.as_mut().unwrap();
-        let u1 = instance(ws, "U1");
-        ws.descend(u1);
-        app.reload();
-        let ws = app.workspace.as_ref().unwrap();
-        assert!(app.error.is_none(), "{:?}", app.error);
-        assert_eq!(ws.levels.len(), 2);
-        assert_eq!(ws.current().cell.cell, "inverter");
+impl CircuiterApp {
+    /// The latest error, over the bottom of the sheet until dismissed.
+    fn error_toast(&mut self, ctx: &egui::Context, sheet: egui::Rect) {
+        let Some(err) = self.error.clone() else { return };
+        let p = style::palette_for(self.theme.dark);
+        egui::Area::new(egui::Id::new("error-toast"))
+            .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -16.0))
+            .constrain_to(sheet)
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                egui::Frame::new()
+                    .fill(p.raised)
+                    .stroke(egui::Stroke::new(1.0, p.error.gamma_multiply(0.7)))
+                    .corner_radius(8)
+                    .inner_margin(egui::Margin::symmetric(12, 8))
+                    .show(ui, |ui| {
+                        ui.set_max_width(sheet.width() * 0.8);
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(style::icon::WARNING_CIRCLE).color(p.error));
+                            ui.label(RichText::new(&err).color(p.text));
+                            let x = egui::Button::new(RichText::new(style::icon::X).color(p.weak))
+                                .frame(false);
+                            if ui.add(x).on_hover_text("Dismiss").clicked() {
+                                self.error = None;
+                            }
+                        });
+                    });
+            });
     }
 }

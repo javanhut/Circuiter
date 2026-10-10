@@ -5,8 +5,11 @@
 //!
 //! - Anything placed at the same point is connected: pin ends, wire vertices, labels and
 //!   ports.
-//! - A pin end, wire vertex, label or port lying on another wire's segment connects to
-//!   that wire (a "T" connection).
+//! - A wire vertex, label or port lying on another wire's segment connects to that wire
+//!   (a "T" connection).
+//! - A pin connects to a wire only at one of the wire's ends or corners. A wire merely
+//!   passing over a pin's end does not connect to it (that is reported, since it looks
+//!   connected), so routing a wire past a part never shorts it by accident.
 //! - Two wires that merely cross, with no vertex at the crossing, are *not* connected.
 //! - Net labels with the same name are connected, and so are global-net symbols (ground)
 //!   with the same net name. A label named like a global net joins that global net.
@@ -69,6 +72,8 @@ pub struct Connectivity {
     pub dangling_pins: Vec<usize>,
     /// Wire end points connected to nothing.
     pub dangling_wire_ends: Vec<Point>,
+    /// Pins a wire passes over without connecting: (index into `pins`, wire).
+    pub passes_over: Vec<(usize, usize)>,
 }
 
 impl Connectivity {
@@ -137,14 +142,25 @@ impl Connectivity {
         }
 
         // T connections: an anchor on the interior of another wire's segment.
+        // Pins only join wires at their vertices.
         let mut on_interior: BTreeMap<Point, usize> = BTreeMap::new();
+        let mut passes_over = Vec::new();
         for (&p, items) in &at_point {
             for (w, wire) in wires.iter().enumerate() {
                 let hits =
                     wire.points.windows(2).filter(|s| strictly_inside(p, s[0], s[1])).count();
-                if hits > 0 {
-                    *on_interior.entry(p).or_default() += hits;
-                    uf.union(id(items[0]), id(Item::Wire(w)));
+                if hits == 0 {
+                    continue;
+                }
+                match items.iter().find(|it| !matches!(it, Item::Pin(_))) {
+                    Some(&joining) => {
+                        *on_interior.entry(p).or_default() += hits;
+                        uf.union(id(joining), id(Item::Wire(w)));
+                    }
+                    None => passes_over.extend(items.iter().filter_map(|it| match it {
+                        Item::Pin(k) => Some((*k, w)),
+                        _ => None,
+                    })),
                 }
             }
         }
@@ -217,7 +233,15 @@ impl Connectivity {
             .flat_map(|(n, net)| net.items.iter().map(move |&i| (i, n)))
             .collect();
 
-        Connectivity { pins, nets, item_net, junctions, dangling_pins, dangling_wire_ends }
+        Connectivity {
+            pins,
+            nets,
+            item_net,
+            junctions,
+            dangling_pins,
+            dangling_wire_ends,
+            passes_over,
+        }
     }
 }
 

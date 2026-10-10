@@ -1,0 +1,14 @@
+(
+    graphics: [
+        Arc(center: (-6.35, 0.0), radius: 5.388, start: 315.0, end: 45.0),
+        Arc(center: (-2.54, 3.81), radius: 7.62, start: 30.0, end: 90.0),
+        Arc(center: (-2.54, -3.81), radius: 7.62, start: 270.0, end: 330.0),
+        Circle(center: (4.567, 0.0), radius: 0.508),
+        Text(at: (0.0, -5.08), text: "${name}", anchor: Center),
+    ],
+    pins: [
+        (port: "a", at: (-5.08, -2.54), direction: Right, length: 3.48),
+        (port: "b", at: (-5.08, 2.54), direction: Right, length: 3.48),
+        (port: "y", at: (7.62, 0.0), direction: Left, length: 2.545),
+    ],
+)

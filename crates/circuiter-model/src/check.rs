@@ -6,6 +6,7 @@
 
 use crate::cell::{CellDef, ViewKind, validate_name};
 use crate::design::{CellId, Design};
+use crate::geom::Length;
 use crate::spice::{Placeholder, Segment, parse_template};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -105,8 +106,82 @@ pub fn check_cell(design: &Design, id: &CellId, def: &CellDef, out: &mut Vec<Dia
             }
         }
         for port in &cell.ports {
-            if symbol.pin(&port.name).is_none() {
-                report(Error, Some("symbol"), format!("port `{}` has no pin", port.name));
+            match symbol.pins.iter().filter(|p| p.port == port.name).count() {
+                0 if port.global.is_some() => {}
+                0 => report(Error, Some("symbol"), format!("port `{}` has no pin", port.name)),
+                1 => {}
+                n => report(Error, Some("symbol"), format!("port `{}` has {n} pins", port.name)),
+            }
+        }
+        let grid = Length::from_mils(100).nm();
+        for pin in &symbol.pins {
+            if pin.at.x.nm() % grid != 0 || pin.at.y.nm() % grid != 0 {
+                report(
+                    Warning,
+                    Some("symbol"),
+                    format!("pin `{}` is off the 100-mil grid, so wires can't reach it", pin.port),
+                );
+            }
+        }
+    }
+
+    // Physics.
+    if let Some(physics) = &cell.physics {
+        let mut port = |name: &str| {
+            if cell.port(name).is_none() {
+                report(Error, Some("physics"), format!("`{name}` is not a port"));
+            }
+        };
+        for limit in &physics.limits {
+            match limit {
+                crate::cell::Limit::Voltage { ports: (a, b), .. } => {
+                    port(a);
+                    port(b);
+                }
+                crate::cell::Limit::Current { port: p, .. }
+                | crate::cell::Limit::Energy { port: p, .. } => port(p),
+            }
+        }
+        if let crate::cell::FailureMode::Short(a, b) = &physics.failure.mode {
+            port(a);
+            port(b);
+        }
+        let mut texts: Vec<&String> =
+            [&physics.thermal_resistance, &physics.heat_capacity, &physics.max_temperature]
+                .into_iter()
+                .flatten()
+                .collect();
+        for limit in &physics.limits {
+            match limit {
+                crate::cell::Limit::Voltage { max, .. }
+                | crate::cell::Limit::Current { max, .. } => texts.push(max),
+                crate::cell::Limit::Energy { rated, max, .. } => texts.extend([rated, max]),
+            }
+        }
+        for text in texts {
+            match parse_template(text) {
+                Err(e) => report(Error, Some("physics"), e),
+                Ok(segments) => {
+                    for seg in segments {
+                        match seg {
+                            Segment::Placeholder(Placeholder::Param(p))
+                                if cell.param(p).is_none() =>
+                            {
+                                report(
+                                    Error,
+                                    Some("physics"),
+                                    format!("`${{param.{p}}}` is not a parameter"),
+                                )
+                            }
+                            Segment::Placeholder(Placeholder::Param(_)) | Segment::Text(_) => {}
+                            Segment::Placeholder(_) => report(
+                                Error,
+                                Some("physics"),
+                                format!("only parameters may appear in `{text}`"),
+                            ),
+                        }
+                    }
+                }
             }
         }
     }

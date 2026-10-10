@@ -2,14 +2,26 @@
 
 mod app;
 mod canvas;
+mod edit;
+#[cfg(test)]
+mod gui_tests;
+mod import;
+mod interface;
+mod plot;
+mod simulation;
+mod style;
+mod symbol_edit;
+mod workspace;
 
 use clap::Parser;
 use std::path::PathBuf;
 
+/// Options for opening the app.
 #[derive(Debug, Parser)]
-#[command(name = "circuiter-gui", version, about = "Circuiter desktop application")]
+#[command(name = "circuiter", version, about = "Circuiter: design, simulate and build hardware")]
 pub struct Args {
     /// Project directory to open.
+    #[arg(value_name = "PROJECT")]
     pub project: Option<PathBuf>,
     /// Cell to open instead of the project's top cell.
     #[arg(long)]
@@ -17,16 +29,28 @@ pub struct Args {
     /// Colour theme: `paper` or `bench`.
     #[arg(long)]
     pub theme: Option<String>,
-    /// Select an instance by name after opening (useful with --screenshot).
+    /// View to show: `schematic` or `symbol`.
+    #[arg(long)]
+    pub view: Option<String>,
+    /// Select an instance (or, in the symbol view, a pin) by name after opening.
     #[arg(long)]
     pub select: Option<String>,
+    /// Run an analysis after opening: `op`, `tran` (or `tran:STOP`, e.g. `tran:3`) or `ac`.
+    #[arg(long)]
+    pub simulate: Option<String>,
+    /// After a transient run, plot part temperatures rather than signals.
+    #[arg(long)]
+    pub heat: bool,
     /// Render the window, save a PNG screenshot to this path, and exit.
     #[arg(long)]
     pub screenshot: Option<PathBuf>,
 }
 
 fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
+    run_app(Args::parse())
+}
+
+fn run_app(args: Args) -> anyhow::Result<()> {
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         viewport: eframe::egui::ViewportBuilder::default()

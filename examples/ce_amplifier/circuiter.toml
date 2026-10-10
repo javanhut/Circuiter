@@ -1,0 +1,4 @@
+[project]
+name = "ce_amplifier"
+top = "amplifier"
+description = "A one-transistor audio amplifier: 2N3904 common-emitter stage with divider bias, coupling and bypass capacitors, and a power LED"

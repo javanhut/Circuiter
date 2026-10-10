@@ -1,0 +1,4 @@
+[project]
+name = "logic"
+top = "half_adder"
+description = "A half adder from logic gates: SUM = A xor B, CARRY = A and B, with the gates powered from a VDD rail"

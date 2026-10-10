@@ -1,0 +1,5 @@
+(
+    description: "Half adder. Press Run to watch SUM and CARRY follow the two clocks",
+    prefix: "X",
+    ports: [],
+)

@@ -105,6 +105,25 @@ fn project_round_trips_without_changes() {
 }
 
 #[test]
+fn example_files_are_canonical() {
+    let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+    for entry in std::fs::read_dir(&examples).unwrap() {
+        let example = entry.unwrap().path();
+        let mut project = Project::load(&example).unwrap();
+        // CIRCUITER_BLESS=1 rewrites the examples in canonical form.
+        if std::env::var_os("CIRCUITER_BLESS").is_some() {
+            project.save().unwrap();
+            continue;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        project.root = dir.path().to_path_buf();
+        project.save().unwrap();
+        // Saving rewrites every file in canonical form; the example must already be in it.
+        assert_eq!(snapshot(dir.path()), snapshot(&example), "{}", example.display());
+    }
+}
+
+#[test]
 fn reserved_and_invalid_project_names_are_rejected() {
     let dir = tempfile::tempdir().unwrap();
     assert!(Project::create(dir.path(), "std").is_err());
@@ -193,6 +212,35 @@ mod connectivity {
     }
 
     #[test]
+    fn a_wire_passing_over_a_pin_does_not_connect_to_it() {
+        let (s, c) = analyze(
+            r#"(
+                instances: [
+                    (name: "R1", cell: "res", placement: (position: (0, 0))),
+                    (name: "R2", cell: "res", placement: (position: (20, 0))),
+                    (name: "R3", cell: "res", placement: (position: (10.16, 10.16), rotation: R90)),
+                ],
+                wires: [
+                    // R3 stands upright with pins at (10.16, 5.08) and (10.16, 15.24); this
+                    // wire runs straight over the upper one.
+                    (points: [(0, 5.08), (20, 5.08)]),
+                    // And one that properly ends on R1.b.
+                    (points: [(5.08, 0), (5.08, -5)]),
+                ],
+            )"#,
+        );
+        let pin = |inst: &str, port: &str| {
+            c.pins
+                .iter()
+                .position(|p| s.instances[p.instance].name == inst && p.port == port)
+                .unwrap()
+        };
+        assert_ne!(c.net_of(Item::Pin(pin("R3", "b"))), c.net_of(Item::Wire(0)));
+        assert_eq!(c.passes_over, vec![(pin("R3", "b"), 0)]);
+        assert_eq!(c.net_of(Item::Pin(pin("R1", "b"))), c.net_of(Item::Wire(1)));
+    }
+
+    #[test]
     fn labels_and_global_nets_join_and_name_nets() {
         let (s, c) = analyze(
             r#"(
@@ -227,4 +275,87 @@ mod connectivity {
         let names: Vec<&str> = c.nets.iter().map(|n| n.name.as_str()).collect();
         assert_eq!(names, ["N$1", "N$2"]);
     }
+}
+
+#[test]
+fn cells_can_be_sorted_into_folders() {
+    let lib = library(
+        "lib",
+        &[
+            ("cells/passives/res/cell.ron", RES_CELL),
+            ("cells/passives/res/symbol.ron", RES_SYMBOL),
+            ("cells/analog/filters/rc/cell.ron", RES_CELL),
+            ("cells/top/cell.ron", RES_CELL),
+        ],
+    );
+    assert_eq!(lib.cell("res").unwrap().folder, "passives");
+    assert_eq!(lib.cell("rc").unwrap().folder, "analog/filters");
+    assert_eq!(lib.cell("top").unwrap().folder, "");
+    assert_eq!(lib.all_folders(), ["analog", "analog/filters", "passives"]);
+
+    // Names are unique across folders: references don't mention folders.
+    let clash = Library::from_files(
+        "lib",
+        [
+            (Path::new("cells/a/res/cell.ron"), RES_CELL),
+            (Path::new("cells/b/res/cell.ron"), RES_CELL),
+        ],
+    );
+    assert!(clash.unwrap_err().to_string().contains("two folders"));
+    let bad = Library::from_files("lib", [(Path::new("cells/9x/res/cell.ron"), RES_CELL)]);
+    assert!(bad.unwrap_err().to_string().contains("must start with a letter"));
+}
+
+#[test]
+fn moving_a_cell_to_another_folder_moves_its_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut lib = library(
+        "lib",
+        &[
+            ("cells/res/cell.ron", RES_CELL),
+            ("cells/res/symbol.ron", RES_SYMBOL),
+            ("cells/keep/cell.ron", RES_CELL),
+        ],
+    );
+    lib.save_dir(tmp.path()).unwrap();
+    std::fs::write(tmp.path().join("cells/keep/notes.txt"), "mine").unwrap();
+    // Into a nested folder, then back out of it.
+    lib.cells.get_mut("res").unwrap().folder = "parts/passive".into();
+    lib.cells.get_mut("keep").unwrap().folder = "parts".into();
+    lib.save_dir(tmp.path()).unwrap();
+    assert!(!tmp.path().join("cells/res").exists(), "old place removed");
+    assert!(tmp.path().join("cells/parts/passive/res/symbol.ron").is_file());
+    assert!(
+        tmp.path().join("cells/keep/notes.txt").is_file(),
+        "a directory with someone's own files in it stays"
+    );
+    assert!(!tmp.path().join("cells/keep/cell.ron").exists());
+    let loaded = Library::load_dir("lib", tmp.path()).unwrap();
+    assert_eq!(loaded.cells, lib.cells);
+    assert_eq!(loaded.all_folders(), ["keep", "parts", "parts/passive"]);
+
+    // A folder emptied by a move stays until deleted, like any folder.
+    let mut lib = loaded;
+    lib.cells.get_mut("res").unwrap().folder = String::new();
+    lib.save_dir(tmp.path()).unwrap();
+    assert!(tmp.path().join("cells/parts/passive").is_dir());
+    assert!(tmp.path().join("cells/parts/keep").is_dir());
+    lib.folders.remove("parts/passive");
+    lib.save_dir(tmp.path()).unwrap();
+    assert!(!tmp.path().join("cells/parts/passive").exists(), "deleted");
+    assert_eq!(Library::load_dir("lib", tmp.path()).unwrap().cells, lib.cells);
+}
+
+#[test]
+fn empty_folders_are_kept() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut lib = library("lib", &[("cells/res/cell.ron", RES_CELL)]);
+    lib.folders.insert("cpu/alu/adders".into());
+    lib.folders.insert("cpu/regs".into());
+    lib.save_dir(tmp.path()).unwrap();
+    std::fs::create_dir_all(tmp.path().join("cells/my notes")).unwrap();
+    let loaded = Library::load_dir("lib", tmp.path()).unwrap();
+    assert_eq!(loaded.all_folders(), ["cpu", "cpu/alu", "cpu/alu/adders", "cpu/regs"]);
+    assert!(!loaded.folder_has_cells("cpu"));
+    assert!(loaded.folder_has_cells(""));
 }

@@ -1,0 +1,3 @@
+(
+    template: "L${inst}p ${inst}_wp ${node.p2} ${param.lp}\nR${inst}p ${node.p1} ${inst}_wp ${param.rp}\nL${inst}s ${inst}_ws ${node.s2} {${param.lp}/(${param.n}*${param.n})}\nR${inst}s ${node.s1} ${inst}_ws ${param.rs}\nK${inst} L${inst}p L${inst}s ${param.k}",
+)

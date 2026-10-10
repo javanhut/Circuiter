@@ -88,6 +88,37 @@ impl Design {
         self.library(&id.library)?.cell(&id.cell)
     }
 
+    pub fn library_mut(&mut self, name: &str) -> Option<&mut Library> {
+        self.libraries.get_mut(name)
+    }
+
+    pub fn cell_mut(&mut self, id: &CellId) -> Option<&mut CellDef> {
+        self.libraries.get_mut(&id.library)?.cells.get_mut(&id.cell)
+    }
+
+    /// Whether `ancestor`'s schematic hierarchy contains `cell` (or is `cell`). Placing
+    /// `ancestor` inside `cell` would then make the design recursive.
+    pub fn contains(&self, ancestor: &CellId, cell: &CellId) -> bool {
+        let mut stack = vec![ancestor.clone()];
+        let mut seen = std::collections::BTreeSet::new();
+        while let Some(id) = stack.pop() {
+            if &id == cell {
+                return true;
+            }
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            if let Some(schematic) = self.cell(&id).and_then(|d| d.schematic.as_ref()) {
+                for inst in &schematic.instances {
+                    if let Some((child, _)) = self.resolve(&inst.cell, &id.library) {
+                        stack.push(child);
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// Resolves a reference made from a cell in `context_library`. Unqualified names
     /// refer to that same library.
     pub fn resolve(&self, r: &CellRef, context_library: &str) -> Option<(CellId, &CellDef)> {

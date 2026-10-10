@@ -1,0 +1,15 @@
+(
+    description: "NOR gate: y is high only when a and b are both low. CMOS, 4 transistors",
+    prefix: "U",
+    ports: [
+        (name: "a", kind: Input),
+        (name: "b", kind: Input),
+        (name: "y", kind: Output),
+        (name: "vdd", kind: PowerIn, description: "Supply, joined to VDD", global: "VDD"),
+        (name: "gnd", kind: PowerIn, description: "Ground, joined to GND", global: "GND"),
+    ],
+    physics: (
+        limits: [Voltage(ports: ("vdd", "gnd"), max: "7")],
+        failure: (mode: Short("vdd", "gnd"), effect: Smoke),
+    ),
+)

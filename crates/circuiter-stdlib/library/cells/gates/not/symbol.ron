@@ -1,0 +1,11 @@
+(
+    graphics: [
+        Polyline(points: [(-2.54, -2.54), (-2.54, 2.54), (1.778, 0.0), (-2.54, -2.54)]),
+        Circle(center: (2.286, 0.0), radius: 0.508),
+        Text(at: (0.0, -3.81), text: "${name}", anchor: Center),
+    ],
+    pins: [
+        (port: "a", at: (-5.08, 0.0), direction: Right),
+        (port: "y", at: (5.08, 0.0), direction: Left, length: 2.286),
+    ],
+)

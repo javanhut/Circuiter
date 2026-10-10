@@ -1,0 +1,14 @@
+(
+    description: "NOT gate (inverter): y is high when a is low. CMOS, 2 transistors",
+    prefix: "U",
+    ports: [
+        (name: "a", kind: Input),
+        (name: "y", kind: Output),
+        (name: "vdd", kind: PowerIn, description: "Supply, joined to VDD", global: "VDD"),
+        (name: "gnd", kind: PowerIn, description: "Ground, joined to GND", global: "GND"),
+    ],
+    physics: (
+        limits: [Voltage(ports: ("vdd", "gnd"), max: "7")],
+        failure: (mode: Short("vdd", "gnd"), effect: Smoke),
+    ),
+)

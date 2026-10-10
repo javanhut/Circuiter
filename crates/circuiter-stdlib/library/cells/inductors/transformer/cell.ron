@@ -1,0 +1,48 @@
+(
+    description: "Transformer: two coupled windings. Dots mark the ends that rise together",
+    prefix: "T",
+    ports: [
+        (name: "p1", description: "Primary, dotted end"),
+        (name: "p2", description: "Primary"),
+        (name: "s1", description: "Secondary, dotted end"),
+        (name: "s2", description: "Secondary"),
+    ],
+    params: [
+        (
+            name: "lp",
+            kind: Real(unit: "H"),
+            default: "1",
+            description: "Primary (magnetising) inductance",
+        ),
+        (
+            name: "n",
+            kind: Real(unit: ""),
+            default: "10",
+            description: "Turns ratio, primary to secondary",
+        ),
+        (
+            name: "k",
+            kind: Real(unit: ""),
+            default: "0.999",
+            description: "Coupling coefficient, 0 to 1",
+        ),
+        (
+            name: "rp",
+            kind: Real(unit: "Ω"),
+            default: "1",
+            description: "Primary winding resistance",
+        ),
+        (
+            name: "rs",
+            kind: Real(unit: "Ω"),
+            default: "0.1",
+            description: "Secondary winding resistance",
+        ),
+    ],
+    physics: (
+        thermal_resistance: "20",
+        heat_capacity: "30",
+        max_temperature: "180",
+        failure: (mode: Open, effect: Smoke),
+    ),
+)

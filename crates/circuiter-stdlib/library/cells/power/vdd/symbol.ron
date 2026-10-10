@@ -1,0 +1,7 @@
+(
+    graphics: [
+        Polyline(points: [(-1.27, -1.27), (1.27, -1.27)]),
+        Text(at: (0.0, -2.286), text: "VDD", size: 1.016, anchor: Center),
+    ],
+    pins: [(port: "vdd", at: (0.0, 0.0), direction: Up, length: 1.27)],
+)

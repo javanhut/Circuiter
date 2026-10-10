@@ -1,0 +1,28 @@
+(
+    graphics: [
+        Arc(center: (-1.27, -1.905), radius: 0.635, start: 270.0, end: 90.0),
+        Arc(center: (-1.27, -0.635), radius: 0.635, start: 270.0, end: 90.0),
+        Arc(center: (-1.27, 0.635), radius: 0.635, start: 270.0, end: 90.0),
+        Arc(center: (-1.27, 1.905), radius: 0.635, start: 270.0, end: 90.0),
+        Arc(center: (1.27, -1.905), radius: 0.635, start: 90.0, end: 270.0),
+        Arc(center: (1.27, -0.635), radius: 0.635, start: 90.0, end: 270.0),
+        Arc(center: (1.27, 0.635), radius: 0.635, start: 90.0, end: 270.0),
+        Arc(center: (1.27, 1.905), radius: 0.635, start: 90.0, end: 270.0),
+        Polyline(points: [(-0.254, -2.54), (-0.254, 2.54)]),
+        Polyline(points: [(0.254, -2.54), (0.254, 2.54)]),
+        Polyline(points: [(-2.54, -2.54), (-1.27, -2.54)]),
+        Polyline(points: [(-2.54, 2.54), (-1.27, 2.54)]),
+        Polyline(points: [(2.54, -2.54), (1.27, -2.54)]),
+        Polyline(points: [(2.54, 2.54), (1.27, 2.54)]),
+        Circle(center: (-2.286, -1.524), radius: 0.254, fill: true),
+        Circle(center: (2.286, -1.524), radius: 0.254, fill: true),
+        Text(at: (0.0, -3.81), text: "${name}", anchor: Center),
+        Text(at: (0.0, 3.81), text: "${param.n}:1", anchor: Center),
+    ],
+    pins: [
+        (port: "p1", at: (-5.08, -2.54), direction: Right),
+        (port: "p2", at: (-5.08, 2.54), direction: Right),
+        (port: "s1", at: (5.08, -2.54), direction: Left),
+        (port: "s2", at: (5.08, 2.54), direction: Left),
+    ],
+)

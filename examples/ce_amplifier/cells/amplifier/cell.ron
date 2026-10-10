@@ -1,0 +1,5 @@
+(
+    description: "Common-emitter amplifier, about 44 dB of gain from 12 V. Try an AC sweep, then a transient",
+    prefix: "X",
+    ports: [],
+)

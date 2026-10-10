@@ -1,6 +1,6 @@
 [package]
 name = "circuiter-app"
-description = "Circuiter desktop application"
+description = "Circuiter desktop application and command-line tool"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,18 +8,28 @@ authors.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "circuiter-gui"
+name = "circuiter"
 path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+ron.workspace = true
+serde.workspace = true
 circuiter-model.workspace = true
+circuiter-netlist.workspace = true
+circuiter-physics.workspace = true
 circuiter-scene.workspace = true
+circuiter-sim.workspace = true
 circuiter-stdlib.workspace = true
 clap.workspace = true
 eframe = { version = "0.36", default-features = false, features = ["wgpu", "default_fonts", "wayland", "x11"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 rfd = "0.17"
+egui-phosphor = "0.14"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+egui_kittest = { version = "0.36", features = ["eframe"] }
+tempfile.workspace = true

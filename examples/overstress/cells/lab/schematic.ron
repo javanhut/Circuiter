@@ -1,0 +1,51 @@
+(
+    instances: [
+        (name: "V1", cell: "std:vdc", placement: (position: (0.0, 0.0)), params: {"V": "12"}),
+        (name: "GND1", cell: "std:gnd", placement: (position: (0.0, 10.16))),
+        (
+            name: "R1",
+            cell: "std:resistor",
+            placement: (position: (20.32, -15.24), rotation: R90),
+            params: {"R": "47"},
+        ),
+        (name: "D1", cell: "std:led", placement: (position: (20.32, -5.08), rotation: R270)),
+        (name: "GND2", cell: "std:gnd", placement: (position: (20.32, 5.08))),
+        (
+            name: "F1",
+            cell: "std:fuse",
+            placement: (position: (40.64, -15.24), rotation: R270),
+            params: {"I": "500m"},
+        ),
+        (
+            name: "R2",
+            cell: "std:resistor",
+            placement: (position: (40.64, -5.08), rotation: R90),
+            params: {"P": "5", "R": "4.7"},
+        ),
+        (name: "GND3", cell: "std:gnd", placement: (position: (40.64, 5.08))),
+        (
+            name: "R3",
+            cell: "std:resistor",
+            placement: (position: (60.96, -10.16), rotation: R90),
+            params: {"R": "100"},
+        ),
+        (name: "GND4", cell: "std:gnd", placement: (position: (60.96, 5.08))),
+    ],
+    wires: [
+        (points: [(0.0, -5.08), (0.0, -10.16)]),
+        (points: [(0.0, 5.08), (0.0, 10.16)]),
+        (points: [(20.32, -20.32), (20.32, -22.86)]),
+        (points: [(20.32, -10.16), (20.32, -7.62)]),
+        (points: [(20.32, -2.54), (20.32, 5.08)]),
+        (points: [(40.64, -20.32), (40.64, -22.86)]),
+        (points: [(40.64, 0.0), (40.64, 5.08)]),
+        (points: [(60.96, -15.24), (60.96, -22.86)]),
+        (points: [(60.96, -5.08), (60.96, 5.08)]),
+    ],
+    labels: [
+        (net: "VCC", at: (0.0, -10.16)),
+        (net: "VCC", at: (20.32, -22.86)),
+        (net: "VCC", at: (40.64, -22.86)),
+        (net: "VCC", at: (60.96, -22.86)),
+    ],
+)

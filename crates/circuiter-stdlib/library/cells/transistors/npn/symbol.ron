@@ -1,0 +1,19 @@
+(
+    graphics: [
+        Circle(center: (-0.381, 0.0), radius: 2.286),
+        Polyline(points: [(-1.27, -1.905), (-1.27, 1.905)]),
+        Polyline(points: [(-2.54, 0.0), (-1.27, 0.0)]),
+        Polyline(points: [(-1.27, -0.762), (0.0, -1.778), (0.0, -2.54)]),
+        Polyline(points: [(-1.27, 0.762), (0.0, 1.778), (0.0, 2.54)]),
+        Polyline(
+            points: [(-0.254, 1.575), (-0.91, 1.434), (-0.536, 0.966), (-0.254, 1.575)],
+            fill: true,
+        ),
+        Text(at: (2.54, -1.27), text: "${name}"),
+    ],
+    pins: [
+        (port: "c", at: (0.0, -5.08), direction: Down),
+        (port: "b", at: (-5.08, 0.0), direction: Right),
+        (port: "e", at: (0.0, 5.08), direction: Up),
+    ],
+)

@@ -1,0 +1,12 @@
+(
+    graphics: [
+        Polyline(points: [(0.0, -3.81), (-2.54, -3.81), (-2.54, 3.81), (0.0, 3.81)]),
+        Arc(center: (0.0, 0.0), radius: 3.81, start: 270.0, end: 90.0),
+        Text(at: (0.0, -5.08), text: "${name}", anchor: Center),
+    ],
+    pins: [
+        (port: "a", at: (-5.08, -2.54), direction: Right),
+        (port: "b", at: (-5.08, 2.54), direction: Right),
+        (port: "y", at: (7.62, 0.0), direction: Left, length: 3.81),
+    ],
+)

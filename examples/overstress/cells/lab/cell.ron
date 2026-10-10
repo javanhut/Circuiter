@@ -1,0 +1,5 @@
+(
+    description: "Overstress lab. Run an operating point to see what\'s in danger, then a 3 s transient to watch it happen",
+    prefix: "X",
+    ports: [],
+)

@@ -1,0 +1,30 @@
+(
+    description: "Light-emitting diode. Defaults approximate a red LED: about 2 V at 20 mA",
+    prefix: "D",
+    ports: [(name: "a", description: "Anode"), (name: "k", description: "Cathode")],
+    params: [
+        (name: "is", kind: Real(unit: "A"), default: "1e-19", description: "Saturation current"),
+        (name: "n", kind: Real(unit: ""), default: "2", description: "Emission coefficient"),
+        (name: "rs", kind: Real(unit: "Ω"), default: "2", description: "Series resistance"),
+        (name: "bv", kind: Real(unit: "V"), default: "5", description: "Reverse breakdown voltage"),
+        (
+            name: "cjo",
+            kind: Real(unit: "F"),
+            default: "20p",
+            description: "Zero-bias junction capacitance",
+        ),
+        (
+            name: "Imax",
+            kind: Real(unit: "A"),
+            default: "30m",
+            description: "Maximum continuous current",
+        ),
+    ],
+    physics: (
+        thermal_resistance: "400",
+        heat_capacity: "25u",
+        max_temperature: "150",
+        limits: [Current(port: "a", max: "{5*${param.Imax}}")],
+        failure: (mode: Open, effect: Flash),
+    ),
+)

@@ -1,4 +1,5 @@
-//! Circuiter's built-in `std` library: passives, sources, semiconductors and ground.
+//! Circuiter's built-in `std` library: passives, sources, semiconductors, logic gates
+//! and power, one folder per kind of part (`gates/`, `resistors/`, `transistors/`…).
 //!
 //! The cells are ordinary library files under `library/`, embedded at compile time, so
 //! they use the same format as user libraries and can be copied and modified.
@@ -63,7 +64,7 @@ mod tests {
         lib.save_dir(out.path()).unwrap();
         let mut stale = Vec::new();
         for def in lib.cells.values() {
-            let rel = std::path::Path::new("cells").join(&def.name);
+            let rel = Library::cell_dir(def);
             for entry in std::fs::read_dir(out.path().join(&rel)).unwrap() {
                 let file = rel.join(entry.unwrap().file_name());
                 let expected = std::fs::read_to_string(out.path().join(&file)).unwrap();
@@ -74,6 +75,18 @@ mod tests {
             }
         }
         assert!(stale.is_empty(), "not canonical (run with CIRCUITER_BLESS=1): {stale:?}");
+    }
+
+    #[test]
+    fn parts_are_sorted_into_folders_by_kind() {
+        let lib = library();
+        let folder = |name: &str| lib.cell(name).unwrap().folder.as_str();
+        assert_eq!(folder("nand"), "gates");
+        assert_eq!(folder("resistor"), "resistors");
+        assert_eq!(folder("nmos"), "transistors");
+        for def in lib.cells.values() {
+            assert!(!def.folder.is_empty(), "{} is not in a folder", def.name);
+        }
     }
 
     #[test]

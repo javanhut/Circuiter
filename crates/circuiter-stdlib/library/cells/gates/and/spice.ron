@@ -1,0 +1,6 @@
+(
+    template: "X${inst} ${node.a} ${node.b} ${node.y} ${node.vdd} ${node.gnd} ${model}",
+    models: [
+        ".subckt ${model} a b y vdd gnd\nMP1 z a vdd vdd phc W=48u L=1u AD=48p AS=48p PD=98u PS=98u\nMP2 z b vdd vdd phc W=48u L=1u AD=48p AS=48p PD=98u PS=98u\nMN1 z a n1 gnd nhc W=40u L=1u AD=40p AS=40p PD=82u PS=82u\nMN2 n1 b gnd gnd nhc W=40u L=1u AD=40p AS=40p PD=82u PS=82u\nMPY y z vdd vdd phc W=48u L=1u AD=48p AS=48p PD=98u PS=98u\nMNY y z gnd gnd nhc W=20u L=1u AD=20p AS=20p PD=42u PS=42u\n.model nhc NMOS(LEVEL=1 VTO=0.8 KP=60u LAMBDA=0.02 GAMMA=0.5 PHI=0.7 TOX=20n CGSO=0.4n CGDO=0.4n CJ=0.3m CJSW=0.3n MJ=0.5 MJSW=0.33 PB=0.8)\n.model phc PMOS(LEVEL=1 VTO=-0.8 KP=25u LAMBDA=0.03 GAMMA=0.5 PHI=0.7 TOX=20n CGSO=0.4n CGDO=0.4n CJ=0.3m CJSW=0.3n MJ=0.5 MJSW=0.33 PB=0.8)\n.ends",
+    ],
+)

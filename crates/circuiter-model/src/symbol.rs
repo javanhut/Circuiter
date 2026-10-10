@@ -5,6 +5,10 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct Symbol {
+    /// Made by the component builder from the cell's ports, and regenerated when they
+    /// change. Editing the drawing by hand clears it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub generated: bool,
     #[serde(default)]
     pub graphics: Vec<Graphic>,
     #[serde(default)]
@@ -14,6 +18,28 @@ pub struct Symbol {
 impl Symbol {
     pub fn pin(&self, port: &str) -> Option<&SymbolPin> {
         self.pins.iter().find(|p| p.port == port)
+    }
+
+    /// The corners of the box around the drawing and the pins, ignoring text, whose size
+    /// depends on how it is rendered. `None` for an empty symbol.
+    pub fn bounds(&self) -> Option<(Point, Point)> {
+        let mut points = Vec::new();
+        for g in &self.graphics {
+            match g {
+                Graphic::Polyline { points: p, .. } => points.extend(p),
+                Graphic::Rect { a, b, .. } => points.extend([*a, *b]),
+                Graphic::Circle { center, radius, .. } | Graphic::Arc { center, radius, .. } => {
+                    let r = Point::new(*radius, *radius);
+                    points.extend([*center - r, *center + r]);
+                }
+                Graphic::Text { at, .. } => points.push(*at),
+            }
+        }
+        points.extend(self.pins.iter().map(|p| p.at));
+        let first = *points.first()?;
+        Some(points.iter().fold((first, first), |(min, max), p| {
+            (Point::new(min.x.min(p.x), min.y.min(p.y)), Point::new(max.x.max(p.x), max.y.max(p.y)))
+        }))
     }
 }
 

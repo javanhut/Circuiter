@@ -1,0 +1,6 @@
+(
+    template: "Q${inst} ${node.c} ${node.b} ${node.e} ${model}",
+    models: [
+        ".model ${model} NPN(IS=${param.is} BF=${param.bf} BR=${param.br} VAF=${param.vaf} IKF=${param.ikf} ISE=${param.ise} NE=${param.ne} RB=${param.rb} RC=${param.rc} CJE=${param.cje} VJE=0.75 MJE=${param.mje} CJC=${param.cjc} VJC=0.75 MJC=${param.mjc} TF=${param.tf} TR=${param.tr} XTF=2 VTF=4 ITF=0.4 FC=0.5)",
+    ],
+)

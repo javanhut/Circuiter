@@ -121,15 +121,21 @@ pub enum Role {
     Port,
     /// Unconnected pins and wire ends.
     Unconnected,
+    /// Editing aids that are not part of the design, such as the symbol origin.
+    Guide,
 }
 
 /// The schematic object a primitive belongs to, for selection and highlighting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Owner {
     Instance(usize),
     Wire(usize),
     Label(usize),
     Port(usize),
+    /// A drawing primitive of the symbol being edited.
+    Graphic(usize),
+    /// A pin of the symbol being edited.
+    Pin(usize),
     /// Junction dots and markers: derived from connectivity, not selectable themselves.
     Derived,
 }
@@ -223,6 +229,9 @@ pub struct Scene {
     pub bounds: Rect,
     /// Per instance: the symbol body and pins, used for selection.
     pub instance_bounds: Vec<Rect>,
+    /// Per instance: the symbol's drawing alone, without pins or text. A click inside
+    /// it picks the part even with a wire close by.
+    pub instance_bodies: Vec<Rect>,
     /// Per instance: whether its cell has a schematic to descend into.
     pub descendable: Vec<bool>,
     pub connectivity: Connectivity,
@@ -255,27 +264,76 @@ impl Scene {
         Some(scene)
     }
 
+    /// The symbol being edited: like [`Scene::symbol_preview`], but each graphic and pin
+    /// is its own object ([`Owner::Graphic`], [`Owner::Pin`]), pin connection points are
+    /// marked and the origin is shown. A cell without a symbol gives an empty sheet.
+    pub fn symbol_sheet(design: &Design, id: &CellId) -> Option<Scene> {
+        let def = design.cell(id)?;
+        let mut b = Builder::default();
+        let s = 0.635;
+        for (from, to) in [((-s, 0.0), (s, 0.0)), ((0.0, -s), (0.0, s))] {
+            b.push(
+                Role::Guide,
+                Owner::Derived,
+                Shape::Polyline {
+                    points: vec![Pt::new(from.0, from.1), Pt::new(to.0, to.1)],
+                    closed: false,
+                    filled: false,
+                },
+            );
+        }
+        if let Some(symbol) = &def.symbol {
+            let instance = Instance {
+                name: format!("{}?", def.cell.prefix),
+                cell: circuiter_model::CellRef::new(Some(&id.library), &id.cell),
+                placement: Transform::default(),
+                params: Default::default(),
+                view: None,
+            };
+            b.symbol(None, &instance, def, symbol);
+        }
+        let mut bounds = Rect::EMPTY;
+        for e in &b.elements {
+            bounds.union(&e.shape.bounds());
+        }
+        Some(Scene {
+            cell: id.clone(),
+            elements: b.elements,
+            bounds,
+            instance_bounds: Vec::new(),
+            instance_bodies: Vec::new(),
+            descendable: Vec::new(),
+            connectivity: Connectivity::default(),
+        })
+    }
+
     fn build_from(design: &Design, id: &CellId, cell: &Cell, schematic: &Schematic) -> Scene {
         let connectivity = Connectivity::analyze(design, &id.library, schematic);
         let mut b = Builder::default();
 
         let mut instance_bounds = Vec::with_capacity(schematic.instances.len());
+        let mut instance_bodies = Vec::with_capacity(schematic.instances.len());
         let mut descendable = Vec::with_capacity(schematic.instances.len());
         for (i, inst) in schematic.instances.iter().enumerate() {
             let resolved = design.resolve(&inst.cell, &id.library).map(|(_, d)| d);
             descendable.push(resolved.is_some_and(|d| d.schematic.is_some()));
             let start = b.elements.len();
             match resolved.and_then(|d| d.symbol.as_ref().map(|s| (d, s))) {
-                Some((def, symbol)) => b.symbol(i, inst, def, symbol),
+                Some((def, symbol)) => b.symbol(Some(i), inst, def, symbol),
                 None => b.missing_symbol(i, inst),
             }
             let mut r = Rect::EMPTY;
+            let mut body = Rect::EMPTY;
             for e in &b.elements[start..] {
                 if !matches!(e.role, Role::Reference | Role::Value) {
                     r.union(&e.shape.bounds());
                 }
+                if e.role == Role::Body {
+                    body.union(&e.shape.bounds());
+                }
             }
             instance_bounds.push(r);
+            instance_bodies.push(body);
         }
 
         for (i, wire) in schematic.wires.iter().enumerate() {
@@ -347,15 +405,53 @@ impl Scene {
             elements: b.elements,
             bounds,
             instance_bounds,
+            instance_bodies,
             descendable,
             connectivity,
         }
+    }
+
+    /// Objects entirely inside `rect`, for rubber-band selection.
+    pub fn objects_in(&self, rect: &Rect) -> Vec<Owner> {
+        let mut out: Vec<Owner> = self
+            .instance_bounds
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| !b.is_empty() && rect.contains(b.min) && rect.contains(b.max))
+            .map(|(i, _)| Owner::Instance(i))
+            .collect();
+        for e in &self.elements {
+            if matches!(
+                e.owner,
+                Owner::Wire(_)
+                    | Owner::Label(_)
+                    | Owner::Port(_)
+                    | Owner::Graphic(_)
+                    | Owner::Pin(_)
+            ) {
+                let b = e.shape.bounds();
+                if rect.contains(b.min) && rect.contains(b.max) && !out.contains(&e.owner) {
+                    out.push(e.owner);
+                }
+            }
+        }
+        out
     }
 
     /// Finds the object under `p`. `tolerance` is in millimetres (a few pixels' worth).
     /// Wires and labels win over instances, and smaller instances over larger ones, so
     /// overlapping objects stay pickable.
     pub fn hit_test(&self, p: Pt, tolerance: f64) -> Option<Owner> {
+        // Inside a part's drawing, the part wins: wires ending at its pins sit close by.
+        if let Some((i, _)) = self
+            .instance_bodies
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| !r.is_empty() && r.expand(tolerance * 0.5).contains(p))
+            .min_by(|(_, a), (_, b)| a.area().total_cmp(&b.area()))
+        {
+            return Some(Owner::Instance(i));
+        }
         let mut best_wire: Option<(f64, Owner)> = None;
         for e in &self.elements {
             let d = match (&e.owner, &e.shape) {
@@ -370,6 +466,9 @@ impl Scene {
                         continue;
                     }
                 }
+                // Pins win ties with the graphics they overlap.
+                (Owner::Pin(_), shape) => shape_distance(shape, p) - tolerance / 2.0,
+                (Owner::Graphic(_), shape) => shape_distance(shape, p),
                 _ => continue,
             };
             if d <= tolerance && best_wire.is_none_or(|(bd, _)| d < bd) {
@@ -386,6 +485,17 @@ impl Scene {
             .min_by(|(_, a), (_, b)| a.area().total_cmp(&b.area()))
             .map(|(i, _)| Owner::Instance(i))
     }
+}
+
+/// The drawing of one instance, as it would appear on a sheet in `library`. Used for
+/// previews such as the part following the cursor while placing.
+pub fn instance_elements(design: &Design, library: &str, inst: &Instance) -> Vec<Element> {
+    let mut b = Builder::default();
+    match design.resolve(&inst.cell, library).and_then(|(_, d)| d.symbol.as_ref().map(|s| (d, s))) {
+        Some((def, symbol)) => b.symbol(Some(0), inst, def, symbol),
+        None => b.missing_symbol(0, inst),
+    }
+    b.elements
 }
 
 /// The direction a port flag should extend: away from the wire attached at `at`.
@@ -409,6 +519,47 @@ fn port_direction(schematic: &Schematic, at: Point) -> Pt {
     Pt::new(-1.0, 0.0)
 }
 
+/// Distance from `p` to the drawn outline of a shape, or zero inside a filled shape or
+/// the box around a text.
+fn shape_distance(shape: &Shape, p: Pt) -> f64 {
+    match shape {
+        Shape::Polyline { points, closed, filled } => {
+            let n = points.len();
+            let edges = if *closed { n } else { n.saturating_sub(1) };
+            let outline = (0..edges)
+                .map(|i| segment_distance(p, points[i], points[(i + 1) % n]))
+                .fold(f64::INFINITY, f64::min);
+            if *filled && *closed && polygon_contains(points, p) { 0.0 } else { outline }
+        }
+        Shape::Circle { center, radius, filled } => {
+            let d = (p.x - center.x).hypot(p.y - center.y);
+            if *filled { (d - radius).max(0.0) } else { (d - radius).abs() }
+        }
+        Shape::Text { .. } => {
+            if shape.bounds().contains(p) {
+                0.0
+            } else {
+                let b = shape.bounds();
+                let dx = (b.min.x - p.x).max(p.x - b.max.x).max(0.0);
+                let dy = (b.min.y - p.y).max(p.y - b.max.y).max(0.0);
+                dx.hypot(dy)
+            }
+        }
+    }
+}
+
+fn polygon_contains(points: &[Pt], p: Pt) -> bool {
+    let mut inside = false;
+    let n = points.len();
+    for i in 0..n {
+        let (a, b) = (points[i], points[(i + n - 1) % n]);
+        if (a.y > p.y) != (b.y > p.y) && p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x {
+            inside = !inside;
+        }
+    }
+    inside
+}
+
 fn segment_distance(p: Pt, a: Pt, b: Pt) -> f64 {
     let (dx, dy) = (b.x - a.x, b.y - a.y);
     let len2 = dx * dx + dy * dy;
@@ -430,11 +581,13 @@ impl Builder {
         self.elements.push(Element { role, owner, shape });
     }
 
-    fn symbol(&mut self, index: usize, inst: &Instance, def: &CellDef, symbol: &Symbol) {
-        let owner = Owner::Instance(index);
+    /// Draws a symbol as instance `index` of a sheet, or for editing when `index` is
+    /// `None`, with each graphic and pin a separate object.
+    fn symbol(&mut self, index: Option<usize>, inst: &Instance, def: &CellDef, symbol: &Symbol) {
         let t = &inst.placement;
         let map = |p: Point| Pt::from(t.apply(p));
-        for g in &symbol.graphics {
+        for (i, g) in symbol.graphics.iter().enumerate() {
+            let owner = index.map_or(Owner::Graphic(i), Owner::Instance);
             match g {
                 Graphic::Polyline { points, fill } => {
                     let closed = points.len() > 2 && points.first() == points.last();
@@ -489,7 +642,8 @@ impl Builder {
                 }
             }
         }
-        for pin in &symbol.pins {
+        for (i, pin) in symbol.pins.iter().enumerate() {
+            let owner = index.map_or(Owner::Pin(i), Owner::Instance);
             let (dx, dy) = match pin.direction {
                 PinDirection::Left => (-1, 0),
                 PinDirection::Right => (1, 0),
@@ -507,6 +661,13 @@ impl Builder {
                     filled: false,
                 },
             );
+            if index.is_none() {
+                self.push(
+                    Role::Pin,
+                    owner,
+                    Shape::Circle { center: map(pin.at), radius: 0.254, filled: false },
+                );
+            }
             if pin.show_name {
                 let gap = Length::from_mils(20).nm();
                 let at = Point::new(inner.x + Length(dx * gap), inner.y + Length(dy * gap));
@@ -520,7 +681,12 @@ impl Builder {
                         text: pin.port.clone(),
                         size: 1.016,
                         halign: if world_dir.0 == 0 { HAlign::Center } else { halign },
-                        valign: VAlign::Center,
+                        // Names of vertical pins sit just inside the body edge.
+                        valign: match world_dir.1.signum() {
+                            1 => VAlign::Top,
+                            -1 => VAlign::Bottom,
+                            _ => VAlign::Center,
+                        },
                         vertical: false,
                     },
                 );
@@ -712,6 +878,16 @@ mod tests {
     }
 
     #[test]
+    fn svg_export_draws_symbols_and_text() {
+        let d = design();
+        let scene = Scene::symbol_preview(&d, &CellId::new("std", "nmos")).unwrap();
+        let svg = to_svg(&scene, &Theme::PAPER);
+        assert!(svg.starts_with("<svg") || svg.starts_with("<?xml"), "{svg}");
+        assert!(svg.contains(">M?<"), "reference text is drawn");
+        assert!(svg.contains(&Theme::PAPER.body.css()), "drawn in theme colours");
+    }
+
+    #[test]
     fn symbol_text_shows_formatted_values() {
         let d = design();
         let def = d.cell(&CellId::new("std", "resistor")).unwrap();
@@ -742,5 +918,9 @@ mod tests {
         assert_eq!(scene.hit_test(Pt::new(0.0, 0.5), 0.3), Some(Owner::Instance(0)));
         assert_eq!(scene.hit_test(Pt::new(8.0, 0.1), 0.3), Some(Owner::Wire(0)));
         assert_eq!(scene.hit_test(Pt::new(50.0, 50.0), 0.3), None);
+        let all = Rect { min: Pt::new(-20.0, -20.0), max: Pt::new(20.0, 20.0) };
+        assert_eq!(scene.objects_in(&all), vec![Owner::Instance(0), Owner::Wire(0)]);
+        let left = Rect { min: Pt::new(-20.0, -20.0), max: Pt::new(6.0, 20.0) };
+        assert_eq!(scene.objects_in(&left), vec![Owner::Instance(0)], "wire only partly inside");
     }
 }

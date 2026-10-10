@@ -1,0 +1,19 @@
+(
+    description: "Fuse: a thin wire that melts open when too much current flows for too long",
+    prefix: "F",
+    ports: [(name: "a"), (name: "b")],
+    params: [
+        (name: "I", kind: Real(unit: "A"), default: "1", description: "Rated current"),
+        (name: "R", kind: Real(unit: "Ω"), default: "100m", description: "Cold resistance"),
+        (
+            name: "i2t",
+            kind: Real(unit: "A²s"),
+            default: "200m",
+            description: "Melting energy above the rated current",
+        ),
+    ],
+    physics: (
+        limits: [Energy(port: "a", rated: "${param.I}", max: "${param.i2t}")],
+        failure: (mode: Open, effect: Flash),
+    ),
+)

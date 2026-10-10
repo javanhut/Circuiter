@@ -13,6 +13,9 @@ rust-version = "1.85"
 circuiter-model = { path = "crates/circuiter-model" }
 circuiter-stdlib = { path = "crates/circuiter-stdlib" }
 circuiter-scene = { path = "crates/circuiter-scene" }
+circuiter-netlist = { path = "crates/circuiter-netlist" }
+circuiter-sim = { path = "crates/circuiter-sim" }
+circuiter-physics = { path = "crates/circuiter-physics" }
 
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

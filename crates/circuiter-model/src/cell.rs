@@ -27,6 +27,69 @@ pub struct Cell {
     /// Power and ground symbols: every instance's single port joins this global net.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub global_net: Option<String>,
+    /// How the part heats up and what destroys it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub physics: Option<Physics>,
+}
+
+/// A part's thermal behaviour, its absolute limits and how it fails.
+///
+/// Values are expressions that may use the part's parameters, written as in SPICE
+/// templates: `"{130/${param.P}}"`. Temperatures are in °C.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Physics {
+    /// Thermal resistance from the hot spot (junction, film) to ambient, °C/W.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thermal_resistance: Option<String>,
+    /// Heat capacity of the hot spot, J/°C. With the thermal resistance it sets how fast
+    /// the part heats: the time constant is their product.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heat_capacity: Option<String>,
+    /// The temperature at which the part is destroyed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_temperature: Option<String>,
+    /// Limits that destroy the part the moment they are exceeded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limits: Vec<Limit>,
+    pub failure: Failure,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Limit {
+    /// The voltage between two ports, either polarity, must stay below `max`.
+    Voltage { ports: (String, String), max: String },
+    /// The current into a port, either direction, must stay below `max`.
+    Current { port: String, max: String },
+    /// Melting energy, as in a fuse: the integral of `i² − rated²` over time, while the
+    /// current into `port` exceeds `rated`, must stay below `max` (A²s).
+    Energy { port: String, rated: String, max: String },
+}
+
+/// What a destroyed part becomes and how it shows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Failure {
+    pub mode: FailureMode,
+    pub effect: Effect,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FailureMode {
+    /// Every terminal disconnects.
+    Open,
+    /// Two ports short together (a few tens of milliohms); the others disconnect.
+    Short(String, String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Effect {
+    /// Burns quietly: discolours, smells.
+    Smoke,
+    /// Cracks with a pop, as a ceramic capacitor or small transistor does.
+    Pop,
+    /// A bright flash, as an LED or fuse element gives.
+    Flash,
+    /// Bursts violently, as an electrolytic capacitor does.
+    Explode,
 }
 
 fn default_prefix() -> String {
@@ -41,6 +104,7 @@ impl Default for Cell {
             ports: Vec::new(),
             params: Vec::new(),
             global_net: None,
+            physics: None,
         }
     }
 }
@@ -62,6 +126,17 @@ pub struct Port {
     pub kind: PortKind,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
+    /// A hidden connection to this global net (`VDD`, `GND`), as logic gates' power
+    /// pins usually are: the port has no pin on the symbol and joins the net wherever
+    /// the part is placed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub global: Option<String>,
+}
+
+impl Port {
+    pub fn new(name: &str, kind: PortKind) -> Self {
+        Port { name: name.to_owned(), kind, description: String::new(), global: None }
+    }
 }
 
 fn is_passive(kind: &PortKind) -> bool {
@@ -155,6 +230,10 @@ impl fmt::Display for ViewKind {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct CellDef {
     pub name: String,
+    /// Where the cell sits in its library's tree, such as `gates` or `analog/filters`;
+    /// empty for the top level. It is only for organising: references name the cell
+    /// alone, so names are unique across folders.
+    pub folder: String,
     pub cell: Cell,
     pub symbol: Option<Symbol>,
     pub schematic: Option<Schematic>,
@@ -227,6 +306,16 @@ impl From<CellRef> for String {
 ///
 /// Names become directory names and SPICE identifiers, so they are restricted to ASCII
 /// letters, digits and underscores, starting with a letter.
+/// Checks a library folder path: names separated by `/`, or empty for the top level.
+pub fn validate_folder(folder: &str) -> Result<(), String> {
+    if folder.is_empty() {
+        return Ok(());
+    }
+    folder
+        .split('/')
+        .try_for_each(|part| validate_name(part).map_err(|e| format!("folder `{folder}`: {e}")))
+}
+
 pub fn validate_name(name: &str) -> Result<(), String> {
     let mut chars = name.chars();
     match chars.next() {

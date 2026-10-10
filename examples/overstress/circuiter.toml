@@ -1,0 +1,4 @@
+[project]
+name = "overstress"
+top = "lab"
+description = "Parts pushed past their limits: an LED with too little resistance, a fuse guarding a near-short, and a resistor dissipating six times its rating"

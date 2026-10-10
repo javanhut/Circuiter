@@ -1,0 +1,6 @@
+(
+    description: "Supply rail: joins the VDD net, which powers logic gates through their hidden supply pins. Drive it with a voltage source",
+    prefix: "VDD",
+    ports: [(name: "vdd")],
+    global_net: "VDD",
+)

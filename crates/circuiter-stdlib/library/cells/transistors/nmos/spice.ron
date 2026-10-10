@@ -1,0 +1,6 @@
+(
+    template: "M${inst} ${node.d} ${node.g} ${node.s} ${node.b} ${model} W=${param.w} L=${param.l} AD={${param.w}*0.5u} AS={${param.w}*0.5u} PD={2*${param.w}+1u} PS={2*${param.w}+1u}",
+    models: [
+        ".model ${model} NMOS(LEVEL=1 VTO=${param.vto} KP=${param.kp} LAMBDA=${param.lambda} GAMMA=${param.gamma} PHI=${param.phi} TOX=${param.tox} CGSO=${param.cgso} CGDO=${param.cgdo} CJ=${param.cj} CJSW=${param.cjsw} MJ=0.45 MJSW=0.33 PB=0.8)",
+    ],
+)

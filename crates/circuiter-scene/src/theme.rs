@@ -56,23 +56,24 @@ impl Theme {
         highlight: Rgba::hex(0x2E86DE),
     };
 
-    /// Dark theme for long sessions at the bench.
+    /// Dark theme for long sessions at the bench: light parts and green wires on deep
+    /// navy.
     pub const BENCH: Theme = Theme {
         name: "Bench",
         dark: true,
-        background: Rgba::hex(0x16191E),
-        grid: Rgba::hex(0x4A525E),
-        wire: Rgba::hex(0x5BCB7E),
-        body: Rgba::hex(0xE2725B),
-        pin: Rgba::hex(0xE2725B),
-        pin_name: Rgba::hex(0x9FB3C8),
-        reference: Rgba::hex(0x6CC4D9),
-        value: Rgba::hex(0x8FB8C9),
-        net_label: Rgba::hex(0xE8E6E3),
-        port: Rgba::hex(0xB48EDB),
-        unconnected: Rgba::hex(0xFF5A4E),
-        selection: Rgba::hex(0xFFB454),
-        highlight: Rgba::hex(0x4FB3FF),
+        background: Rgba::hex(0x0E1520),
+        grid: Rgba::hex(0x2C3B50),
+        wire: Rgba::hex(0x3DDC84),
+        body: Rgba::hex(0xD3DBE6),
+        pin: Rgba::hex(0xAAB6C6),
+        pin_name: Rgba::hex(0x8DA0B6),
+        reference: Rgba::hex(0xE4EAF2),
+        value: Rgba::hex(0xA9BACD),
+        net_label: Rgba::hex(0x5BE38F),
+        port: Rgba::hex(0xA98BFA),
+        unconnected: Rgba::hex(0xF87171),
+        selection: Rgba::hex(0xFBBF24),
+        highlight: Rgba::hex(0x3B8BF6),
     };
 
     pub const ALL: [&'static Theme; 2] = [&Theme::PAPER, &Theme::BENCH];
@@ -88,6 +89,7 @@ impl Theme {
             Role::NetLabel => self.net_label,
             Role::Port => self.port,
             Role::Unconnected => self.unconnected,
+            Role::Guide => self.grid,
         }
     }
 }

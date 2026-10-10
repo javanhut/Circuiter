@@ -1,0 +1,13 @@
+(
+    description: "Capacitor",
+    prefix: "C",
+    ports: [(name: "a"), (name: "b")],
+    params: [
+        (name: "C", kind: Real(unit: "F"), default: "1u", description: "Capacitance"),
+        (name: "Vmax", kind: Real(unit: "V"), default: "50", description: "Voltage rating"),
+    ],
+    physics: (
+        limits: [Voltage(ports: ("a", "b"), max: "${param.Vmax}")],
+        failure: (mode: Short("a", "b"), effect: Pop),
+    ),
+)

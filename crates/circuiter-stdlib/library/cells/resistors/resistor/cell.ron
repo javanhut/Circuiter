@@ -1,0 +1,15 @@
+(
+    description: "Resistor",
+    prefix: "R",
+    ports: [(name: "a"), (name: "b")],
+    params: [
+        (name: "R", kind: Real(unit: "Ω"), default: "1k", description: "Resistance"),
+        (name: "P", kind: Real(unit: "W"), default: "250m", description: "Power rating"),
+    ],
+    physics: (
+        thermal_resistance: "{130/${param.P}}",
+        heat_capacity: "{0.04*${param.P}}",
+        max_temperature: "250",
+        failure: (mode: Open, effect: Smoke),
+    ),
+)
