@@ -1,0 +1,11 @@
+(
+    description: "4-bit ripple-carry adder from four full adders",
+    prefix: "ADD",
+    ports: [
+        (name: "a", kind: Input, width: 4),
+        (name: "b", kind: Input, width: 4),
+        (name: "cin", kind: Input, description: "Carry in"),
+        (name: "sum", kind: Output, width: 4),
+        (name: "cout", kind: Output, description: "Carry out"),
+    ],
+)

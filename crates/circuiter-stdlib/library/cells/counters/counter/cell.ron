@@ -1,0 +1,11 @@
+(
+    description: "Counter: counts up at each rising clock edge while en is high",
+    prefix: "CNT",
+    ports: [
+        (name: "clk", kind: Input, description: "Clock"),
+        (name: "rst", kind: Input, description: "Synchronous reset"),
+        (name: "en", kind: Input, description: "Count enable"),
+        (name: "q", kind: Output, description: "Count", width_of: "width"),
+    ],
+    params: [(name: "width", kind: Integer, default: "8", description: "Bits")],
+)

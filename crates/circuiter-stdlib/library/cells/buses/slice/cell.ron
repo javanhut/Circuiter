@@ -1,0 +1,13 @@
+(
+    description: "Bit slice: bits lo up to lo+width-1 of a bus",
+    prefix: "BS",
+    ports: [
+        (name: "a", kind: Input, description: "The bus", width_of: "from"),
+        (name: "y", kind: Output, description: "The bits taken", width_of: "width"),
+    ],
+    params: [
+        (name: "from", kind: Integer, default: "32", description: "Width of the bus"),
+        (name: "lo", kind: Integer, default: "0", description: "Lowest bit taken"),
+        (name: "width", kind: Integer, default: "1", description: "Bits"),
+    ],
+)

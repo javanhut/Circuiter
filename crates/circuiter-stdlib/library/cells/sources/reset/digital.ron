@@ -1,0 +1,5 @@
+(
+    model: "pulse",
+    params: {"length": "${param.length}"},
+    ports: {"rst": "y"},
+)

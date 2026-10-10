@@ -1,0 +1,9 @@
+(
+    description: "Constant: a fixed value on a wire or bus",
+    prefix: "K",
+    ports: [(name: "y", kind: Output, description: "The value", width_of: "width")],
+    params: [
+        (name: "width", kind: Integer, default: "1", description: "Bits"),
+        (name: "value", kind: Integer, default: "0", description: "The value; 0x… for hex"),
+    ],
+)

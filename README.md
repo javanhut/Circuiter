@@ -12,9 +12,11 @@ to manufacture it.
 > **Status:** early development. Milestone 1 ("circuit lab") is in progress. What exists
 > today is the core design model, the standard component library, and the `circuiter`
 > desktop app: an editor for schematics, symbols and component interfaces, with a
-> built-in circuit simulator (operating point, DC sweep, transient, AC) and a physics
-> engine in which overstressed parts heat up and fail. A virtual bench is next. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for
-> the design and roadmap.
+> built-in circuit simulator (operating point, DC sweep, transient, AC), a physics
+> engine in which overstressed parts heat up and fail, a digital simulator with the
+> parts to build processors (and an example RISC-V CPU), and programs in RISC-V
+> assembly, C, Rust and SystemVerilog. Mixed analog and digital circuits are next. See
+> [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design and roadmap.
 
 ## Building
 
@@ -32,13 +34,14 @@ Circuiter is a single desktop app, `circuiter`:
 ```sh
 cargo run --release -p circuiter-app -- examples/cmos_inverter
 cargo run --release -p circuiter-app -- examples/ce_amplifier
+cargo run --release -p circuiter-app -- examples/riscv
 ```
 
 The examples are a CMOS inverter built from two MOSFETs and driven by a clock, a
 one-transistor audio amplifier (a 2N3904 common-emitter stage, about 44 dB of gain)
-with a power LED, a half adder built from logic gates, and an overstress lab where an
-LED, a fuse and a resistor are pushed
-past their limits.
+with a power LED, a half adder built from logic gates, an overstress lab where an
+LED, a fuse and a resistor are pushed past their limits, and a RISC-V processor built
+from digital parts that runs programs in assembly, C and Rust.
 
 Start your own with File → New Project… (or the welcome screen): pick an empty folder
 and the project is named after it.
@@ -92,17 +95,31 @@ and the project is named after it.
 
 **Building a component**
 
-1. `Ctrl+N` makes a new cell. Draw its circuit, and place a port (`P`) for each
-   connection it should have.
-2. As soon as it has ports, a symbol is generated: inputs on the left, outputs on the
-   right, supplies on top, grounds at the bottom. The cell can now be placed on other
-   sheets (`+` in the library panel).
-3. With nothing selected, the inspector edits the interface: description, reference
+A component is a cell built from other parts, which then becomes a part itself. A
+transistor-level gate, a filter, a whole CPU block: all are built the same way, and
+nest as deep as you like.
+
+1. `Ctrl+N` (or the toolbar's new-cell button) makes a new cell, in a tab of its own.
+   The empty sheet shows these steps.
+2. Drag parts onto it from Components or the column beside the sheet, and wire them by
+   dragging from one pin's end to another.
+3. Place a port (`P`, a name and a direction, then click a pin's end or a wire) for
+   each connection the component should have. As soon as it has ports, a symbol is
+   generated: inputs on the left, outputs on the right, supplies on top, grounds at the
+   bottom.
+4. It's now a part: it's listed first in Components (This project), ready to drag onto
+   other sheets. Double-click a placed one to go inside it.
+5. With nothing selected, Properties edits the interface: description, reference
    prefix, ports (rename, change direction, reorder, remove) and parameters. A
    generated symbol follows every change.
-4. To draw the symbol yourself, switch to the symbol view (`V`, or the
-   Schematic/Symbol switch beside the path) and edit it. Once you do, your drawing is
-   kept; new ports still get pins, which you can then move.
+6. To draw the symbol yourself, switch to the Symbol view and edit it. Once you do,
+   your drawing is kept; new ports still get pins, which you can then move.
+
+Or build and test the circuit on a sheet first, select it, and choose **Make Component
+from Selection** (Edit menu, the puzzle-piece button, or Properties). The parts and the
+wires between them become a new cell; every connection to the rest of the sheet becomes
+a port (named after its net label when it has one), while GND and VDD stay connected by
+name. The sheet itself is left as it was.
 
 **Simulating**
 
@@ -129,6 +146,65 @@ Results go stale when you edit the circuit; run the analysis again to refresh th
 VDD and GND nets wherever the gate is placed, so place a VDD symbol (`std:vdd`) on a
 voltage source's positive terminal, or label that net `VDD`. Several waveforms are drawn
 in lanes, as a logic analyser shows them.
+
+**Digital design and processors**
+
+A design made only of digital parts runs in the digital simulator: event-driven,
+four-state (0, 1, X unknown, Z undriven), buses up to 64 bits, propagation delays. It is
+fast enough to run a processor for thousands of cycles in a fraction of a second. Bus
+wires carry several bits (a port's width is set per instance by parameters, so one
+register part serves 8 or 32 bits). After a run, wires show their final values in hex,
+and Waveforms shows bits as square waves and buses as boxes holding their values; the
+pointer reads every signal at its time.
+
+The digital parts in the standard library:
+
+| Folder | Parts |
+|---|---|
+| `gates/` | not, and, or, nand, nor, xor, xnor (also simulated at transistor level when analog) |
+| `flipflops/` | dff, register (with reset and enable), pc |
+| `counters/` | counter |
+| `muxes/` | mux2, mux4, mux8, decoder |
+| `arithmetic/` | add, adder (with carries), alu (the RV32I operations), compare |
+| `buses/` | const, slice, concat, extend (zero or sign) |
+| `memory/` | regfile (32 × 32, x0 is zero), rom (instruction memory), dmem (RISC-V loads and stores) |
+| `riscv/` | immgen, control (the RV32I decoder), halt (ECALL ends the run) |
+| `sources/` | clock (also analog), reset |
+
+`examples/riscv` is a single-cycle RV32I processor built from these parts on one sheet,
+with its branch unit as a component of its own (a comparator, a multiplexer and gates),
+and a 4-bit adder made from gate-level full adders. Press Run: the program in its
+instruction memory runs until ECALL; the register file and data memory are checked
+against a reference instruction-set simulator in the tests.
+
+**Programs**
+
+Programs live in the project's `programs/` folder, listed under the cells. Click one to
+edit it in a tab: syntax colouring, line numbers, Check (builds it and marks the lines
+with errors), Save (`Ctrl+S`), and Run on the open sheet, which loads the program into
+the processor's memories and runs it. New Program makes one from a template; the file
+ending picks the language:
+
+| Language | How it's built |
+|---|---|
+| RISC-V assembly (`.s`) | Circuiter's own RV32I assembler: labels, the usual pseudo-instructions, data directives. Byte-for-byte the same as LLVM's |
+| C (`.c`) | clang for `riscv32` with lld, linked for the processor's memory map, with a small runtime for multiply and divide |
+| Rust (`.rs`) | cargo for `riscv32i-unknown-none-elf`; a `no_std` file with `#[unsafe(no_mangle)] pub extern "C" fn main() -> u32`. Without that target installed, Rust's `core` is built from source once |
+| Executables (`.elf`) | Loaded as they are |
+
+Code goes from address 0; data, constants and the stack are in the 4 KiB data memory
+at `0x1000_0000`; `main`'s return value ends in register a0.
+
+**Parts in Verilog and SystemVerilog**
+
+Describe a part in HDL instead of drawing it: write a module in a `.v` or `.sv` file
+under `programs/`, open it, and press Make Part. Its ports (with their widths) become
+the part's pins, and it runs in the digital simulator from the source file, so editing
+the file changes the part. The synthesizable subset is supported: `assign`,
+`always_comb`, `always_ff @(posedge clk or posedge rst)`, non-blocking assignments,
+`if`/`case`/`casez`, every operator, parameters, `$signed`/`$clog2`. Not yet: module
+instances inside modules, loops, functions. `examples/riscv/programs/control.sv` is the
+processor's control unit in SystemVerilog.
 
 **Heat and failure**
 
@@ -169,6 +245,12 @@ current sheet, such as unconnected pins.
 | `crates/circuiter-model` | Design data model: cells, views, libraries, projects, checks |
 | `crates/circuiter-stdlib` | Built-in `std` component library (`library/` holds the cell files) |
 | `crates/circuiter-scene` | Schematic display lists, colour themes, SVG export |
+| `crates/circuiter-netlist` | Flattening designs for the analog and digital simulators |
+| `crates/circuiter-sim` | The analog circuit simulator (SPICE-compatible, pure Rust) |
+| `crates/circuiter-physics` | Heating, limits and failures of parts |
+| `crates/circuiter-logic` | The digital simulator and its parts |
+| `crates/circuiter-riscv` | RV32I assembler, ELF loader, reference instruction-set simulator |
+| `crates/circuiter-hdl` | Verilog/SystemVerilog parser and interpreter |
 | `crates/circuiter-app` | The `circuiter` desktop app (egui on wgpu), the only binary |
 | `examples/` | Example projects |
 | `docs/` | Architecture and design notes |

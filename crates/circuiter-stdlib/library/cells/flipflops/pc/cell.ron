@@ -1,0 +1,11 @@
+(
+    description: "Program counter: a register that loads every cycle and resets to 0",
+    prefix: "PC",
+    ports: [
+        (name: "d", kind: Input, description: "Next address", width: 32),
+        (name: "clk", kind: Input, description: "Clock"),
+        (name: "rst", kind: Input, description: "Synchronous reset"),
+        (name: "q", kind: Output, description: "Address", width: 32),
+    ],
+    params: [(name: "reset", kind: Integer, default: "0", description: "Address after reset")],
+)

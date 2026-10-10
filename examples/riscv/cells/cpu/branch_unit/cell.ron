@@ -1,0 +1,12 @@
+(
+    description: "Branch unit: take = (branch and the funct3 condition holds) or jump. BEQ BNE BLT BGE BLTU BGEU, from a comparator, a multiplexer and gates",
+    prefix: "BU",
+    ports: [
+        (name: "a", kind: Input, description: "rs1", width: 32),
+        (name: "b", kind: Input, description: "rs2", width: 32),
+        (name: "funct3", kind: Input, description: "Which comparison", width: 3),
+        (name: "branch", kind: Input, description: "A branch instruction"),
+        (name: "jump", kind: Input, description: "JAL: always taken"),
+        (name: "take", kind: Output, description: "Go to pc + imm"),
+    ],
+)

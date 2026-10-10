@@ -71,6 +71,10 @@ impl CircuiterApp {
         }
         let current = ws.current().cell.clone();
         let mut action = None;
+        let programs =
+            if self.left_tab == 0 { super::code::programs(&ws.project.root) } else { Vec::new() };
+        let showing = self.active_code.and_then(|i| self.code_tabs.get(i)).map(|t| t.path.clone());
+        let (mut open_program, mut new_program) = (None, false);
         egui::ScrollArea::vertical().id_salt("explorer").auto_shrink([false; 2]).show(ui, |ui| {
             ui.add_space(4.0);
             for lib_name in &order {
@@ -95,7 +99,19 @@ impl CircuiterApp {
                     action = browse.action;
                 }
             }
+            if self.left_tab == 0 {
+                let (open, new) = programs_tree(ui, &programs, showing.as_deref());
+                open_program = open;
+                new_program = new;
+            }
         });
+        if let Some(path) = open_program {
+            self.open_code(&path);
+        }
+        if new_program {
+            self.prompt = Some(Prompt::NewProgram { name: String::new(), error: None });
+        }
+        let Some(ws) = &mut self.workspace else { return };
         match action {
             Some(BrowserAction::Open(id)) => ws.open_cell(id),
             Some(BrowserAction::Place(id)) => ws.start_placing(&id),
@@ -138,9 +154,10 @@ impl CircuiterApp {
         // The parts, by folder: the standard library's, then this project's own.
         let q = self.component_query.trim().to_lowercase();
         let mut groups: Vec<(String, Vec<CellId>)> = Vec::new();
-        let mut libs: Vec<String> = vec![circuiter_model::STD_LIBRARY.to_owned()];
+        // This project's parts first: they're the ones being built.
+        let mut libs: Vec<String> = vec![ws.project.name().to_owned()];
         libs.extend(ws.project.manifest.libraries.keys().cloned());
-        libs.push(ws.project.name().to_owned());
+        libs.push(circuiter_model::STD_LIBRARY.to_owned());
         for lib_name in &libs {
             let Some(lib) = ws.design.library(lib_name) else { continue };
             for def in lib.cells.values() {
@@ -179,7 +196,7 @@ impl CircuiterApp {
                 let header = RichText::new(folder_label(group)).color(p.text);
                 egui::CollapsingHeader::new(header)
                     .id_salt(("components", group))
-                    .default_open(searching)
+                    .default_open(searching || group == "This project")
                     .open(searching.then_some(true))
                     .show(ui, |ui| {
                         for id in ids {
@@ -480,4 +497,45 @@ impl Browse<'_> {
             }
         });
     }
+}
+
+/// The project's programs, under the cells: (the one clicked, New Program asked for).
+fn programs_tree(
+    ui: &mut egui::Ui,
+    files: &[PathBuf],
+    showing: Option<&Path>,
+) -> (Option<PathBuf>, bool) {
+    let p = style::palette(ui);
+    let mut open = None;
+    let mut new = false;
+    ui.add_space(4.0);
+    let r = egui::CollapsingHeader::new(
+        RichText::new(format!("{}  programs", icon::FILE_TEXT)).strong(),
+    )
+    .id_salt("programs")
+    .default_open(true)
+    .show(ui, |ui| {
+        for f in files {
+            let shown = f.strip_prefix("programs").unwrap_or(f).display().to_string();
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(icon::FILE_TEXT).color(p.weak));
+                if ui.selectable_label(showing == Some(f.as_path()), shown).clicked() {
+                    open = Some(f.clone());
+                }
+            });
+        }
+        if files.is_empty() {
+            ui.label(RichText::new("No programs yet").weak().italics().small());
+        }
+        if ui.small_button(format!("{}  New Program…", icon::PLUS)).clicked() {
+            new = true;
+        }
+    });
+    r.header_response.context_menu(|ui| {
+        if ui.button("New Program…").clicked() {
+            new = true;
+            ui.close();
+        }
+    });
+    (open, new)
 }

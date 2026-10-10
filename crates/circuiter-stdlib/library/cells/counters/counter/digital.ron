@@ -1,0 +1,4 @@
+(
+    model: "counter",
+    params: {"width": "${param.width}"},
+)

@@ -1,0 +1,4 @@
+(
+    model: "slice",
+    params: {"from": "${param.from}", "lo": "${param.lo}", "width": "${param.width}"},
+)

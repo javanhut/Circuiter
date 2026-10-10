@@ -1,0 +1,16 @@
+(
+    generated: true,
+    graphics: [
+        Rect(a: (-5.08, -7.62), b: (5.08, 7.62)),
+        Text(at: (-5.08, -8.89), text: "${name}"),
+        Text(at: (-5.08, 8.89), text: "branch_unit"),
+    ],
+    pins: [
+        (port: "a", at: (-7.62, -5.08), direction: Right, show_name: true),
+        (port: "b", at: (-7.62, -2.54), direction: Right, show_name: true),
+        (port: "funct3", at: (-7.62, 0.0), direction: Right, show_name: true),
+        (port: "branch", at: (-7.62, 2.54), direction: Right, show_name: true),
+        (port: "jump", at: (-7.62, 5.08), direction: Right, show_name: true),
+        (port: "take", at: (7.62, 0.0), direction: Left, show_name: true),
+    ],
+)

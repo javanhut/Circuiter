@@ -1,0 +1,11 @@
+(
+    description: "Full adder from gates: s = a xor b xor cin, cout = majority(a, b, cin)",
+    prefix: "FA",
+    ports: [
+        (name: "a", kind: Input),
+        (name: "b", kind: Input),
+        (name: "cin", kind: Input, description: "Carry in"),
+        (name: "s", kind: Output, description: "Sum"),
+        (name: "cout", kind: Output, description: "Carry out"),
+    ],
+)

@@ -1,0 +1,10 @@
+(
+    description: "ALU: the RV32I operations, chosen by op = {funct7[5], funct3}",
+    prefix: "ALU",
+    ports: [
+        (name: "a", kind: Input, width: 32),
+        (name: "b", kind: Input, width: 32),
+        (name: "op", kind: Input, description: "Operation", width: 4),
+        (name: "y", kind: Output, description: "Result", width: 32),
+    ],
+)

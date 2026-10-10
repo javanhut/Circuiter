@@ -1,0 +1,12 @@
+(
+    description: "Adder: sum = a + b + cin",
+    prefix: "ADD",
+    ports: [
+        (name: "a", kind: Input, width_of: "width"),
+        (name: "b", kind: Input, width_of: "width"),
+        (name: "cin", kind: Input, description: "Carry in"),
+        (name: "sum", kind: Output, width_of: "width"),
+        (name: "cout", kind: Output, description: "Carry out"),
+    ],
+    params: [(name: "width", kind: Integer, default: "32", description: "Bits")],
+)

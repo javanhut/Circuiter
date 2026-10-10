@@ -1,0 +1,4 @@
+(
+    model: "extend",
+    params: {"from": "${param.from}", "signed": "${param.signed}", "width": "${param.width}"},
+)

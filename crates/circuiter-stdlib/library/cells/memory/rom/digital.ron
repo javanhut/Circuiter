@@ -1,0 +1,5 @@
+(
+    model: "rom",
+    params: {"abits": "32", "bytes": "1", "width": "32"},
+    contents: "program",
+)

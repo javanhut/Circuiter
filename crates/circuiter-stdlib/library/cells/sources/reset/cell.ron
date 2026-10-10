@@ -1,0 +1,13 @@
+(
+    description: "Power-on reset: high from the start for a while, then low",
+    prefix: "RST",
+    ports: [(name: "rst", kind: Output, description: "High during reset")],
+    params: [
+        (
+            name: "length",
+            kind: Real(unit: "s"),
+            default: "200n",
+            description: "How long reset lasts",
+        ),
+    ],
+)

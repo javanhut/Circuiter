@@ -1,0 +1,4 @@
+[project]
+name = "riscv"
+top = "cpu"
+description = "A single-cycle RISC-V (RV32I) processor built from digital parts, running programs in assembly, C or Rust"

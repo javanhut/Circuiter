@@ -1,6 +1,7 @@
 //! Running simulations on the design being edited, and mapping results back onto the
 //! sheets: net voltages, device currents and power, waveforms.
 
+use crate::digital::{self, LogicRun};
 use circuiter_model::check::{Diagnostic, Severity};
 use circuiter_model::units::format_quantity;
 use circuiter_model::{CellId, Design};
@@ -9,6 +10,7 @@ use circuiter_physics::{AMBIENT, Assessment, Event, Monitor};
 use circuiter_sim::{
     AcResult, Circuit, Complex, Control, OpResult, Options, Problem, Spacing, TranResult,
 };
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
@@ -45,8 +47,19 @@ pub struct Job {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Results {
     Op(OpResult),
-    Tran { result: TranResult, tstop: f64, tstep: f64 },
-    Ac { result: AcResult, fstart: f64, fstop: f64, per_decade: usize },
+    Tran {
+        result: TranResult,
+        tstop: f64,
+        tstep: f64,
+    },
+    Ac {
+        result: AcResult,
+        fstart: f64,
+        fstop: f64,
+        per_decade: usize,
+    },
+    /// A run of the digital simulator.
+    Logic(LogicRun),
 }
 
 #[derive(Debug)]
@@ -70,12 +83,55 @@ pub struct Simulation {
     pub monitor: Option<Monitor>,
     /// After an operating point: parts that would overheat if it held.
     pub assessments: Vec<Assessment>,
+    /// Every part is digital: this runs in the digital simulator.
+    pub digital: bool,
+    /// The project directory, where programs for memories are found.
+    pub root: PathBuf,
 }
 
 impl Simulation {
     /// Flattens `top` and builds the circuit. Fails only if there is nothing to
     /// simulate; circuit problems are reported in [`Simulation::diagnostics`].
+    #[cfg(test)]
     pub fn prepare(design: &Design, top: &CellId) -> Result<Simulation, String> {
+        Simulation::prepare_in(design, top, Path::new("."))
+    }
+
+    /// As [`Simulation::prepare`], with programs found relative to `root`. A design
+    /// made only of digital parts runs in the digital simulator.
+    pub fn prepare_in(design: &Design, top: &CellId, root: &Path) -> Result<Simulation, String> {
+        if Netlist::is_digital(design, top) {
+            let netlist = Netlist::build_digital(design, top)?;
+            let mut diagnostics = netlist.diagnostics.clone();
+            let has_errors = diagnostics.iter().any(|d| d.severity == Severity::Error);
+            if !has_errors {
+                // Build it once now, so missing programs and mismatched buses show as
+                // problems before Run.
+                if let Err(message) = digital::build(&netlist, root) {
+                    diagnostics.push(Diagnostic {
+                        severity: Severity::Error,
+                        location: format!("{top}/simulation"),
+                        message,
+                    });
+                }
+            }
+            let probes = default_probes(&netlist);
+            return Ok(Simulation {
+                top: top.clone(),
+                netlist,
+                circuit: Circuit::parse("").map_err(|e| format!("netlist: {e}"))?,
+                results: None,
+                error: None,
+                stale: false,
+                probes,
+                diagnostics,
+                job: None,
+                monitor: None,
+                assessments: Vec::new(),
+                digital: true,
+                root: root.to_path_buf(),
+            });
+        }
         let netlist = Netlist::build(design, top)?;
         let mut diagnostics = netlist.diagnostics.clone();
         let location = format!("{top}/simulation");
@@ -123,7 +179,19 @@ impl Simulation {
             job: None,
             monitor: None,
             assessments: Vec::new(),
+            digital: false,
+            root: root.to_path_buf(),
         })
+    }
+
+    /// A sensible run: (stop time, step) in seconds.
+    pub fn default_run(&self) -> (f64, f64) {
+        if self.digital {
+            let t = digital::default_stop(&self.netlist);
+            (t, t / 1000.0)
+        } else {
+            default_tran(&self.circuit)
+        }
     }
 
     pub fn has_errors(&self) -> bool {
@@ -139,7 +207,11 @@ impl Simulation {
             self.error = Some("fix the errors listed under Problems first".into());
             return;
         }
-        let outcome = execute(&self.circuit, &self.netlist, analysis, Options::default());
+        let outcome = if self.digital {
+            execute_digital(&self.netlist, &self.root, analysis, &Control::default())
+        } else {
+            execute(&self.circuit, &self.netlist, analysis, Options::default())
+        };
         self.finish(outcome);
     }
 
@@ -156,8 +228,14 @@ impl Simulation {
         let circuit = self.circuit.clone();
         let netlist = self.netlist.clone();
         let (tx, rx) = channel();
+        let (is_digital, root, c) = (self.digital, self.root.clone(), control.clone());
         std::thread::spawn(move || {
-            let _ = tx.send(execute(&circuit, &netlist, analysis, options));
+            let outcome = if is_digital {
+                execute_digital(&netlist, &root, analysis, &c)
+            } else {
+                execute(&circuit, &netlist, analysis, options)
+            };
+            let _ = tx.send(outcome);
         });
         self.job = Some(Job { control, rx });
     }
@@ -292,6 +370,26 @@ impl Simulation {
         }
         Some(total)
     }
+}
+
+/// A digital run: any analysis means "run for a while" (a transient run's stop time,
+/// or the default).
+fn execute_digital(
+    netlist: &Netlist,
+    root: &Path,
+    analysis: Analysis,
+    control: &Control,
+) -> Outcome {
+    let tstop = match analysis {
+        Analysis::Tran { tstop, .. } => tstop,
+        _ => digital::default_stop(netlist),
+    };
+    let circuit = digital::build(netlist, root)?;
+    let run = digital::run(circuit, tstop, &mut |f| {
+        control.set_progress(f);
+        !control.is_cancelled()
+    })?;
+    Ok((Results::Logic(run), None))
 }
 
 fn execute(c: &Circuit, netlist: &Netlist, analysis: Analysis, o: Options) -> Outcome {
@@ -570,5 +668,148 @@ mod tests {
         let net = |port: &str| supply.ports.iter().find(|(p, _)| p == port).unwrap().1;
         let (p, n) = (sim.voltage(net("p")).unwrap(), sim.voltage(net("n")).unwrap());
         assert!((p - n - 1.8).abs() < 1e-6, "{p} {n}");
+    }
+}
+
+#[cfg(test)]
+mod digital_tests {
+    use super::*;
+    use circuiter_model::Project;
+    use circuiter_riscv::iss;
+
+    fn riscv() -> (Design, PathBuf) {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/riscv");
+        let project = Project::load(&root).unwrap();
+        let design = Design::for_project(&project, circuiter_stdlib::load().unwrap()).unwrap();
+        (design, root)
+    }
+
+    /// Runs the example processor on `program` and returns its run.
+    fn run_cpu(program: &str) -> (LogicRun, Simulation) {
+        let (mut design, root) = riscv();
+        let cpu = CellId::new("riscv", "cpu");
+        let def = design.cell_mut(&cpu).unwrap();
+        for inst in def.schematic.as_mut().unwrap().instances.iter_mut() {
+            if inst.name == "IMEM" || inst.name == "DMEM" {
+                inst.params.insert("program".into(), program.into());
+            }
+        }
+        let mut sim = Simulation::prepare_in(&design, &cpu, &root).unwrap();
+        assert!(sim.digital, "the CPU is all digital");
+        assert!(!sim.has_errors(), "{:#?}", sim.diagnostics);
+        sim.run(Analysis::Op);
+        assert_eq!(sim.error, None);
+        let Some(Results::Logic(run)) = sim.results.clone() else { panic!("no digital run") };
+        (run, sim)
+    }
+
+    /// The registers and data memory at the end must match the reference simulator.
+    fn check_against_iss(program: &str, a0: u32) {
+        let (run, _) = run_cpu(program);
+        assert!(run.halted, "{program}: the program ran to its ECALL");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/riscv");
+        let p = crate::digital::load_program(&root.join(program)).unwrap();
+        let mut golden = iss::Cpu::new(&p, 1024);
+        golden.run(1_000_000).unwrap();
+        assert_eq!(golden.regs[10], a0, "{program}: the reference result");
+        let regs = &run.memories["RF"];
+        for (k, (hw, sw)) in regs.iter().zip(golden.regs).enumerate().skip(1) {
+            // Registers the program never wrote stay unknown on the hardware.
+            if let Some(v) = hw.known() {
+                assert_eq!(v as u32, sw, "{program}: x{k}");
+            } else {
+                assert_eq!(sw, 0, "{program}: x{k} unwritten on the CPU but {sw} in the reference");
+            }
+        }
+        let mem = &run.memories["DMEM"];
+        for (k, (hw, sw)) in mem.iter().zip(&golden.data).enumerate() {
+            assert_eq!(hw.known().map(|v| v as u32), Some(*sw), "{program}: data word {k}");
+        }
+    }
+
+    #[test]
+    fn the_cpu_runs_assembly_like_the_reference() {
+        check_against_iss("programs/fib.s", 89);
+        let (run, sim) = run_cpu("programs/fib.s");
+        let fib: Vec<u64> = run.memories["DMEM"][..12].iter().map(|v| v.known().unwrap()).collect();
+        assert_eq!(fib, [0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89]);
+        // The program counter's history is there to plot.
+        let pc = sim.netlist.net("pc").unwrap();
+        assert!(run.history[pc].len() > 50);
+    }
+
+    #[test]
+    fn the_cpu_runs_c() {
+        if std::process::Command::new("clang").arg("--version").output().is_err() {
+            eprintln!("clang isn't installed; skipping");
+            return;
+        }
+        check_against_iss("programs/sum.c", 285);
+    }
+
+    #[test]
+    #[ignore = "builds Rust's core for RV32I the first time (slow)"]
+    fn the_cpu_runs_rust() {
+        check_against_iss("programs/collatz.rs", 111);
+    }
+}
+
+#[cfg(test)]
+mod hdl_tests {
+    use super::*;
+    use crate::workspace::Workspace;
+
+    fn riscv_copy() -> tempfile::TempDir {
+        fn copy(from: &Path, to: &Path) {
+            std::fs::create_dir_all(to).unwrap();
+            for entry in std::fs::read_dir(from).unwrap() {
+                let p = entry.unwrap().path();
+                let dest = to.join(p.file_name().unwrap());
+                if p.is_dir() {
+                    copy(&p, &dest)
+                } else {
+                    std::fs::copy(&p, &dest).map(drop).unwrap()
+                }
+            }
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        copy(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/riscv"), tmp.path());
+        tmp
+    }
+
+    /// The control unit written in SystemVerilog, made into a part and swapped into the
+    /// processor, runs the program exactly as the built-in one does.
+    #[test]
+    fn a_control_unit_written_in_systemverilog_runs_the_cpu() {
+        let tmp = riscv_copy();
+        let mut ws = Workspace::open(tmp.path()).unwrap();
+        let def =
+            crate::digital::cell_from_module(tmp.path(), Path::new("programs/control.sv"), None)
+                .unwrap();
+        let ports: Vec<(&str, u32)> =
+            def.cell.ports.iter().map(|p| (p.name.as_str(), p.width)).collect();
+        assert_eq!(ports[..4], [("instr", 32), ("reg_write", 1), ("alu_a", 2), ("alu_b", 1)]);
+        let id = ws.add_hdl_part(def).unwrap();
+        assert_eq!(ws.design.cell(&id).unwrap().folder, "hdl");
+        // Swap CTRL's cell for the Verilog one.
+        let cpu = CellId::new("riscv", "cpu");
+        ws.open_cell(cpu.clone());
+        let ctrl = ws.schematic().unwrap().instances.iter().position(|i| i.name == "CTRL").unwrap();
+        ws.edit(|_, _, d| {
+            d.schematic.as_mut().unwrap().instances[ctrl].cell =
+                circuiter_model::CellRef::new(None, "control");
+            Ok(())
+        })
+        .unwrap();
+        assert!(ws.problems().iter().all(|(s, _)| *s != Severity::Error), "{:?}", ws.problems());
+        let mut sim = Simulation::prepare_in(&ws.design, &cpu, tmp.path()).unwrap();
+        assert!(!sim.has_errors(), "{:#?}", sim.diagnostics);
+        sim.run(Analysis::Op);
+        assert_eq!(sim.error, None);
+        let Some(Results::Logic(run)) = &sim.results else { panic!("no run") };
+        assert!(run.halted, "the program ran to its ECALL");
+        assert_eq!(run.memories["RF"][10].known(), Some(89));
+        let fib: Vec<u64> = run.memories["DMEM"][..12].iter().map(|v| v.known().unwrap()).collect();
+        assert_eq!(fib, [0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89]);
     }
 }

@@ -1,0 +1,4 @@
+(
+    model: "dff",
+    params: {"has_reset": "1", "reset": "${param.reset}", "width": "32"},
+)

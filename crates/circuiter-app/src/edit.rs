@@ -769,6 +769,101 @@ pub fn paste(
     added
 }
 
+/// A new component made from part of a sheet: the selected parts with the wires
+/// between them, and for each net that also reaches something left behind (another
+/// part, a port, a label), a port on a short wire out of the pin. Global nets (GND,
+/// VDD) get a label instead, since they connect everywhere anyway. Returns the cell
+/// (with no symbol yet) and its ports' names.
+pub fn component_from(
+    design: &Design,
+    library: &str,
+    def: &CellDef,
+    targets: &BTreeSet<Owner>,
+    conn: &circuiter_model::connectivity::Connectivity,
+) -> Result<(CellDef, Vec<String>), String> {
+    use circuiter_model::connectivity::{Item, NetNameSource};
+    let s = def.schematic.as_ref().ok_or("make components from a schematic")?;
+    let chosen: BTreeSet<usize> = targets
+        .iter()
+        .filter_map(|t| match t {
+            Owner::Instance(i) if *i < s.instances.len() => Some(*i),
+            _ => None,
+        })
+        .collect();
+    if chosen.is_empty() {
+        return Err("select the parts the component is made of".into());
+    }
+    let (clip, centre) = copy(design, library, def, targets);
+    let origin = Point::new(Length(0), Length(0));
+    let mut new = CellDef { schematic: Some(Schematic::default()), ..CellDef::default() };
+    paste(design, library, &mut new, &clip, origin);
+    let copied: Vec<&Wire> = clip.wires.iter().collect();
+    let shift = origin - centre;
+
+    let mut ports: Vec<String> = Vec::new();
+    for net in &conn.nets {
+        // A selected pin on this net, and whether anything outside the selection is.
+        let mut inside = None;
+        let mut outside = false;
+        for item in &net.items {
+            match *item {
+                Item::Pin(k) => {
+                    let pin = &conn.pins[k];
+                    if chosen.contains(&pin.instance) {
+                        inside = inside.or(Some(k));
+                    } else {
+                        outside = true;
+                    }
+                }
+                Item::Port(_) | Item::Label(_) => outside = true,
+                Item::Wire(w) => {
+                    let moved =
+                        Wire { points: s.wires[w].points.iter().map(|&p| p + shift).collect() };
+                    outside |= !copied.contains(&&moved);
+                }
+            }
+        }
+        let (Some(k), true) = (inside, outside) else { continue };
+        let pin = &conn.pins[k];
+        let inst = &s.instances[pin.instance];
+        let Some((_, child)) = design.resolve(&inst.cell, library) else { continue };
+        let Some(sym_pin) =
+            child.symbol.as_ref().and_then(|sym| sym.pins.iter().find(|p| p.port == pin.port))
+        else {
+            continue;
+        };
+        // Out of the pin, away from the part's body, two grid steps.
+        let step = GRID.nm() * 2;
+        let (dx, dy) = match sym_pin.direction {
+            circuiter_model::symbol::PinDirection::Left => (step, 0),
+            circuiter_model::symbol::PinDirection::Right => (-step, 0),
+            circuiter_model::symbol::PinDirection::Up => (0, step),
+            circuiter_model::symbol::PinDirection::Down => (0, -step),
+        };
+        let away = inst.placement.apply(sym_pin.at + Point::new(Length(dx), Length(dy)));
+        let start = pin.at + shift;
+        let end = away + shift;
+        add_wire(&mut new, vec![start, end]);
+        if net.source == NetNameSource::Global {
+            add_label(&mut new, &net.name, end)?;
+            continue;
+        }
+        let named = matches!(net.source, NetNameSource::Label | NetNameSource::Port)
+            && validate_name(&net.name).is_ok();
+        let base = if named { net.name.clone() } else { format!("p{}", ports.len() + 1) };
+        let mut name = base.clone();
+        let mut n = 2;
+        while ports.iter().any(|p| p.eq_ignore_ascii_case(&name)) {
+            name = format!("{base}_{n}");
+            n += 1;
+        }
+        let kind = child.cell.port(&pin.port).map_or(PortKind::Passive, |p| p.kind);
+        add_port(&mut new, &name, kind, end)?;
+        ports.push(name);
+    }
+    Ok((new, ports))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -132,6 +132,18 @@ impl CircuiterApp {
                     error = Some(e);
                 }
             }
+            let parts = sheet && ws.selection.iter().any(|o| matches!(o, Owner::Instance(_)));
+            if icon_button(
+                ui,
+                icon::PUZZLE_PIECE,
+                "Make a component from the selected parts",
+                parts,
+                false,
+            )
+            .clicked()
+            {
+                prompt = Some(make_component_prompt(ws));
+            }
             toolbar_gap(ui);
             let back = ws.back_to().map(|c| format!("Back to {c}  (Alt+Left)"));
             let forward = ws.forward_to().map(|c| format!("Forward to {c}  (Alt+Right)"));
@@ -272,96 +284,44 @@ impl CircuiterApp {
         }
     }
 
-    /// The open cells, one tab each.
+    /// The open cells, then the open programs, one tab each.
     pub(super) fn doc_tabs(&mut self, ui: &mut egui::Ui) {
         let Some(ws) = &mut self.workspace else { return };
-        let p = style::palette(ui);
         let tabs = ws.tabs();
         let active = ws.active_tab();
+        let showing_code = self.active_code.is_some();
         let mut switch = None;
         let mut close = None;
+        let mut code_switch = None;
+        let mut code_close = None;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 1.0;
             for (i, id) in tabs.iter().enumerate() {
-                let on = i == active;
                 let schematic = ws.design.cell(id).is_some_and(|d| d.schematic.is_some());
                 let glyph = if schematic { icon::CIRCUITRY } else { icon::CPU };
                 let name =
                     if id.library == ws.project.name() { id.cell.clone() } else { id.to_string() };
-                let text = format!("{glyph}  {name}");
-                let galley = egui::WidgetText::from(RichText::new(&text).color(if on {
-                    p.text
-                } else {
-                    p.weak
-                }))
-                .into_galley(
-                    ui,
-                    Some(egui::TextWrapMode::Extend),
-                    f32::INFINITY,
-                    egui::TextStyle::Button,
-                );
-                let closable = tabs.len() > 1;
-                let width = galley.size().x + if closable { 52.0 } else { 28.0 };
-                let (rect, r) =
-                    ui.allocate_exact_size(egui::vec2(width, 34.0), egui::Sense::click());
-                let fill = if on {
-                    p.panel
-                } else if r.hovered() {
-                    ui.visuals().widgets.hovered.weak_bg_fill
-                } else {
-                    p.raised
-                };
-                ui.painter().rect_filled(
-                    rect,
-                    egui::CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 },
-                    fill,
-                );
-                if on {
-                    let bar = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), 2.0));
-                    ui.painter().rect_filled(bar, 0.0, p.accent);
-                }
-                ui.painter().galley(
-                    egui::pos2(rect.left() + 14.0, rect.center().y - galley.size().y / 2.0),
-                    galley,
-                    p.text,
-                );
-                let r = r.on_hover_text(id.to_string());
-                r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &name));
-                if closable {
-                    let x = egui::Rect::from_center_size(
-                        egui::pos2(rect.right() - 16.0, rect.center().y),
-                        egui::vec2(18.0, 18.0),
-                    );
-                    let xr = ui.interact(x, ui.id().with(("close-tab", i)), egui::Sense::click());
-                    if xr.hovered() {
-                        ui.painter().rect_filled(x, 4.0, ui.visuals().widgets.hovered.weak_bg_fill);
-                    }
-                    if on || r.hovered() || xr.hovered() {
-                        ui.painter().text(
-                            x.center(),
-                            egui::Align2::CENTER_CENTER,
-                            icon::X,
-                            egui::FontId::proportional(12.0),
-                            p.weak,
-                        );
-                    }
-                    let xr = xr.on_hover_text("Close");
-                    xr.widget_info(|| {
-                        egui::WidgetInfo::labeled(
-                            egui::WidgetType::Button,
-                            true,
-                            format!("Close {name}"),
-                        )
-                    });
-                    if xr.clicked() {
-                        close = Some(i);
-                    }
-                }
-                if r.clicked() {
+                let on = i == active && !showing_code;
+                let (clicked, closed) =
+                    doc_tab(ui, glyph, &name, &id.to_string(), on, tabs.len() > 1, ("cell", i));
+                if clicked {
                     switch = Some(i);
                 }
-                if r.middle_clicked() {
+                if closed {
                     close = Some(i);
+                }
+            }
+            for (i, tab) in self.code_tabs.iter().enumerate() {
+                let name = if tab.dirty() { format!("{} ●", tab.name()) } else { tab.name() };
+                let on = self.active_code == Some(i);
+                let tip = tab.path.display().to_string();
+                let (clicked, closed) =
+                    doc_tab(ui, icon::FILE_TEXT, &name, &tip, on, true, ("code", i));
+                if clicked {
+                    code_switch = Some(i);
+                }
+                if closed {
+                    code_close = Some(i);
                 }
             }
         });
@@ -369,6 +329,12 @@ impl CircuiterApp {
             ws.close_tab(i);
         } else if let Some(i) = switch {
             ws.switch_tab(i);
+            self.active_code = None;
+        }
+        if let Some(i) = code_close {
+            self.close_code(i);
+        } else if let Some(i) = code_switch {
+            self.active_code = Some(i);
         }
     }
 
@@ -379,67 +345,75 @@ impl CircuiterApp {
         let p = style::palette(ui);
         let mut prompt = None;
         let mut error = None;
-        ui.horizontal(|ui| {
-            ui.set_height(38.0);
-            ui.add_space(8.0);
-            let has_schematic = ws.has_schematic();
-            let active = match (self.show_netlist, ws.mode) {
-                (true, _) => 2,
-                (false, Mode::Schematic) => 0,
-                (false, Mode::Symbol) => 1,
-            };
-            let views =
-                [("Schematic", has_schematic), ("Symbol", true), ("Netlist", has_schematic)];
-            match style::segmented(ui, &views, active) {
-                Some(0) => {
-                    self.show_netlist = false;
-                    ws.set_mode(Mode::Schematic);
-                }
-                Some(1) => {
-                    self.show_netlist = false;
-                    ws.set_mode(Mode::Symbol);
-                }
-                Some(2) => {
-                    ws.set_mode(Mode::Schematic);
-                    self.show_netlist = true;
-                }
-                _ => {}
-            }
-            // Where in the hierarchy, when inside a part.
-            if ws.levels.len() > 1 {
+        // Narrow: the tools go on a row of their own under the view switcher.
+        let narrow = ui.available_width() < 720.0;
+        let layout = if narrow {
+            egui::Layout::top_down(egui::Align::Min)
+        } else {
+            egui::Layout::left_to_right(egui::Align::Center)
+        };
+        ui.with_layout(layout, |ui| {
+            ui.horizontal(|ui| {
+                ui.set_height(38.0);
                 ui.add_space(8.0);
-                let mut go_to = None;
-                for (depth, level) in ws.levels.iter().enumerate() {
-                    if depth > 0 {
-                        ui.label(RichText::new(icon::CARET_RIGHT).color(p.weak));
+                let has_schematic = ws.has_schematic();
+                let active = match (self.show_netlist, ws.mode) {
+                    (true, _) => 2,
+                    (false, Mode::Schematic) => 0,
+                    (false, Mode::Symbol) => 1,
+                };
+                let views =
+                    [("Schematic", has_schematic), ("Symbol", true), ("Netlist", has_schematic)];
+                match style::segmented(ui, &views, active) {
+                    Some(0) => {
+                        self.show_netlist = false;
+                        ws.set_mode(Mode::Schematic);
                     }
-                    let label = match &level.via {
-                        Some(inst) => format!("{inst} ({})", level.cell.cell),
-                        None => level.cell.cell.clone(),
-                    };
-                    let current = depth + 1 == ws.levels.len();
-                    if ui.selectable_label(current, label).clicked() && !current {
-                        go_to = Some(depth + 1);
+                    Some(1) => {
+                        self.show_netlist = false;
+                        ws.set_mode(Mode::Symbol);
+                    }
+                    Some(2) => {
+                        ws.set_mode(Mode::Schematic);
+                        self.show_netlist = true;
+                    }
+                    _ => {}
+                }
+                // Where in the hierarchy, when inside a part.
+                if ws.levels.len() > 1 {
+                    ui.add_space(8.0);
+                    let mut go_to = None;
+                    for (depth, level) in ws.levels.iter().enumerate() {
+                        if depth > 0 {
+                            ui.label(RichText::new(icon::CARET_RIGHT).color(p.weak));
+                        }
+                        let label = match &level.via {
+                            Some(inst) => format!("{inst} ({})", level.cell.cell),
+                            None => level.cell.cell.clone(),
+                        };
+                        let current = depth + 1 == ws.levels.len();
+                        if ui.selectable_label(current, label).clicked() && !current {
+                            go_to = Some(depth + 1);
+                        }
+                    }
+                    if let Some(depth) = go_to {
+                        ws.ascend_to(depth);
                     }
                 }
-                if let Some(depth) = go_to {
-                    ws.ascend_to(depth);
-                }
-            }
-            if !ws.editable() {
-                ui.add_space(8.0);
-                ui.label(RichText::new(format!("{}  read-only", icon::PROHIBIT)).color(p.weak));
-                if let Some(c) = ws.back_to().cloned() {
-                    if ui
-                        .button(format!("{}  Back to {}", icon::ARROW_LEFT, c.cell))
-                        .on_hover_text("Alt+Left")
-                        .clicked()
-                    {
-                        ws.go_back();
+                if !ws.editable() {
+                    ui.add_space(8.0);
+                    ui.label(RichText::new(format!("{}  read-only", icon::PROHIBIT)).color(p.weak));
+                    if let Some(c) = ws.back_to().cloned() {
+                        if ui
+                            .button(format!("{}  Back to {}", icon::ARROW_LEFT, c.cell))
+                            .on_hover_text("Alt+Left")
+                            .clicked()
+                        {
+                            ws.go_back();
+                        }
                     }
                 }
-            }
-
+            });
             style::trailing(ui, |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 ui.add_space(8.0);
@@ -586,4 +560,74 @@ impl CircuiterApp {
             });
         });
     }
+}
+
+/// One tab: an icon and a name, marked when in front, with a close button. Returns
+/// (clicked, close clicked); a middle click closes too.
+fn doc_tab(
+    ui: &mut egui::Ui,
+    glyph: &str,
+    name: &str,
+    tip: &str,
+    on: bool,
+    closable: bool,
+    id: (&str, usize),
+) -> (bool, bool) {
+    let p = style::palette(ui);
+    let text = format!("{glyph}  {name}");
+    let galley =
+        egui::WidgetText::from(RichText::new(&text).color(if on { p.text } else { p.weak }))
+            .into_galley(
+                ui,
+                Some(egui::TextWrapMode::Extend),
+                f32::INFINITY,
+                egui::TextStyle::Button,
+            );
+    let width = galley.size().x + if closable { 52.0 } else { 28.0 };
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(width, 34.0), egui::Sense::click());
+    let fill = if on {
+        p.panel
+    } else if r.hovered() {
+        ui.visuals().widgets.hovered.weak_bg_fill
+    } else {
+        p.raised
+    };
+    ui.painter().rect_filled(rect, egui::CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 }, fill);
+    if on {
+        let bar = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), 2.0));
+        ui.painter().rect_filled(bar, 0.0, p.accent);
+    }
+    ui.painter().galley(
+        egui::pos2(rect.left() + 14.0, rect.center().y - galley.size().y / 2.0),
+        galley,
+        p.text,
+    );
+    let r = r.on_hover_text(tip);
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
+    let mut closed = r.middle_clicked();
+    if closable {
+        let x = egui::Rect::from_center_size(
+            egui::pos2(rect.right() - 16.0, rect.center().y),
+            egui::vec2(18.0, 18.0),
+        );
+        let xr = ui.interact(x, ui.id().with(("close-tab", id)), egui::Sense::click());
+        if xr.hovered() {
+            ui.painter().rect_filled(x, 4.0, ui.visuals().widgets.hovered.weak_bg_fill);
+        }
+        if on || r.hovered() || xr.hovered() {
+            ui.painter().text(
+                x.center(),
+                egui::Align2::CENTER_CENTER,
+                icon::X,
+                egui::FontId::proportional(12.0),
+                p.weak,
+            );
+        }
+        let xr = xr.on_hover_text("Close");
+        xr.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Close {name}"))
+        });
+        closed |= xr.clicked();
+    }
+    (r.clicked(), closed)
 }

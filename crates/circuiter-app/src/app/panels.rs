@@ -282,10 +282,9 @@ impl CircuiterApp {
             return;
         }
         let Some(ws) = &self.workspace else { return };
-        let has_results = ws
-            .sim
-            .as_ref()
-            .is_some_and(|s| matches!(s.results, Some(Results::Tran { .. } | Results::Ac { .. })));
+        let has_results = ws.sim.as_ref().is_some_and(|s| {
+            matches!(s.results, Some(Results::Tran { .. } | Results::Ac { .. } | Results::Logic(_)))
+        });
         match self.bottom_tab {
             2 => {
                 egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
@@ -490,6 +489,12 @@ pub(super) fn sim_status(
         (Some(Results::Op(_)), None, false) => ("Operating point".to_owned(), p.go),
         (Some(Results::Tran { result, .. }), None, false) => {
             (format!("Transient · {} points", result.time.len()), p.go)
+        }
+        (Some(Results::Logic(run)), None, false) if run.halted => {
+            (format!("Digital · halted at {} (the program ended)", show(run.end, "s")), p.go)
+        }
+        (Some(Results::Logic(run)), None, false) => {
+            (format!("Digital · {} simulated", show(run.end, "s")), p.go)
         }
         (None, None, _) => (String::new(), p.weak),
     }

@@ -1,0 +1,12 @@
+(
+    description: "Comparator: a = b, a < b signed, a < b unsigned",
+    prefix: "CMP",
+    ports: [
+        (name: "a", kind: Input, width_of: "width"),
+        (name: "b", kind: Input, width_of: "width"),
+        (name: "eq", kind: Output, description: "a = b"),
+        (name: "lt", kind: Output, description: "a < b, signed"),
+        (name: "ltu", kind: Output, description: "a < b, unsigned"),
+    ],
+    params: [(name: "width", kind: Integer, default: "32", description: "Bits")],
+)

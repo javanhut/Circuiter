@@ -1,0 +1,21 @@
+(
+    description: "Data memory: RISC-V byte, halfword and word loads and stores",
+    prefix: "RAM",
+    ports: [
+        (name: "addr", kind: Input, description: "Byte address", width: 32),
+        (name: "wd", kind: Input, description: "Write data", width: 32),
+        (name: "we", kind: Input, description: "Write enable"),
+        (
+            name: "size",
+            kind: Input,
+            description: "Access size: the instruction\'s funct3",
+            width: 3,
+        ),
+        (name: "clk", kind: Input, description: "Clock"),
+        (name: "rd", kind: Output, description: "Read data", width: 32),
+    ],
+    params: [
+        (name: "depth", kind: Integer, default: "1024", description: "Size in 32-bit words"),
+        (name: "program", kind: Text, default: "", description: "Load its data from this program"),
+    ],
+)

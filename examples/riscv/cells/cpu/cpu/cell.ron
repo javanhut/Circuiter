@@ -1,0 +1,5 @@
+(
+    description: "Single-cycle RV32I processor: fetch, decode, execute, memory and write-back in one clock cycle. Runs the program in IMEM (set its program parameter) until ECALL",
+    prefix: "CPU",
+    ports: [],
+)

@@ -1,0 +1,13 @@
+[package]
+name = "circuiter-logic"
+description = "Circuiter's digital simulator: event-driven, four-state logic for gates, buses, registers and processors"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

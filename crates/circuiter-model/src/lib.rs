@@ -10,6 +10,7 @@ pub mod cell;
 pub mod check;
 pub mod connectivity;
 pub mod design;
+pub mod digital;
 pub mod error;
 mod format;
 pub mod geom;

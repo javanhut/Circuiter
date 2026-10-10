@@ -1,0 +1,5 @@
+(
+    description: "5 + 6 through the gate-level adder: Run, and SUM shows 0xb",
+    prefix: "T",
+    ports: [],
+)

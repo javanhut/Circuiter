@@ -1,0 +1,13 @@
+(
+    description: "Width change: zero- or sign-extend (or truncate) a bus",
+    prefix: "BX",
+    ports: [
+        (name: "a", kind: Input, description: "In", width_of: "from"),
+        (name: "y", kind: Output, description: "Out", width_of: "width"),
+    ],
+    params: [
+        (name: "from", kind: Integer, default: "8", description: "Width of a"),
+        (name: "width", kind: Integer, default: "32", description: "Bits"),
+        (name: "signed", kind: Bool, default: "false", description: "Copy the sign bit up"),
+    ],
+)

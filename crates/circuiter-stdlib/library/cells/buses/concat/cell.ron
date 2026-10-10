@@ -1,0 +1,13 @@
+(
+    description: "Bus join: a above b",
+    prefix: "BJ",
+    ports: [
+        (name: "a", kind: Input, description: "High part", width_of: "wa"),
+        (name: "b", kind: Input, description: "Low part", width_of: "wb"),
+        (name: "y", kind: Output, description: "{a, b}", width_of: "wa+wb"),
+    ],
+    params: [
+        (name: "wa", kind: Integer, default: "1", description: "Width of a"),
+        (name: "wb", kind: Integer, default: "1", description: "Width of b"),
+    ],
+)

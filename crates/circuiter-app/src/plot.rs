@@ -360,6 +360,231 @@ fn draw(
     }
 }
 
+/// A digital signal: its changes over time (picoseconds) and its width.
+pub struct LogicTrace<'a> {
+    pub name: &'a str,
+    pub changes: &'a [(u64, circuiter_logic::Value)],
+    pub width: u32,
+}
+
+/// Digital waveforms, one lane each under a shared time axis: single bits as square
+/// waves, buses as boxes holding their value in hex, unknown values in red. The
+/// pointer reads every signal's value at its time; wheel zooms, drag pans,
+/// double-click shows all.
+pub fn show_logic(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    state: &mut PlotState,
+    traces: &[LogicTrace<'_>],
+    tstop: f64,
+    theme: &Theme,
+) {
+    use circuiter_logic::Value;
+    let response = ui.allocate_rect(rect, Sense::click_and_drag());
+    let painter = ui.painter_at(rect);
+    let fg = color(theme.net_label);
+    let dim = color(theme.grid);
+    let bad = Color32::from_rgb(240, 90, 90);
+    painter.rect_filled(rect, 0.0, color(theme.background));
+    let names = 150.0;
+    let axis_h = 20.0;
+    let plot =
+        Rect::from_min_max(rect.min + Vec2::new(names, axis_h), rect.max - Vec2::new(10.0, 4.0));
+    if plot.width() < 40.0 || traces.is_empty() {
+        return;
+    }
+    // Visible window, in seconds.
+    let full = (0.0, tstop.max(1e-15));
+    let (mut u0, mut u1) = state.window.unwrap_or(full);
+    if let Some(hover) = response.hover_pos() {
+        let scroll = ui.input(|i| i.smooth_scroll_delta.y + i.smooth_scroll_delta.x);
+        if scroll != 0.0 && plot.contains(hover) {
+            let f = (-scroll as f64 * 0.002).exp();
+            let at = u0 + (u1 - u0) * ((hover.x - plot.left()) / plot.width()) as f64;
+            u0 = at - (at - u0) * f;
+            u1 = at + (u1 - at) * f;
+        }
+    }
+    if response.dragged() {
+        let du = -(response.drag_delta().x / plot.width()) as f64 * (u1 - u0);
+        u0 += du;
+        u1 += du;
+    }
+    if response.double_clicked() {
+        (u0, u1) = full;
+    }
+    let span = (u1 - u0).clamp(1e-12, full.1);
+    u0 = u0.clamp(0.0, full.1 - span);
+    u1 = u0 + span;
+    state.window = (u0 > full.0 || u1 < full.1).then_some((u0, u1));
+    let px = |t: f64| plot.left() + ((t - u0) / (u1 - u0)) as f32 * plot.width();
+    let font = FontId::monospace(10.5);
+
+    // Time axis along the top, with grid lines down through the lanes.
+    for t in ticks(u0, u1, (plot.width() / 110.0) as f64) {
+        let x = px(t);
+        painter.line_segment(
+            [Pos2::new(x, plot.top()), Pos2::new(x, plot.bottom())],
+            Stroke::new(1.0, dim.gamma_multiply(0.3)),
+        );
+        painter.text(
+            Pos2::new(x + 3.0, rect.top() + 3.0),
+            Align2::LEFT_TOP,
+            label(t, "s"),
+            font.clone(),
+            fg.gamma_multiply(0.7),
+        );
+    }
+    let lane = (plot.height() / traces.len() as f32).min(30.0);
+    let cursor = response
+        .hover_pos()
+        .filter(|p| plot.contains(*p))
+        .map(|p| u0 + (u1 - u0) * ((p.x - plot.left()) / plot.width()) as f64);
+    let at_time = |changes: &[(u64, Value)], t: f64| -> Option<Value> {
+        let ps = circuiter_logic::from_seconds(t);
+        let i = changes.partition_point(|(c, _)| *c <= ps);
+        changes.get(i.checked_sub(1)?).map(|(_, v)| *v)
+    };
+    for (k, tr) in traces.iter().enumerate() {
+        let top = plot.top() + lane * k as f32;
+        let (hi, lo) = (top + 5.0, top + lane - 5.0);
+        let c = trace_color(k);
+        // Name, and the value under the pointer.
+        let swatch = Rect::from_center_size(
+            Pos2::new(rect.left() + 12.0, (hi + lo) / 2.0),
+            Vec2::splat(9.0),
+        );
+        painter.rect_filled(swatch, 2.0, c);
+        let shown = cursor.and_then(|t| at_time(tr.changes, t)).map(|v| format!("  {}", v.hex()));
+        painter.text(
+            Pos2::new(rect.left() + 22.0, (hi + lo) / 2.0),
+            Align2::LEFT_CENTER,
+            format!("{}{}", tr.name, shown.unwrap_or_default()),
+            FontId::proportional(12.5),
+            fg,
+        );
+        // Each stretch of time with one value.
+        let ps = |t: f64| circuiter_logic::from_seconds(t);
+        let first = tr.changes.partition_point(|(t, _)| *t <= ps(u0)).saturating_sub(1);
+        let mut prev_x: Option<f32> = None;
+        let mut prev_y: Option<f32> = None;
+        let mut dense_from: Option<f32> = None;
+        for (i, (t, v)) in tr.changes.iter().enumerate().skip(first) {
+            let start = seconds(*t).max(u0);
+            if start > u1 {
+                break;
+            }
+            let end = tr.changes.get(i + 1).map_or(u1, |(n, _)| seconds(*n).min(u1));
+            let (x0, x1) = (px(start), px(end));
+            if x1 - x0 < 2.5 && tr.width > 1 || x1 - x0 < 1.0 {
+                // Too many changes to draw one by one: a solid band.
+                dense_from.get_or_insert(x0);
+                continue;
+            }
+            if let Some(d) = dense_from.take() {
+                painter.rect_filled(
+                    Rect::from_min_max(Pos2::new(d, hi), Pos2::new(x0, lo)),
+                    1.0,
+                    c.gamma_multiply(0.45),
+                );
+            }
+            if tr.width == 1 {
+                let y = match v.known() {
+                    Some(1) => Some(hi),
+                    Some(_) => Some(lo),
+                    None => None,
+                };
+                match y {
+                    Some(y) => {
+                        if let (Some(px0), Some(py0)) = (prev_x, prev_y) {
+                            if (px0 - x0).abs() < 0.5 {
+                                painter.line_segment(
+                                    [Pos2::new(x0, py0), Pos2::new(x0, y)],
+                                    Stroke::new(1.5, c),
+                                );
+                            }
+                        }
+                        painter.line_segment(
+                            [Pos2::new(x0, y), Pos2::new(x1, y)],
+                            Stroke::new(1.5, c),
+                        );
+                    }
+                    None => {
+                        let z = v.planes().2 != 0;
+                        let r = Rect::from_min_max(Pos2::new(x0, hi), Pos2::new(x1, lo));
+                        if z {
+                            let mid = (hi + lo) / 2.0;
+                            painter.line_segment(
+                                [Pos2::new(x0, mid), Pos2::new(x1, mid)],
+                                Stroke::new(1.5, Color32::from_rgb(230, 180, 60)),
+                            );
+                        } else {
+                            painter.rect_filled(r, 0.0, bad.gamma_multiply(0.35));
+                        }
+                    }
+                }
+                prev_y = y;
+            } else {
+                // A box with pointed ends, the value inside when it fits.
+                let e = (x1 - x0).min(8.0) / 2.0;
+                let mid = (hi + lo) / 2.0;
+                let pts = vec![
+                    Pos2::new(x0, mid),
+                    Pos2::new(x0 + e, hi),
+                    Pos2::new(x1 - e, hi),
+                    Pos2::new(x1, mid),
+                    Pos2::new(x1 - e, lo),
+                    Pos2::new(x0 + e, lo),
+                ];
+                let known = v.is_known();
+                let stroke = if known { c } else { bad };
+                painter.add(egui::Shape::convex_polygon(
+                    pts,
+                    stroke.gamma_multiply(0.12),
+                    Stroke::new(1.2, stroke),
+                ));
+                let text = v.hex();
+                let fits = text.len() as f32 * 6.6 + 8.0 < x1 - x0;
+                if fits {
+                    painter.text(
+                        Pos2::new((x0 + x1) / 2.0, mid),
+                        Align2::CENTER_CENTER,
+                        text,
+                        font.clone(),
+                        fg,
+                    );
+                }
+            }
+            prev_x = Some(x1);
+        }
+        if let Some(d) = dense_from {
+            painter.rect_filled(
+                Rect::from_min_max(Pos2::new(d, hi), Pos2::new(plot.right(), lo)),
+                1.0,
+                c.gamma_multiply(0.45),
+            );
+        }
+    }
+    if let Some(t) = cursor {
+        let x = px(t);
+        painter.line_segment(
+            [Pos2::new(x, plot.top()), Pos2::new(x, plot.bottom())],
+            Stroke::new(1.0, fg.gamma_multiply(0.5)),
+        );
+        painter.text(
+            Pos2::new(x + 3.0, plot.top() + 2.0),
+            Align2::LEFT_TOP,
+            label(t, "s"),
+            font,
+            fg,
+        );
+    }
+}
+
+fn seconds(ps: u64) -> f64 {
+    circuiter_logic::seconds(ps)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

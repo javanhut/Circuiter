@@ -869,6 +869,78 @@ impl Workspace {
         Ok(())
     }
 
+    /// Makes a new component, in the project, from the selected parts and the wires
+    /// between them, with a port for each connection they have to the rest of the
+    /// sheet, and opens it. The sheet itself is left as it is. Returns the new cell and
+    /// its ports.
+    pub fn component_from_selection(
+        &mut self,
+        name: &str,
+        folder: &str,
+    ) -> Result<(CellId, Vec<String>), String> {
+        if self.mode != Mode::Schematic {
+            return Err("select parts on a schematic first".into());
+        }
+        validate_name(name)?;
+        let source = self.current().cell.library.clone();
+        let def = self.current_def().ok_or("cell not found")?;
+        let (mut built, ports) = edit::component_from(
+            &self.design,
+            &source,
+            def,
+            &self.selection,
+            &self.scene.connectivity,
+        )?;
+        let project = self.project.name().to_owned();
+        if source != project {
+            // Parts named relative to their old library keep pointing there.
+            for inst in built.schematic.iter_mut().flat_map(|s| &mut s.instances) {
+                if inst.cell.library.is_none() {
+                    inst.cell.library = Some(source.clone());
+                }
+            }
+        }
+        let count = built.schematic.as_ref().map_or(0, |s| s.instances.len());
+        self.new_cell(name, folder)?;
+        self.edit(|_, _, d| {
+            d.schematic = built.schematic.take();
+            d.cell.ports = std::mem::take(&mut built.cell.ports);
+            Ok(())
+        })?;
+        let listed = if ports.is_empty() { "no ports".to_owned() } else { ports.join(", ") };
+        self.notice = Some(format!(
+            "Made {name} from {count} parts (ports: {listed}). Place it from Components → This project"
+        ));
+        Ok((CellId::new(&project, name), ports))
+    }
+
+    /// Adds a part made from a Verilog module to the project, in the `hdl` folder, or
+    /// brings an existing one up to date with its module (keeping a drawn symbol).
+    pub fn add_hdl_part(&mut self, def: CellDef) -> Result<CellId, String> {
+        let lib = self.project.name().to_owned();
+        let id = CellId::new(&lib, &def.name);
+        let library = self.design.library_mut(&lib).ok_or("project library missing")?;
+        match library.cells.get_mut(&def.name) {
+            Some(old) if old.digital.as_ref().is_some_and(|d| d.model == "verilog") => {
+                let before = old.clone();
+                let mut after = old.clone();
+                after.cell.ports = def.cell.ports;
+                after.cell.params = def.cell.params;
+                after.digital = def.digital;
+                builder::sync(&before, &mut after);
+                *old = after;
+                self.record(&id, before);
+            }
+            Some(_) => return Err(format!("{} already exists and isn't from Verilog", def.name)),
+            None => library.insert(CellDef { folder: "hdl".into(), ..def }),
+        }
+        self.dirty = true;
+        self.mark_stale();
+        self.recheck();
+        self.notice = Some(format!("{id} is a part now: place it from Components → This project"));
+        Ok(id)
+    }
+
     /// What the active tool does, for the status bar.
     pub fn hint(&self) -> &'static str {
         match (&self.tool, self.mode) {
@@ -1466,14 +1538,24 @@ impl Workspace {
         let (Some(sim), Some(schematic)) = (self.fresh_sim(), self.schematic()) else {
             return Vec::new();
         };
-        if !matches!(sim.results, Some(Results::Op(_) | Results::Tran { .. })) {
+        if !matches!(sim.results, Some(Results::Op(_) | Results::Tran { .. } | Results::Logic(_))) {
             return Vec::new();
         }
-        // After a transient run, each net shows where it ended up.
-        let value = |flat: usize| match &sim.results {
-            Some(Results::Tran { .. }) => sim.waveform(flat).and_then(|(_, v)| v.last().copied()),
-            _ => sim.voltage(flat),
+        // After a transient run, each net shows where it ended up; digital nets show
+        // their logic value.
+        let value = |flat: usize| -> Option<String> {
+            match &sim.results {
+                Some(Results::Logic(run)) => run.last(flat).map(|v| v.hex()),
+                Some(Results::Tran { .. }) => {
+                    sim.waveform(flat).and_then(|(_, v)| v.last().copied()).map(volts)
+                }
+                _ => sim.voltage(flat).map(volts),
+            }
         };
+        // Below a microvolt is numerical noise; call it zero.
+        fn volts(v: f64) -> String {
+            simulation::show(if v.abs() < 1e-6 { 0.0 } else { v }, "V")
+        }
         let conn = &self.scene.connectivity;
         let mut out = Vec::new();
         for (k, net) in conn.nets.iter().enumerate() {
@@ -1497,9 +1579,7 @@ impl Workspace {
                     _ => continue,
                 },
             };
-            // Below a microvolt is numerical noise; call it zero.
-            let v = if v.abs() < 1e-6 { 0.0 } else { v };
-            out.push((at, simulation::show(v, "V")));
+            out.push((at, v));
         }
         out
     }
@@ -1717,7 +1797,7 @@ impl Workspace {
     /// previous run when it was of the same design.
     pub fn simulate(&mut self, analysis: Analysis) {
         let top = self.sim_top().clone();
-        let mut sim = match Simulation::prepare(&self.design, &top) {
+        let mut sim = match Simulation::prepare_in(&self.design, &top, &self.project.root) {
             Ok(s) => s,
             Err(e) => {
                 self.sim = None;
@@ -1751,8 +1831,8 @@ impl Workspace {
 
     /// A sensible transient run for the design being viewed.
     pub fn default_tran(&self) -> (f64, f64) {
-        Simulation::prepare(&self.design, self.sim_top())
-            .map(|s| simulation::default_tran(&s.circuit))
+        Simulation::prepare_in(&self.design, self.sim_top(), &self.project.root)
+            .map(|s| s.default_run())
             .unwrap_or((1e-3, 1e-6))
     }
 
@@ -2464,6 +2544,180 @@ mod tests {
         for name in &names {
             assert!(ws.placeable(&CellId::new("cmos_inverter", name)), "{name}");
         }
+    }
+
+    /// Where pin `port` of instance `name` is on the current sheet.
+    fn pin_at(ws: &Workspace, name: &str, port: &str) -> Pt {
+        let i = instance(ws, name);
+        let pin = ws
+            .scene
+            .connectivity
+            .pins
+            .iter()
+            .find(|p| p.instance == i && p.port == port)
+            .unwrap_or_else(|| panic!("{name}.{port}"));
+        Pt::from(pin.at)
+    }
+
+    /// A wire dragged out of the pin end at `from` and let go at `to`, as by hand.
+    fn drag_wire(ws: &mut Workspace, from: Pt, to: Pt) {
+        assert!(ws.pin_end_at(from, 0.5).is_some(), "no pin end at {from:?}");
+        ws.gesture(Gesture::DragStart { from }, 0.5);
+        ws.gesture(Gesture::Drag { from, to }, 0.5);
+        ws.gesture(Gesture::DragEnd { from, to, shift: false }, 0.5);
+        assert_eq!(ws.tool, Tool::Select);
+    }
+
+    fn place(ws: &mut Workspace, cell: CellId, x: f64, y: f64) {
+        ws.start_placing(&cell);
+        assert!(matches!(ws.tool, Tool::Place { .. }), "{cell} isn't placeable here");
+        assert!(click(ws, x, y).is_none());
+    }
+
+    /// The whole road from parts to a new part: draw a circuit in a new cell, give it
+    /// ports, place the new part on another sheet and simulate the two together.
+    #[test]
+    fn a_component_built_from_parts_works_on_another_sheet() {
+        let (_tmp, mut ws) = example_copy();
+        let lib = ws.project.name().to_owned();
+        let std = |name: &str| CellId::new("std", name);
+
+        // A divider: in ─ R1 ─┬─ R2 ─ ground, out at the middle.
+        ws.new_cell("half", "building").unwrap();
+        place(&mut ws, std("resistor"), 0.0, 0.0);
+        place(&mut ws, std("resistor"), 20.32, 0.0);
+        place(&mut ws, std("gnd"), 30.48, 5.08);
+        let (from, to) = (pin_at(&ws, "R1", "b"), pin_at(&ws, "R2", "a"));
+        drag_wire(&mut ws, from, to);
+        let (from, to) = (pin_at(&ws, "R2", "b"), pin_at(&ws, "GND1", "gnd"));
+        drag_wire(&mut ws, from, to);
+        let (from, to) = (pin_at(&ws, "R1", "a"), Pt::new(-10.16, 0.0));
+        drag_wire(&mut ws, from, to);
+        ws.tool = Tool::Port { name: "in".into(), kind: PortKind::Input };
+        assert!(click(&mut ws, -10.16, 0.0).is_none());
+        ws.tool = Tool::Port { name: "out".into(), kind: PortKind::Output };
+        assert!(click(&mut ws, 10.16, 0.0).is_none(), "on the wire between R1 and R2");
+        assert!(ws.scene.connectivity.dangling_pins.is_empty(), "{:?}", ws.problems());
+        assert!(ws.problems().is_empty(), "{:?}", ws.problems());
+        let half = CellId::new(&lib, "half");
+        let def = ws.design.cell(&half).unwrap();
+        let ports: Vec<&str> = def.cell.ports.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(ports, ["in", "out"]);
+        assert!(builder::is_generated(def), "a symbol was made from the ports");
+
+        // Use it: a 10 V source into it, its output labelled OUT.
+        ws.new_cell("top", "").unwrap();
+        place(&mut ws, std("vdc"), -20.32, 0.0);
+        place(&mut ws, half.clone(), 10.16, 0.0);
+        let n = pin_at(&ws, "V1", "n");
+        place(&mut ws, std("gnd"), n.x, n.y + 5.08);
+        let g = pin_at(&ws, "GND1", "gnd");
+        drag_wire(&mut ws, n, g);
+        let (from, to) = (pin_at(&ws, "V1", "p"), pin_at(&ws, "X1", "in"));
+        drag_wire(&mut ws, from, to);
+        let out = pin_at(&ws, "X1", "out");
+        let tail = Pt::new(out.x + 7.62, out.y);
+        drag_wire(&mut ws, out, tail);
+        ws.tool = Tool::Label { net: "OUT".into() };
+        assert!(click(&mut ws, tail.x, tail.y).is_none());
+        let v1 = instance(&ws, "V1");
+        ws.edit(|_, _, d| {
+            edit::set_param(d, v1, "V", Some("10".into()));
+            Ok(())
+        })
+        .unwrap();
+        assert!(ws.problems().iter().all(|(s, _)| *s == Severity::Warning), "{:?}", ws.problems());
+
+        let top = CellId::new(&lib, "top");
+        let mut sim = Simulation::prepare(&ws.design, &top).unwrap();
+        sim.run(Analysis::Op);
+        assert_eq!(sim.error, None);
+        let out = sim.netlist.net("OUT").expect("OUT net");
+        let v = sim.voltage(out).unwrap();
+        assert!((v - 5.0).abs() < 1e-6, "half of 10 V, got {v}");
+
+        // And inside it, from the top: the part opens to the circuit it's made of.
+        ws.descend(instance(&ws, "X1"));
+        assert_eq!(ws.current().cell, half);
+    }
+
+    /// Build it flat, test it, then turn it into a part: the selection becomes a cell
+    /// with ports for what it was connected to.
+    #[test]
+    fn selected_parts_become_a_component() {
+        let (_tmp, mut ws) = example_copy();
+        let lib = ws.project.name().to_owned();
+        let std = |name: &str| CellId::new("std", name);
+        // V1 → R1 → (OUT) → R2 → ground, flat on one sheet.
+        ws.new_cell("bench", "").unwrap();
+        place(&mut ws, std("vdc"), -20.32, 0.0);
+        place(&mut ws, std("resistor"), 0.0, -10.16);
+        place(&mut ws, std("resistor"), 20.32, -10.16);
+        let n = pin_at(&ws, "V1", "n");
+        place(&mut ws, std("gnd"), n.x, n.y + 5.08);
+        place(&mut ws, std("gnd"), 30.48, -5.08);
+        let (from, to) = (n, pin_at(&ws, "GND1", "gnd"));
+        drag_wire(&mut ws, from, to);
+        let (from, to) = (pin_at(&ws, "V1", "p"), pin_at(&ws, "R1", "a"));
+        drag_wire(&mut ws, from, to);
+        let (from, to) = (pin_at(&ws, "R1", "b"), pin_at(&ws, "R2", "a"));
+        drag_wire(&mut ws, from, to);
+        let (from, to) = (pin_at(&ws, "R2", "b"), pin_at(&ws, "GND2", "gnd"));
+        drag_wire(&mut ws, from, to);
+        ws.tool = Tool::Label { net: "OUT".into() };
+        assert!(click(&mut ws, 10.16, -10.16).is_none());
+        assert!(ws.scene.connectivity.dangling_pins.is_empty(), "{:?}", ws.problems());
+
+        // Select the two resistors (and so the wire between them).
+        ws.selection = BTreeSet::from([
+            Owner::Instance(instance(&ws, "R1")),
+            Owner::Instance(instance(&ws, "R2")),
+        ]);
+        assert!(ws.component_from_selection("bench", "").is_err(), "name taken");
+        let (div, ports) = ws.component_from_selection("div", "blocks").unwrap();
+        // R1.a went to V1: a port. The middle was labelled OUT: a port named so.
+        // R2.b went to ground: a GND label, not a port.
+        assert_eq!(ports, ["p1", "OUT"]);
+        assert_eq!(ws.current().cell, div, "opened");
+        assert!(ws.notice.as_deref().is_some_and(|n| n.contains("Made div")));
+        let def = ws.design.cell(&div).unwrap();
+        assert_eq!(def.folder, "blocks");
+        assert!(builder::is_generated(def));
+        let s = def.schematic.as_ref().unwrap();
+        assert_eq!(s.instances.len(), 2);
+        assert!(s.labels.iter().any(|l| l.net == "GND"));
+        assert!(ws.scene.connectivity.dangling_pins.is_empty(), "{:?}", ws.problems());
+        assert!(ws.problems().is_empty(), "{:?}", ws.problems());
+        // The sheet it came from is untouched.
+        let bench = CellId::new(&lib, "bench");
+        assert_eq!(ws.design.cell(&bench).unwrap().schematic.as_ref().unwrap().instances.len(), 5);
+
+        // It works as a part: 10 V in, 5 V out.
+        ws.new_cell("top", "").unwrap();
+        place(&mut ws, std("vdc"), -20.32, 0.0);
+        place(&mut ws, div.clone(), 10.16, 0.0);
+        let n = pin_at(&ws, "V1", "n");
+        place(&mut ws, std("gnd"), n.x, n.y + 5.08);
+        let g = pin_at(&ws, "GND1", "gnd");
+        drag_wire(&mut ws, n, g);
+        let (from, to) = (pin_at(&ws, "V1", "p"), pin_at(&ws, "X1", "p1"));
+        drag_wire(&mut ws, from, to);
+        let out = pin_at(&ws, "X1", "OUT");
+        let tail = Pt::new(out.x + 7.62, out.y);
+        drag_wire(&mut ws, out, tail);
+        ws.tool = Tool::Label { net: "Y".into() };
+        assert!(click(&mut ws, tail.x, tail.y).is_none());
+        let v1 = instance(&ws, "V1");
+        ws.edit(|_, _, d| {
+            edit::set_param(d, v1, "V", Some("10".into()));
+            Ok(())
+        })
+        .unwrap();
+        let mut sim = Simulation::prepare(&ws.design, &CellId::new(&lib, "top")).unwrap();
+        sim.run(Analysis::Op);
+        assert_eq!(sim.error, None);
+        let v = sim.voltage(sim.netlist.net("Y").unwrap()).unwrap();
+        assert!((v - 5.0).abs() < 1e-6, "got {v}");
     }
 
     #[test]

@@ -94,8 +94,37 @@ pub fn check_cell(design: &Design, id: &CellId, def: &CellDef, out: &mut Vec<Dia
     if cell.global_net.is_some() && cell.ports.len() != 1 {
         report(Error, None, "a global-net cell must have exactly one port".to_owned());
     }
-    if def.schematic.is_none() && def.spice.is_none() && cell.global_net.is_none() {
-        report(Warning, None, "no schematic or SPICE view, so it cannot be simulated".to_owned());
+    if def.schematic.is_none()
+        && def.spice.is_none()
+        && def.digital.is_none()
+        && cell.global_net.is_none()
+    {
+        report(
+            Warning,
+            None,
+            "no schematic, SPICE or digital view, so it cannot be simulated".to_owned(),
+        );
+    }
+    for port in &cell.ports {
+        if let Err(e) = cell.port_width(port, &std::collections::BTreeMap::new()) {
+            report(Error, None, e);
+        }
+    }
+    if let Some(d) = &def.digital {
+        for port in d.ports.keys() {
+            if cell.port(port).is_none() {
+                report(Error, None, format!("digital view renames `{port}`, which isn't a port"));
+            }
+        }
+        if let Some(p) = &d.contents {
+            if cell.param(p).is_none() {
+                report(
+                    Error,
+                    None,
+                    format!("digital view loads contents from `{p}`, which isn't a parameter"),
+                );
+            }
+        }
     }
 
     // Symbol.

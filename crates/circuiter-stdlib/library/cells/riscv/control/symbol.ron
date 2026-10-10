@@ -1,0 +1,21 @@
+(
+    generated: true,
+    graphics: [
+        Rect(a: (-5.08, -12.7), b: (7.62, 15.24)),
+        Text(at: (-5.08, -13.97), text: "${name}"),
+        Text(at: (-5.08, 16.51), text: "control"),
+    ],
+    pins: [
+        (port: "instr", at: (-7.62, 0.0), direction: Right, show_name: true),
+        (port: "reg_write", at: (10.16, -10.16), direction: Left, show_name: true),
+        (port: "alu_a", at: (10.16, -7.62), direction: Left, show_name: true),
+        (port: "alu_b", at: (10.16, -5.08), direction: Left, show_name: true),
+        (port: "alu_op", at: (10.16, -2.54), direction: Left, show_name: true),
+        (port: "mem_write", at: (10.16, 0.0), direction: Left, show_name: true),
+        (port: "wb_sel", at: (10.16, 2.54), direction: Left, show_name: true),
+        (port: "branch", at: (10.16, 5.08), direction: Left, show_name: true),
+        (port: "jump", at: (10.16, 7.62), direction: Left, show_name: true),
+        (port: "jalr", at: (10.16, 10.16), direction: Left, show_name: true),
+        (port: "halt", at: (10.16, 12.7), direction: Left, show_name: true),
+    ],
+)

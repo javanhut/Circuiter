@@ -1,0 +1,5 @@
+(
+    model: "clock",
+    params: {"duty": "${param.duty}", "frequency": "${param.frequency}"},
+    ports: {"n": "unused", "p": "clk"},
+)

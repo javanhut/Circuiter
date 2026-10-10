@@ -1,0 +1,4 @@
+(
+    model: "concat",
+    params: {"widths": "${param.wa},${param.wb}"},
+)

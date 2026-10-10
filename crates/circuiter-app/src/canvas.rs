@@ -299,7 +299,9 @@ fn draw_overlay(
         painter.rect_filled(rect, 4.0, c.gamma_multiply(0.92));
         painter.galley(rect.min + Vec2::new(5.0, 2.0), galley, Color32::WHITE);
     }
-    for (at, text) in &overlay.notes {
+    // Zoomed far out, the tags would bury the drawing.
+    let notes: &[(Pt, String)] = if cam.scale < 3.0 { &[] } else { &overlay.notes };
+    for (at, text) in notes {
         let p = cam.to_screen(view, *at);
         if !view.contains(p) {
             continue;

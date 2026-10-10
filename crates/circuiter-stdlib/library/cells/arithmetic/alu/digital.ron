@@ -1,0 +1,4 @@
+(
+    model: "alu",
+    params: {"width": "32"},
+)

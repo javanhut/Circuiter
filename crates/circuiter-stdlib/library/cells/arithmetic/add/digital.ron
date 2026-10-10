@@ -1,0 +1,4 @@
+(
+    model: "add",
+    params: {"width": "${param.width}"},
+)

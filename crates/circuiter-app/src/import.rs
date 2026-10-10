@@ -143,6 +143,7 @@ fn subcircuit(
         symbol: Some(symbol),
         schematic: None,
         spice: Some(SpiceView { template, models: vec![lines.join("\n")] }),
+        digital: None,
     };
     Ok((def, trial))
 }
@@ -187,6 +188,7 @@ fn device(
         symbol: std.symbol.clone(),
         schematic: None,
         spice: Some(SpiceView { template: template.to_owned(), models: vec![card] }),
+        digital: None,
     };
     Ok((def, format!("{trial_line}\n{text}")))
 }

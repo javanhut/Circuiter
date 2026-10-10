@@ -29,6 +29,8 @@ pub struct FlatNet {
     pub node: String,
     /// The element terminals on this net, as (element path, port).
     pub pins: Vec<(String, String)>,
+    /// Bits: 1 for a wire, more for a bus.
+    pub width: u32,
 }
 
 /// A leaf element of the flattened circuit, such as one transistor.
@@ -52,12 +54,29 @@ impl FlatElement {
     }
 }
 
+/// A part of the flattened circuit that runs in the digital simulator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DigitalElement {
+    pub path: String,
+    pub cell: CellId,
+    /// The simulator's part: `dff`, `alu`, `rom`…
+    pub model: String,
+    /// Its parameters, with this instance's values filled in.
+    pub params: BTreeMap<String, String>,
+    /// A file to load the part's contents from (a ROM's program), as given.
+    pub contents: Option<String>,
+    /// Each port of the cell and the net it is on.
+    pub ports: Vec<(String, usize)>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Netlist {
     pub top: CellId,
     /// Index 0 is always ground.
     pub nets: Vec<FlatNet>,
     pub elements: Vec<FlatElement>,
+    /// Parts simulated digitally (from [`Netlist::build_digital`]).
+    pub digital: Vec<DigitalElement>,
     /// Expanded `.model` and `.subckt` cards, each written once.
     pub models: Vec<String>,
     /// For each expanded sheet, by instance path (`""` for the top), the flat net of
@@ -77,6 +96,44 @@ impl Netlist {
         let mut b = Builder::new(design, top);
         b.sheet(top, def, "", 0, &BTreeMap::new(), &mut vec![top.clone()]);
         Ok(b.finish())
+    }
+
+    /// Flattens the hierarchy under `top` for the digital simulator: each part with a
+    /// digital view becomes a [`DigitalElement`], other parts are opened to their
+    /// schematics, and GND and VDD become constant 0 and 1.
+    pub fn build_digital(design: &Design, top: &CellId) -> Result<Netlist, String> {
+        let def = design.cell(top).ok_or_else(|| format!("cell {top} not found"))?;
+        if def.schematic.is_none() {
+            return Err(format!("{top} has no schematic to simulate"));
+        }
+        let mut b = Builder::new(design, top);
+        b.digital = true;
+        b.sheet(top, def, "", 0, &BTreeMap::new(), &mut vec![top.clone()]);
+        Ok(b.finish())
+    }
+
+    /// Whether every part of the design under `top` can run in the digital simulator.
+    pub fn is_digital(design: &Design, top: &CellId) -> bool {
+        fn walk(design: &Design, id: &CellId, depth: usize) -> Option<bool> {
+            let def = design.cell(id)?;
+            let s = def.schematic.as_ref()?;
+            let mut any = false;
+            for inst in &s.instances {
+                let (child_id, child) = design.resolve(&inst.cell, &id.library)?;
+                if child.cell.global_net.is_some() {
+                    continue;
+                }
+                match pick_digital(child, inst.view) {
+                    Some(ViewKind::Digital) => any = true,
+                    Some(ViewKind::Schematic) if depth < 64 => {
+                        any |= walk(design, &child_id, depth + 1)?
+                    }
+                    _ => return Some(false),
+                }
+            }
+            Some(any)
+        }
+        walk(design, top, 0) == Some(true)
     }
 
     /// The flat net with this display name or SPICE node name (ignoring case).
@@ -147,6 +204,31 @@ struct Builder<'a> {
     global_names: BTreeSet<String>,
     /// Element terminals connected through hidden (global) ports.
     hidden: BTreeSet<(String, String)>,
+    /// Flattening for the digital simulator.
+    digital: bool,
+    digital_elements: Vec<PendingDigital>,
+    /// The width of each port's net, as (net, width), for every element.
+    widths: Vec<(usize, u32)>,
+}
+
+struct PendingDigital {
+    path: String,
+    cell: CellId,
+    model: String,
+    params: BTreeMap<String, String>,
+    contents: Option<String>,
+    ports: Vec<(String, usize)>,
+}
+
+/// The view a part runs as in the digital simulator: its digital view, else its
+/// schematic, else whatever it has.
+fn pick_digital(def: &CellDef, forced: Option<ViewKind>) -> Option<ViewKind> {
+    match forced {
+        Some(v) => def.has_view(v).then_some(v),
+        None => [ViewKind::Digital, ViewKind::Schematic, ViewKind::Spice]
+            .into_iter()
+            .find(|v| def.has_view(*v)),
+    }
 }
 
 const MODEL_SENTINEL: &str = "\u{0}model\u{0}";
@@ -177,6 +259,9 @@ impl<'a> Builder<'a> {
                 })
                 .collect(),
             hidden: BTreeSet::new(),
+            digital: false,
+            digital_elements: Vec::new(),
+            widths: Vec::new(),
         };
         let ground = b.new_net(Candidate { class: 0, depth: 0, source: 0, name: GROUND.into() });
         b.globals.insert(GROUND.to_owned(), ground);
@@ -288,7 +373,22 @@ impl<'a> Builder<'a> {
                     self.hidden.insert((inst_path.clone(), port.name.clone()));
                 }
             }
-            match self.design.select_view(child, inst.view) {
+            let view = if self.digital {
+                pick_digital(child, inst.view)
+            } else {
+                self.design.select_view(child, inst.view)
+            };
+            match view {
+                Some(ViewKind::Digital) if self.digital => {
+                    self.digital_element(&inst_path, &child_id, child, inst, &pins)
+                }
+                Some(ViewKind::Spice) if self.digital => self.report(
+                    Severity::Error,
+                    format!(
+                        "{inst_path}: {child_id} is an analog part; the digital simulator \
+                         can't run it"
+                    ),
+                ),
                 Some(ViewKind::Schematic) => {
                     if stack.contains(&child_id) {
                         self.report(
@@ -303,12 +403,74 @@ impl<'a> Builder<'a> {
                 }
                 Some(ViewKind::Spice) => self.element(&inst_path, &child_id, child, inst, &pins),
                 None if child.cell.global_net.is_some() => {}
+                Some(ViewKind::Digital) | None if child.digital.is_some() => self.report(
+                    Severity::Error,
+                    format!(
+                        "{inst_path}: {child_id} is a digital part; the analog simulator \
+                         can't run it (a design made only of digital parts runs digitally)"
+                    ),
+                ),
+                Some(ViewKind::Digital) => {}
                 None => self.report(
                     Severity::Error,
                     format!("{inst_path}: {child_id} has no schematic or SPICE model to simulate"),
                 ),
             }
         }
+    }
+
+    fn digital_element(
+        &mut self,
+        path: &str,
+        cell: &CellId,
+        def: &CellDef,
+        inst: &circuiter_model::schematic::Instance,
+        pins: &BTreeMap<String, usize>,
+    ) {
+        let view = def.digital.as_ref().expect("digital view");
+        let lookup = |name: &str| {
+            inst.params.get(name).cloned().or_else(|| def.cell.param(name)?.default.clone())
+        };
+        let mut params = BTreeMap::new();
+        for (k, v) in &view.params {
+            match circuiter_model::digital::expand(v, &lookup) {
+                Ok(v) => {
+                    params.insert(k.clone(), v);
+                }
+                Err(e) => {
+                    self.report(Severity::Error, format!("{path}: parameter {k}: {e}"));
+                    return;
+                }
+            }
+        }
+        let contents =
+            view.contents.as_ref().and_then(|p| lookup(p)).filter(|f| !f.trim().is_empty());
+        let mut ports = Vec::new();
+        for port in &def.cell.ports {
+            let net = match pins.get(&port.name) {
+                Some(&n) => n,
+                None => self.new_net(Candidate {
+                    class: 2,
+                    depth: usize::MAX,
+                    source: 0,
+                    name: format!("{path}.{}", port.name),
+                }),
+            };
+            match def.cell.port_width(port, &inst.params) {
+                Ok(w) => self.widths.push((net, w)),
+                Err(e) => self.report(Severity::Error, format!("{path}: {e}")),
+            }
+            let name = view.ports.get(&port.name).cloned().unwrap_or_else(|| port.name.clone());
+            ports.push((name, net));
+        }
+        self.digital_elements.push(PendingDigital {
+            path: path.to_owned(),
+            cell: cell.clone(),
+            model: view.model.clone(),
+            params,
+            contents,
+            ports,
+        });
     }
 
     fn element(
@@ -476,7 +638,7 @@ impl<'a> Builder<'a> {
             };
             index.insert(root, nets.len());
             let name = if root == ground_root { GROUND.to_owned() } else { candidate.name.clone() };
-            nets.push(FlatNet { name, node, pins: Vec::new() });
+            nets.push(FlatNet { name, node, pins: Vec::new(), width: 1 });
         }
         let flat = |b: &mut Self, id: usize| index[&b.find(id)];
 
@@ -506,6 +668,49 @@ impl<'a> Builder<'a> {
                 physics: e.physics,
             });
         }
+        let pending = std::mem::take(&mut self.digital_elements);
+        let mut digital = Vec::with_capacity(pending.len());
+        for e in pending {
+            let ports: Vec<(String, usize)> =
+                e.ports.iter().map(|(p, id)| (p.clone(), flat(&mut self, *id))).collect();
+            for (port, net) in &ports {
+                nets[*net].pins.push((e.path.clone(), port.clone()));
+            }
+            digital.push(DigitalElement {
+                path: e.path,
+                cell: e.cell,
+                model: e.model,
+                params: e.params,
+                contents: e.contents,
+                ports,
+            });
+        }
+        for (id, width) in std::mem::take(&mut self.widths) {
+            let net = flat(&mut self, id);
+            nets[net].width = nets[net].width.max(width);
+        }
+        if self.digital {
+            // Ground and the supply are logic levels: 0 and 1.
+            for (name, value) in [(GROUND, "0"), ("VDD", "1")] {
+                let Some(&id) = self.globals.get(name) else { continue };
+                let net = flat(&mut self, id);
+                if nets[net].pins.iter().any(|p| !self.hidden.contains(p)) || name == GROUND {
+                    if nets[net].pins.is_empty() {
+                        continue;
+                    }
+                    let path = format!("#{name}");
+                    nets[net].pins.push((path.clone(), "y".into()));
+                    digital.push(DigitalElement {
+                        path,
+                        cell: CellId::new(circuiter_model::STD_LIBRARY, "const"),
+                        model: "const".into(),
+                        params: BTreeMap::from([("value".to_owned(), value.to_owned())]),
+                        contents: None,
+                        ports: vec![("y".into(), net)],
+                    });
+                }
+            }
+        }
         let sheets = std::mem::take(&mut self.sheets)
             .into_iter()
             .map(|(path, ids)| (path, ids.into_iter().map(|id| flat(&mut self, id)).collect()))
@@ -513,7 +718,8 @@ impl<'a> Builder<'a> {
 
         // Rules that need the whole circuit. A global supply that only hidden power pins
         // reach has nothing driving it.
-        for net in nets.iter().skip(1) {
+        let digital_mode = self.digital;
+        for net in nets.iter().skip(1).filter(|_| !digital_mode) {
             let hidden = net.pins.iter().filter(|p| self.hidden.contains(p)).count();
             if hidden > 0 && hidden == net.pins.len() {
                 self.report(
@@ -529,7 +735,7 @@ impl<'a> Builder<'a> {
             }
         }
 
-        if nets[0].pins.is_empty() {
+        if nets[0].pins.is_empty() && !self.digital {
             // Physically a circuit works without an earth reference (a battery-powered
             // one does), so this is a warning: voltages are then measured against board
             // leakage and their absolute values are arbitrary.
@@ -552,6 +758,7 @@ impl<'a> Builder<'a> {
             top: self.top,
             nets,
             elements,
+            digital,
             models: self.models,
             sheets,
             diagnostics: self.diagnostics,

@@ -1,0 +1,4 @@
+(
+    model: "mux",
+    params: {"inputs": "8", "width": "${param.width}"},
+)

@@ -1,0 +1,8 @@
+(
+    description: "Decoder: exactly one of y\'s bits high, the one numbered a",
+    prefix: "DEC",
+    ports: [
+        (name: "a", kind: Input, description: "Number", width: 3),
+        (name: "y", kind: Output, description: "One-hot", width: 8),
+    ],
+)

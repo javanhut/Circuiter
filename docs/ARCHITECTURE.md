@@ -129,14 +129,25 @@ runs on fast digital models.
 ## Simulation architecture (Milestone 1 onward)
 
 ```
-schematic hierarchy ──► netlister ──► flat netlist ──┬─► circuiter-sim (analog, digital)
-                       (view selection,              ├─► RISC-V ISS (firmware)       [M2]
-                        ERC, A/D bridges)            └─► Verilator (SystemVerilog)   [M2]
-                                                          ▲
-                                     co-simulation scheduler (one timeline)
+schematic hierarchy ──► netlister ──► flat netlist ──┬─► circuiter-sim (analog)
+                       (view selection,              └─► circuiter-logic (digital)
+                        ERC, A/D bridges [next])              ▲ parts: built-in models,
+                                                              │ Verilog modules (circuiter-hdl),
+                                                              │ memories loaded with programs
+                                                              │ (circuiter-riscv: asm, C, Rust)
+                                     co-simulation scheduler (one timeline) [next]
                                                           ▲
                               physics engine: power ► thermal RC ► stress ► failure
 ```
+
+- **Digital simulation** (done): a design whose every part has a digital view (or a
+  schematic of such parts) is flattened by `Netlist::build_digital` and runs in
+  `circuiter-logic`: event-driven, four-state, buses up to 64 bits, delays per part,
+  delta cycles for zero-delay logic, GND and VDD as constant 0 and 1. Port widths may
+  come from instance parameters (`width_of`). Memories load programs named by a
+  parameter: assembled, compiled with the system's clang or cargo, or read from ELF.
+  A design with both analog and digital parts still runs analog (gates at transistor
+  level) until the bridges and the lockstep scheduler land.
 
 - **Netlister**: flattens the hierarchy, derives nets from wire geometry, runs ERC
   (floating nets, no DC path to ground, shorted sources), inserts A/D bridges at
@@ -180,8 +191,9 @@ schematic hierarchy ──► netlister ──► flat netlist ──┬─► c
 | `circuiter-sim` | Pure-Rust SPICE-compatible simulator: deck parser (R, C, L, K, V, I, E, F, G, H incl. `POLY`, S, W switches, D, MOSFET Level 1 with Meyer capacitance, Gummel-Poon BJT; `.subckt` with parameters, `.param`, `{}` expressions with functions; DC, AC, PULSE, SIN, PWL sources), sparse LU (KLU-style: minimum-degree ordering, threshold pivoting, refactorisation), operating point (Newton, dynamic gmin and source stepping), DC sweep, transient (switch event location), AC; progress and cancellation; model-library scanning for import; later the co-simulation scheduler | done for Milestone 1's analyses |
 | `circuiter-physics` | Per-part thermal model (exact RC update each step), instant limits (voltage, current, I²t), failure modes swapped into the running simulation, events with causes, operating-point assessment | done (first version) |
 | `circuiter-render` | Custom wgpu renderer for very large sheets and 3D | when egui's painter runs out |
-| `circuiter-rv` | RISC-V ISS (RV32IMC) with peripherals | M2 |
-| `circuiter-hdl` | Verilator integration | M2 |
+| `circuiter-logic` | Digital simulator: four-state values up to 64 bits, event queue with delta cycles and propagation delays, net resolution of several drivers, history of every net; parts from gates to register files, memories and the RV32I control unit | done (first version) |
+| `circuiter-riscv` | RV32I assembler (matches LLVM's encodings), ELF loader, reference instruction-set simulator used to check processors built from parts | done for RV32I |
+| `circuiter-hdl` | Verilog/SystemVerilog: lexer, parser and an interpreter for the synthesizable subset, running each module as a digital part | done (first version; no module instances yet) |
 | `circuiter-pcb`, `circuiter-mfg` | Layout, DRC, Gerber/drill/BOM/pick-and-place | M3 |
 
 ## Roadmap

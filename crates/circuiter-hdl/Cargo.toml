@@ -1,0 +1,14 @@
+[package]
+name = "circuiter-hdl"
+description = "Circuiter's Verilog and SystemVerilog: parts described in HDL, run in the digital simulator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+circuiter-logic.workspace = true
+
+[lints]
+workspace = true

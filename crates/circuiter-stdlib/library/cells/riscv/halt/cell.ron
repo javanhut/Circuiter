@@ -1,0 +1,8 @@
+(
+    description: "Halt: ends the simulation when a is high at a rising clock edge",
+    prefix: "HLT",
+    ports: [
+        (name: "a", kind: Input, description: "Stop request"),
+        (name: "clk", kind: Input, description: "Clock"),
+    ],
+)

@@ -1,0 +1,4 @@
+(
+    model: "regfile",
+    params: {"count": "32", "width": "32"},
+)

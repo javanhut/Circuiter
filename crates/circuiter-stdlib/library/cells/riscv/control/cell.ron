@@ -1,0 +1,17 @@
+(
+    description: "Control unit: decodes an RV32I instruction into the datapath\'s control signals",
+    prefix: "CU",
+    ports: [
+        (name: "instr", kind: Input, description: "Instruction", width: 32),
+        (name: "reg_write", kind: Output, description: "Write rd"),
+        (name: "alu_a", kind: Output, description: "ALU a: 0 rs1, 1 pc, 2 zero", width: 2),
+        (name: "alu_b", kind: Output, description: "ALU b: 0 rs2, 1 immediate"),
+        (name: "alu_op", kind: Output, description: "ALU operation", width: 4),
+        (name: "mem_write", kind: Output, description: "Store"),
+        (name: "wb_sel", kind: Output, description: "rd gets: 0 ALU, 1 memory, 2 pc+4", width: 2),
+        (name: "branch", kind: Output, description: "Conditional branch"),
+        (name: "jump", kind: Output, description: "JAL"),
+        (name: "jalr", kind: Output, description: "JALR"),
+        (name: "halt", kind: Output, description: "ECALL or EBREAK"),
+    ],
+)

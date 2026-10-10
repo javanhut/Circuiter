@@ -1,0 +1,17 @@
+(
+    description: "Multiplexer: y is one of d0 to d7, chosen by sel",
+    prefix: "MUX",
+    ports: [
+        (name: "d0", kind: Input, width_of: "width"),
+        (name: "d1", kind: Input, width_of: "width"),
+        (name: "d2", kind: Input, width_of: "width"),
+        (name: "d3", kind: Input, width_of: "width"),
+        (name: "d4", kind: Input, width_of: "width"),
+        (name: "d5", kind: Input, width_of: "width"),
+        (name: "d6", kind: Input, width_of: "width"),
+        (name: "d7", kind: Input, width_of: "width"),
+        (name: "sel", kind: Input, description: "Select", width: 3),
+        (name: "y", kind: Output, description: "Output", width_of: "width"),
+    ],
+    params: [(name: "width", kind: Integer, default: "1", description: "Bits")],
+)

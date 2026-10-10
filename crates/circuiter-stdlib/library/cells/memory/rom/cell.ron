@@ -1,0 +1,16 @@
+(
+    description: "Instruction memory: a program, read by byte address",
+    prefix: "ROM",
+    ports: [
+        (name: "addr", kind: Input, description: "Byte address", width: 32),
+        (name: "data", kind: Output, description: "Instruction", width: 32),
+    ],
+    params: [
+        (
+            name: "program",
+            kind: Text,
+            default: "",
+            description: "The program: assembly (.s), C (.c) or an executable (.elf), in the project",
+        ),
+    ],
+)

@@ -32,6 +32,7 @@ fn open(project: PathBuf) -> Harness<'static, CircuiterApp> {
         select: None,
         simulate: None,
         heat: false,
+        program: None,
         screenshot: None,
     };
     let mut h = Harness::builder()
@@ -287,8 +288,24 @@ fn back_returns_from_a_library_symbol() {
     let mut h = open(tmp.path().to_path_buf());
     h.get_by_label("Libraries").click();
     h.run_steps(3);
+    // The library is long: scroll down to the transistors with the wheel, then open.
+    let wheel = |h: &mut Harness<'_, CircuiterApp>| {
+        h.hover_at(Pos2::new(120.0, 300.0));
+        h.run_steps(2);
+        for _ in 0..4 {
+            h.event(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: Vec2::new(0.0, -200.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::NONE,
+            });
+            h.run_steps(4);
+        }
+    };
+    wheel(&mut h);
     h.get_by_label(&folder("transistors")).click();
     h.run_steps(3);
+    wheel(&mut h);
     h.get_by_label("nmos").click();
     h.run_steps(3);
     assert_eq!(h.state().workspace().unwrap().current().cell.cell, "nmos");
@@ -346,4 +363,122 @@ fn copy_and_paste_with_the_keyboard() {
     let names: Vec<&str> =
         ws.schematic().unwrap().instances[before..].iter().map(|i| i.name.as_str()).collect();
     assert_eq!(names, ["C1", "C2"]);
+}
+
+/// Where pin `port` of part `name` is on screen.
+fn pin_on_screen(h: &Harness<'_, CircuiterApp>, name: &str, port: &str) -> Pos2 {
+    let ws = h.state().workspace().unwrap();
+    let s = ws.schematic().unwrap();
+    let i = s.instances.iter().position(|inst| inst.name == name).unwrap();
+    let pin = ws.scene.connectivity.pins.iter().find(|p| p.instance == i && p.port == port);
+    screen(h, Pt::from(pin.unwrap().at))
+}
+
+fn type_and_enter(h: &mut Harness<'_, CircuiterApp>, text: &str) {
+    h.run_steps(2);
+    h.event(egui::Event::Text(text.into()));
+    h.run_steps(2);
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+}
+
+fn click_at(h: &mut Harness<'_, CircuiterApp>, at: Pos2) {
+    h.hover_at(at);
+    h.step();
+    h.drag_at(at);
+    h.step();
+    h.event(egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run_steps(3);
+}
+
+/// Everything by hand: a new cell, parts dragged in, wired pin to pin, ports added,
+/// then the new part dragged onto another sheet.
+#[test]
+fn a_new_component_built_by_hand() {
+    let tmp = example_copy("cmos_inverter");
+    let mut h = open(tmp.path().to_path_buf());
+    h.get_all_by_label("New cell  (Ctrl+N)").next().unwrap().click();
+    type_and_enter(&mut h, "pair");
+    assert_eq!(h.state().workspace().unwrap().current().cell.cell, "pair");
+
+    for dx in [-120.0, 120.0] {
+        let from = h.get_by_label("Place resistor").rect().center();
+        let (to, _) = on_sheet(&h, dx, 0.0);
+        drag(&mut h, from, to);
+    }
+    assert_eq!(instance_count(&h), 2);
+    let (from, to) = (pin_on_screen(&h, "R1", "b"), pin_on_screen(&h, "R2", "a"));
+    drag(&mut h, from, to);
+    {
+        let ws = h.state().workspace().unwrap();
+        assert_eq!(ws.schematic().unwrap().wires.len(), 1, "wired pin to pin");
+        assert_eq!(ws.scene.connectivity.dangling_pins.len(), 2);
+    }
+    // A port on each free end: P, a name, Enter, click the pin's end.
+    for (pin, name) in [(("R1", "a"), "x"), (("R2", "b"), "y")] {
+        let at = pin_on_screen(&h, pin.0, pin.1);
+        h.key_press(egui::Key::P);
+        type_and_enter(&mut h, name);
+        click_at(&mut h, at);
+    }
+    {
+        let ws = h.state().workspace().unwrap();
+        let def = ws.current_def().unwrap();
+        let ports: Vec<&str> = def.cell.ports.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(ports, ["x", "y"]);
+        assert!(def.symbol.is_some(), "a symbol was generated");
+        assert!(ws.scene.connectivity.dangling_pins.is_empty(), "{:?}", ws.problems());
+    }
+
+    // Back on the testbench, the new part is in Components, ready to drag on.
+    h.get_all_by_label("testbench").next().unwrap().click();
+    h.run_steps(3);
+    let before = instance_count(&h);
+    let from = h.get_by_label("Add pair").rect().center();
+    let (to, _) = on_sheet(&h, 150.0, 150.0);
+    drag(&mut h, from, to);
+    assert_eq!(instance_count(&h), before + 1);
+    let ws = h.state().workspace().unwrap();
+    assert_eq!(ws.schematic().unwrap().instances.last().unwrap().cell.to_string(), "pair");
+}
+
+/// A program edited in its tab and run on the processor on the sheet.
+#[test]
+fn a_program_runs_on_the_cpu_from_its_editor() {
+    let tmp = example_copy("riscv");
+    let mut h = open(tmp.path().to_path_buf());
+    h.get_by_label("fib.s").click();
+    h.run_steps(3);
+    // Change how many numbers it makes: 12 becomes 10, so a0 ends as F(10) = 34.
+    {
+        let app = h.state_mut();
+        let tab = app.code_tab_mut("programs/fib.s").expect("open");
+        tab.text = tab.text.replace("li   t3, 12", "li   t3, 10");
+    }
+    h.run_steps(2);
+    h.get_by_label_contains("Run on cpu").click();
+    for _ in 0..2000 {
+        h.step();
+        let busy = h.state().workspace().unwrap().sim.as_ref().is_some_and(|s| s.job.is_some());
+        if !busy {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    h.run_steps(2);
+    let saved = std::fs::read_to_string(tmp.path().join("programs/fib.s")).unwrap();
+    assert!(saved.contains("li   t3, 10"), "saved before running");
+    let ws = h.state().workspace().unwrap();
+    let sim = ws.sim.as_ref().expect("ran");
+    assert_eq!(sim.error, None);
+    let Some(crate::simulation::Results::Logic(run)) = &sim.results else {
+        panic!("no digital run")
+    };
+    assert!(run.halted);
+    assert_eq!(run.memories["RF"][10].known(), Some(34));
 }

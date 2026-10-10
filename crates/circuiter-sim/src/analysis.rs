@@ -34,7 +34,7 @@ impl Control {
         f64::from_bits(self.progress.load(Ordering::Relaxed))
     }
 
-    fn set_progress(&self, fraction: f64) {
+    pub fn set_progress(&self, fraction: f64) {
         self.progress.store(fraction.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
     }
 }

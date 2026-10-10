@@ -1,0 +1,15 @@
+(
+    description: "Register: loads d at a rising clock edge when en is high; rst clears it",
+    prefix: "REG",
+    ports: [
+        (name: "d", kind: Input, description: "Data", width_of: "width"),
+        (name: "clk", kind: Input, description: "Clock"),
+        (name: "rst", kind: Input, description: "Synchronous reset"),
+        (name: "en", kind: Input, description: "Load enable"),
+        (name: "q", kind: Output, description: "Output", width_of: "width"),
+    ],
+    params: [
+        (name: "width", kind: Integer, default: "32", description: "Bits"),
+        (name: "reset", kind: Integer, default: "0", description: "Value after reset"),
+    ],
+)

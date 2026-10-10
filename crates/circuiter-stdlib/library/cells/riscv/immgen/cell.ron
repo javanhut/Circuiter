@@ -1,0 +1,8 @@
+(
+    description: "Immediate generator: the sign-extended immediate of an RV32I instruction",
+    prefix: "IMM",
+    ports: [
+        (name: "instr", kind: Input, description: "Instruction", width: 32),
+        (name: "imm", kind: Output, description: "Immediate", width: 32),
+    ],
+)

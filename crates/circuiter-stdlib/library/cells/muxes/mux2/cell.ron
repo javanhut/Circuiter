@@ -1,0 +1,11 @@
+(
+    description: "Multiplexer: y is d0 or d1, chosen by sel",
+    prefix: "MUX",
+    ports: [
+        (name: "d0", kind: Input, description: "Chosen when sel is 0", width_of: "width"),
+        (name: "d1", kind: Input, description: "Chosen when sel is 1", width_of: "width"),
+        (name: "sel", kind: Input, description: "Select"),
+        (name: "y", kind: Output, description: "Output", width_of: "width"),
+    ],
+    params: [(name: "width", kind: Integer, default: "32", description: "Bits")],
+)

@@ -1,6 +1,7 @@
 //! Window layout: menus, toolbars, library browser, inspector, prompts and status bar.
 
 mod chrome;
+mod code;
 mod explorer;
 mod panels;
 
@@ -62,6 +63,9 @@ pub struct CircuiterApp {
     netlist: Option<(CellId, u64, String)>,
     /// Filters the components list.
     component_query: String,
+    /// Programs open in tabs, and the one in front (over the sheet), if any.
+    code_tabs: Vec<code::CodeTab>,
+    active_code: Option<usize>,
     /// A part dragged in from the library is being previewed on the sheet.
     drop_preview: bool,
 }
@@ -178,6 +182,16 @@ enum Prompt {
         error: Option<String>,
     },
     Shortcuts,
+    NewProgram {
+        name: String,
+        error: Option<String>,
+    },
+    /// A new component from the selected parts.
+    MakeComponent {
+        name: String,
+        folder: String,
+        error: Option<String>,
+    },
     /// Unsaved changes would be lost by `then`.
     Discard {
         then: Pending,
@@ -356,6 +370,11 @@ impl CircuiterApp {
     }
 
     #[cfg(test)]
+    pub fn code_tab_mut(&mut self, path: &str) -> Option<&mut code::CodeTab> {
+        self.code_tabs.iter_mut().find(|t| t.path == Path::new(path))
+    }
+
+    #[cfg(test)]
     pub fn canvas_view(&self) -> Option<egui::Rect> {
         self.canvas.view
     }
@@ -393,6 +412,8 @@ impl CircuiterApp {
             show_netlist: false,
             netlist: None,
             component_query: String::new(),
+            code_tabs: Vec::new(),
+            active_code: None,
             drop_preview: false,
         };
         if let Some(path) = args.project {
@@ -443,11 +464,14 @@ impl CircuiterApp {
                 ws.select_only(found);
             }
         }
+        if let Some(program) = args.program {
+            app.open_code(&program);
+        }
         app
     }
 
     fn dirty(&self) -> bool {
-        self.workspace.as_ref().is_some_and(|ws| ws.dirty)
+        self.workspace.as_ref().is_some_and(|ws| ws.dirty) || self.code_dirty()
     }
 
     fn open(&mut self, path: &Path) {
@@ -525,6 +549,7 @@ impl CircuiterApp {
     }
 
     fn save(&mut self) {
+        self.save_code();
         if let Some(ws) = &mut self.workspace {
             if let Err(e) = ws.save() {
                 self.error = Some(format!("saving: {e:#}"));
@@ -533,6 +558,8 @@ impl CircuiterApp {
     }
 
     fn simulate(&mut self, analysis: Analysis) {
+        // Programs are read from disk when the simulation starts.
+        self.save_code();
         if let Some(ws) = &mut self.workspace {
             ws.simulate(analysis);
             self.plot = PlotState::default();
@@ -665,6 +692,12 @@ impl CircuiterApp {
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
+        // Saving works while typing in the code editor too.
+        if self.prompt.is_none()
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::S))
+        {
+            self.save();
+        }
         if self.prompt.is_some() || ctx.egui_wants_keyboard_input() {
             return;
         }
@@ -966,6 +999,17 @@ impl CircuiterApp {
                         self.error = Some(e);
                     }
                 }
+                ui.separator();
+                let parts = ws.selection.iter().any(|o| matches!(o, Owner::Instance(_)));
+                if ui
+                    .add_enabled(
+                        sheet && parts,
+                        egui::Button::new("Make Component from Selection…"),
+                    )
+                    .clicked()
+                {
+                    self.prompt = Some(make_component_prompt(ws));
+                }
             });
             ui.menu_button("Place", |ui| {
                 let Some(ws) = &mut self.workspace else { return };
@@ -1087,10 +1131,35 @@ impl CircuiterApp {
                     }
                 }
                 (Some(_), Some(_)) => {
+                    let p = style::palette(ui);
                     ui.label(
-                        RichText::new(format!("{} objects selected", ws.selection.len())).strong(),
+                        RichText::new(format!("{} objects selected", ws.selection.len()))
+                            .size(18.0)
+                            .strong(),
                     );
-                    if ws.editable() && ui.button("Delete").clicked() {
+                    ui.add_space(6.0);
+                    let parts = ws.selection.iter().any(|o| matches!(o, Owner::Instance(_)));
+                    if parts && ws.mode == Mode::Schematic {
+                        let make = egui::Button::new(format!(
+                            "{}  Make Component from Selection…",
+                            style::icon::PUZZLE_PIECE
+                        ));
+                        if ui.add(make).clicked() {
+                            prompt = Some(make_component_prompt(ws));
+                        }
+                        ui.label(
+                            RichText::new(
+                                "Turns these parts, and the wires between them, into a new \
+                                 part you can place anywhere: each connection they have to the \
+                                 rest of the sheet becomes a port.",
+                            )
+                            .color(p.weak),
+                        );
+                        ui.add_space(6.0);
+                    }
+                    if ws.editable()
+                        && ui.button(format!("{}  Delete", style::icon::TRASH)).clicked()
+                    {
                         ws.delete_selection();
                     }
                 }
@@ -1103,58 +1172,12 @@ impl CircuiterApp {
     }
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            match self.cursor {
-                Some(p) => {
-                    let mil = |mm: f64| (mm / 0.0254).round() as i64;
-                    ui.label(
-                        RichText::new(format!(
-                            "X {:>8.2}  Y {:>8.2} mm   ({}, {} mil)",
-                            p.x,
-                            p.y,
-                            mil(p.x),
-                            mil(p.y)
-                        ))
-                        .monospace(),
-                    );
-                }
-                None => {
-                    ui.label(RichText::new("X        –  Y        – mm").monospace().weak());
-                }
-            }
-            ui.separator();
+        // The right-hand items first, so the hint on the left gets the room left over
+        // and is cut short rather than drawn over them.
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if let Some(ws) = &self.workspace {
-                if let Some(notice) = &ws.notice {
-                    ui.label(RichText::new(format!("⚡ {notice}")).color(ACCENT));
-                } else if ws.editable() {
-                    ui.label(RichText::new(ws.tool.name()).strong());
-                    ui.add(egui::Label::new(RichText::new(ws.hint()).weak()).truncate());
-                } else if let Some(owner) = self.hovered {
-                    ui.label(ws.describe(owner));
-                }
-            }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let Some(ws) = &self.workspace else { return };
                 if let Some(sim) = &ws.sim {
-                    let (text, c) = match (&sim.results, &sim.error, sim.stale) {
-                        _ if sim.job.is_some() => {
-                            let p = sim.job.as_ref().map_or(0.0, |j| j.control.progress());
-                            (format!("simulating… {:.0}%  (Esc cancels)", p * 100.0), ACCENT)
-                        }
-                        (_, Some(e), _) if e == "cancelled" => ("cancelled".to_owned(), WARNING),
-                        (_, Some(_), _) => ("simulation failed".to_owned(), ERROR),
-                        (Some(Results::Ac { result, .. }), None, false) => {
-                            (format!("AC sweep · {} frequencies", result.frequency.len()), ACCENT)
-                        }
-                        (Some(_), None, true) => ("results out of date".to_owned(), WARNING),
-                        (Some(Results::Op(_)), None, false) => {
-                            ("operating point".to_owned(), ACCENT)
-                        }
-                        (Some(Results::Tran { result, .. }), None, false) => {
-                            (format!("transient · {} points", result.time.len()), ACCENT)
-                        }
-                        (None, None, _) => (String::new(), ACCENT),
-                    };
+                    let (text, c) = panels::sim_status(sim, style::palette(ui));
                     if !text.is_empty() {
                         ui.label(RichText::new(text).color(c).small());
                         ui.separator();
@@ -1166,19 +1189,53 @@ impl CircuiterApp {
                 }
                 let problems = ws.problems();
                 let errors = problems.iter().filter(|(s, _)| *s == Severity::Error).count();
+                let icon = style::icon::CHECK_CIRCLE;
                 let text = match (errors, problems.len()) {
-                    (_, 0) => RichText::new("✔ no problems").color(OK),
-                    (0, n) => RichText::new(format!("⚠ {n} warning(s)")).color(WARNING),
-                    (e, n) => {
-                        RichText::new(format!("✖ {e} error(s), {} warning(s)", n - e)).color(ERROR)
-                    }
+                    (_, 0) => RichText::new(format!("{icon} no problems")).color(OK),
+                    (0, n) => RichText::new(format!("{} {n} warning(s)", style::icon::WARNING))
+                        .color(WARNING),
+                    (e, n) => RichText::new(format!(
+                        "{} {e} error(s), {} warning(s)",
+                        style::icon::X_CIRCLE,
+                        n - e
+                    ))
+                    .color(ERROR),
                 };
                 ui.label(text);
-                if let Some(owner) = self.hovered {
-                    if ws.editable() {
-                        ui.separator();
-                        ui.label(RichText::new(ws.describe(owner)).weak());
+                if let Some(owner) = self.hovered.filter(|_| ws.editable()) {
+                    ui.separator();
+                    ui.add(egui::Label::new(RichText::new(ws.describe(owner)).weak()).truncate());
+                }
+            }
+            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                match self.cursor {
+                    Some(p) => {
+                        let mil = |mm: f64| (mm / 0.0254).round() as i64;
+                        ui.label(
+                            RichText::new(format!(
+                                "X {:>8.2}  Y {:>8.2} mm   ({}, {} mil)",
+                                p.x,
+                                p.y,
+                                mil(p.x),
+                                mil(p.y)
+                            ))
+                            .monospace(),
+                        );
                     }
+                    None => {
+                        ui.label(RichText::new("X        –  Y        – mm").monospace().weak());
+                    }
+                }
+                ui.separator();
+                let Some(ws) = &self.workspace else { return };
+                if let Some(notice) = &ws.notice {
+                    let text = RichText::new(format!("{}  {notice}", style::icon::LIGHTNING));
+                    ui.add(egui::Label::new(text.color(ACCENT)).truncate());
+                } else if ws.editable() {
+                    ui.label(RichText::new(ws.tool.name()).strong());
+                    ui.add(egui::Label::new(RichText::new(ws.hint()).weak()).truncate());
+                } else if let Some(owner) = self.hovered {
+                    ui.add(egui::Label::new(ws.describe(owner)).truncate());
                 }
             });
         });
@@ -1268,6 +1325,21 @@ impl CircuiterApp {
             return;
         }
         match &sim.results {
+            Some(Results::Logic(run)) => {
+                let traces: Vec<plot::LogicTrace<'_>> = sim
+                    .probes
+                    .iter()
+                    .zip(&names)
+                    .filter_map(|(&p, n)| {
+                        Some(plot::LogicTrace {
+                            name: n,
+                            changes: run.history.get(p)?,
+                            width: sim.netlist.nets.get(p)?.width,
+                        })
+                    })
+                    .collect();
+                plot::show_logic(ui, area, &mut self.plot, &traces, run.end.max(1e-12), self.theme);
+            }
             Some(Results::Tran { tstop, .. }) => {
                 let waves: Vec<(&[f64], Vec<f64>)> =
                     sim.probes.iter().filter_map(|&p| sim.waveform(p)).collect();
@@ -1362,6 +1434,7 @@ impl CircuiterApp {
         let enter = ctx.input(|i| i.key_pressed(Key::Enter));
         let mut then: Option<Pending> = None;
         let mut save_first = false;
+        let mut program: Option<String> = None;
         let ws = &mut self.workspace;
 
         egui::Modal::new(egui::Id::new("prompt")).show(ctx, |ui| {
@@ -1826,6 +1899,66 @@ impl CircuiterApp {
                         }
                     }
                 }
+                Prompt::MakeComponent { name, folder, error } => {
+                    ui.heading("Make Component");
+                    ui.label(
+                        "The selected parts and the wires between them become a new part. \
+                         Each connection to the rest of the sheet becomes a port; GND and \
+                         VDD stay connected by name. This sheet is left as it is.",
+                    );
+                    ui.add_space(4.0);
+                    let r = ui.add(
+                        egui::TextEdit::singleline(name)
+                            .hint_text("Name: divider, nand2, amp…")
+                            .desired_width(f32::INFINITY),
+                    );
+                    if !ui.memory(|m| m.focused().is_some()) {
+                        r.request_focus();
+                    }
+                    ui.label(RichText::new("Folder").small());
+                    let folders = ws
+                        .as_ref()
+                        .and_then(|ws| ws.design.library(ws.project.name()))
+                        .map(|l| l.all_folders())
+                        .unwrap_or_default();
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(folder)
+                                .hint_text("top level")
+                                .desired_width(300.0),
+                        );
+                        if let Some(f) = folder_menu(ui, &folders) {
+                            *folder = f;
+                        }
+                    });
+                    if let Some(e) = error {
+                        ui.colored_label(ERROR, e.as_str());
+                    }
+                    if enter {
+                        if let Some(ws) = ws {
+                            match ws.component_from_selection(name.trim(), folder) {
+                                Ok(_) => close = true,
+                                Err(e) => *error = Some(e),
+                            }
+                        }
+                    }
+                }
+                Prompt::NewProgram { name, error } => {
+                    ui.heading("New Program");
+                    ui.label("A file in the project's programs folder. The ending picks the language.");
+                    let r = ui.add(
+                        egui::TextEdit::singleline(name)
+                            .hint_text("blink.s, sort.c, fib.rs, alu.sv…")
+                            .desired_width(f32::INFINITY),
+                    );
+                    r.request_focus();
+                    if let Some(e) = error {
+                        ui.colored_label(ERROR, e.as_str());
+                    }
+                    if enter {
+                        program = Some(name.clone());
+                    }
+                }
                 Prompt::Shortcuts => {
                     ui.heading("Keyboard Shortcuts");
                     ui.add_space(6.0);
@@ -1863,6 +1996,16 @@ impl CircuiterApp {
 
         if close || then.is_some() {
             self.prompt = None;
+        }
+        if let Some(name) = program {
+            match self.new_program(&name) {
+                Ok(()) => self.prompt = None,
+                Err(e) => {
+                    if let Some(Prompt::NewProgram { error, .. }) = &mut self.prompt {
+                        *error = Some(e);
+                    }
+                }
+            }
         }
         if save_first {
             self.save();
@@ -1918,6 +2061,56 @@ fn ac_prompt() -> Prompt {
 
 fn new_port_prompt(place: bool) -> Prompt {
     Prompt::Port { name: String::new(), kind: PortKind::Input, place, error: None }
+}
+
+/// What to do on an empty sheet: how a component is built from other parts.
+fn empty_sheet_guide(ui: &egui::Ui, sheet: egui::Rect, theme: &Theme) {
+    let p = style::palette_for(theme.dark);
+    let steps = [
+        (style::icon::HAND, "Drag parts here from Components, or the column beside the sheet"),
+        (style::icon::LINE_SEGMENTS, "Wire them: drag from one pin's end to another"),
+        (style::icon::PLUG, "Add a port (P) for each connection the component should have"),
+        (style::icon::PUZZLE_PIECE, "It's now a part: place it on other sheets from Components"),
+    ];
+    let painter = ui.painter_at(sheet);
+    let top = sheet.center() - egui::vec2(220.0, 90.0);
+    painter.text(
+        top,
+        egui::Align2::LEFT_TOP,
+        "Build a component",
+        egui::FontId::proportional(20.0),
+        p.text,
+    );
+    for (k, (glyph, text)) in steps.iter().enumerate() {
+        let y = top.y + 44.0 + k as f32 * 30.0;
+        painter.text(
+            egui::pos2(top.x + 4.0, y),
+            egui::Align2::LEFT_TOP,
+            *glyph,
+            egui::FontId::proportional(17.0),
+            p.accent,
+        );
+        painter.text(
+            egui::pos2(top.x + 34.0, y + 1.0),
+            egui::Align2::LEFT_TOP,
+            format!("{}. {text}", k + 1),
+            egui::FontId::proportional(14.0),
+            p.weak,
+        );
+    }
+    painter.text(
+        egui::pos2(top.x, top.y + 44.0 + 4.0 * 30.0 + 10.0),
+        egui::Align2::LEFT_TOP,
+        "Or build it on a sheet, select it, and use Make Component from Selection.",
+        egui::FontId::proportional(13.0),
+        p.weak.gamma_multiply(0.8),
+    );
+}
+
+/// The Make Component dialog, starting in the folder of the sheet the parts are on.
+fn make_component_prompt(ws: &Workspace) -> Prompt {
+    let Prompt::NewCell { folder, .. } = new_cell_prompt(ws) else { unreachable!() };
+    Prompt::MakeComponent { name: String::new(), folder, error: None }
 }
 
 /// The New Cell dialog, starting in the folder of the project cell being edited.
@@ -2046,7 +2239,10 @@ fn instance_panel(ui: &mut egui::Ui, ws: &mut Workspace, index: usize, field: &m
     section(ui, "Model");
     let model = match ws.design.select_view(&def, inst.view) {
         Some(ViewKind::Schematic) => "Schematic (hierarchical)",
+        Some(ViewKind::Spice) if def.digital.is_some() => "SPICE model, and a digital model",
         Some(ViewKind::Spice) => "SPICE model",
+        Some(ViewKind::Digital) => "Digital model",
+        None if def.digital.is_some() => "Digital model",
         None if def.cell.global_net.is_some() => "Global net",
         None => "No simulation view",
     };
@@ -2883,9 +3079,17 @@ impl eframe::App for CircuiterApp {
                         bottom: 0,
                     }))
                     .show(ui, |ui| self.doc_tabs(ui));
-                egui::Panel::top("canvas-header")
-                    .frame(egui::Frame::new().fill(p.panel))
-                    .show(ui, |ui| self.canvas_header(ui));
+                if self.active_code.is_none() {
+                    egui::Panel::top("canvas-header")
+                        .frame(egui::Frame::new().fill(p.panel))
+                        .show(ui, |ui| self.canvas_header(ui));
+                }
+            }
+            if self.active_code.is_some() && self.workspace.is_some() {
+                self.cursor = None;
+                self.hovered = None;
+                self.code_view(ui);
+                return;
             }
             let theme = self.theme;
             let show_grid = self.show_grid;
@@ -2938,6 +3142,12 @@ impl eframe::App for CircuiterApp {
                     let gestures = out.gestures;
                     self.drop_part(&ctx, cursor, tolerance);
                     let Some(ws) = &mut self.workspace else { return };
+                    let empty_sheet = ws.schematic().is_some_and(|s| {
+                        s.instances.is_empty() && s.wires.is_empty() && s.ports.is_empty()
+                    });
+                    if empty_sheet && ws.editable() && !matches!(ws.tool, Tool::Place { .. }) {
+                        empty_sheet_guide(ui, canvas_rect, theme);
+                    }
                     if ws.mode == Mode::Symbol && ws.symbol().is_none() && ws.tool == Tool::Select {
                         let text = if ws.editable() {
                             "No symbol yet.\nAdd a port in the inspector and one is generated,\nor draw one with the tools above."

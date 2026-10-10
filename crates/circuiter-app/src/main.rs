@@ -2,6 +2,7 @@
 
 mod app;
 mod canvas;
+mod digital;
 mod edit;
 #[cfg(test)]
 mod gui_tests;
@@ -11,6 +12,7 @@ mod plot;
 mod simulation;
 mod style;
 mod symbol_edit;
+mod toolchain;
 mod workspace;
 
 use clap::Parser;
@@ -41,6 +43,9 @@ pub struct Args {
     /// After a transient run, plot part temperatures rather than signals.
     #[arg(long)]
     pub heat: bool,
+    /// Open a program (relative to the project) in the code editor.
+    #[arg(long)]
+    pub program: Option<PathBuf>,
     /// Render the window, save a PNG screenshot to this path, and exit.
     #[arg(long)]
     pub screenshot: Option<PathBuf>,

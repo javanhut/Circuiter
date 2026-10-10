@@ -1,0 +1,13 @@
+[package]
+name = "circuiter-riscv"
+description = "Circuiter's RISC-V tools: an RV32I assembler, an ELF loader and a reference instruction-set simulator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

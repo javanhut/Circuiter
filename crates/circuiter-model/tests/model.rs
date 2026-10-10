@@ -136,9 +136,11 @@ fn snapshot(root: &Path) -> Vec<(String, String)> {
     while let Some(dir) = stack.pop() {
         for entry in std::fs::read_dir(dir).unwrap() {
             let path = entry.unwrap().path();
+            let ours = path.extension().is_some_and(|e| e == "ron" || e == "toml");
             if path.is_dir() {
                 stack.push(path);
-            } else {
+            } else if ours {
+                // Files Circuiter writes; others (programs, notes) are the user's.
                 let rel = path.strip_prefix(root).unwrap().display().to_string();
                 out.push((rel, std::fs::read_to_string(&path).unwrap()));
             }

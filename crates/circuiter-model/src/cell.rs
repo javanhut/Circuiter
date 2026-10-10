@@ -131,16 +131,82 @@ pub struct Port {
     /// the part is placed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub global: Option<String>,
+    /// Bits carried: 1 for a single wire, more for a bus (`addr` is 32).
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub width: u32,
+    /// The width set by parameters instead, per instance: a parameter's name, or a sum
+    /// of names and numbers (`wa+wb`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width_of: Option<String>,
+}
+
+fn one() -> u32 {
+    1
+}
+
+fn is_one(w: &u32) -> bool {
+    *w == 1
 }
 
 impl Port {
     pub fn new(name: &str, kind: PortKind) -> Self {
-        Port { name: name.to_owned(), kind, description: String::new(), global: None }
+        Port {
+            name: name.to_owned(),
+            kind,
+            description: String::new(),
+            global: None,
+            width: 1,
+            width_of: None,
+        }
+    }
+
+    /// The port as named on a symbol: `addr[31:0]` for a bus.
+    pub fn label(&self) -> String {
+        if self.width > 1 {
+            format!("{}[{}:0]", self.name, self.width - 1)
+        } else {
+            self.name.clone()
+        }
     }
 }
 
 fn is_passive(kind: &PortKind) -> bool {
     *kind == PortKind::Passive
+}
+
+impl Cell {
+    /// The width of `port` on an instance with these parameter values (the rest at
+    /// their defaults).
+    pub fn port_width(
+        &self,
+        port: &Port,
+        params: &std::collections::BTreeMap<String, String>,
+    ) -> Result<u32, String> {
+        let Some(expr) = &port.width_of else { return Ok(port.width) };
+        let mut total: u64 = 0;
+        for term in expr.split('+').map(str::trim) {
+            let text = match term.parse::<u64>() {
+                Ok(n) => n.to_string(),
+                Err(_) => params
+                    .get(term)
+                    .cloned()
+                    .or_else(|| self.param(term)?.default.clone())
+                    .ok_or_else(|| {
+                    format!("port {}: no parameter `{term}` for its width", port.name)
+                })?,
+            };
+            total += text.trim().parse::<u64>().map_err(|_| {
+                format!("port {}: width `{text}` (from {term}) isn't a whole number", port.name)
+            })?;
+        }
+        if !(1..=64).contains(&total) {
+            return Err(format!(
+                "port {} would be {total} bits wide; 1 to 64 are possible",
+                port.name
+            ));
+        }
+        Ok(total as u32)
+    }
 }
 
 /// Electrical type of a port, used by electrical rule checks.
@@ -215,6 +281,8 @@ impl ParamKind {
 pub enum ViewKind {
     Schematic,
     Spice,
+    /// A part of the digital simulator.
+    Digital,
 }
 
 impl fmt::Display for ViewKind {
@@ -222,6 +290,7 @@ impl fmt::Display for ViewKind {
         f.write_str(match self {
             ViewKind::Schematic => "schematic",
             ViewKind::Spice => "spice",
+            ViewKind::Digital => "digital",
         })
     }
 }
@@ -238,6 +307,7 @@ pub struct CellDef {
     pub symbol: Option<Symbol>,
     pub schematic: Option<Schematic>,
     pub spice: Option<SpiceView>,
+    pub digital: Option<crate::digital::DigitalView>,
 }
 
 impl CellDef {
@@ -245,6 +315,7 @@ impl CellDef {
         match view {
             ViewKind::Schematic => self.schematic.is_some(),
             ViewKind::Spice => self.spice.is_some(),
+            ViewKind::Digital => self.digital.is_some(),
         }
     }
 }

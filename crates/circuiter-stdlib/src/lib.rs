@@ -13,7 +13,14 @@ static LIBRARY_DIR: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/library");
 pub fn load() -> Result<Library> {
     let mut files = Vec::new();
     collect(&LIBRARY_DIR, &mut files);
-    Library::from_files(STD_LIBRARY, files.iter().map(|(p, t)| (*p, *t)))
+    let mut lib = Library::from_files(STD_LIBRARY, files.iter().map(|(p, t)| (*p, *t)))?;
+    // Block parts (registers, memories…) use the symbol generated from their ports.
+    for def in lib.cells.values_mut() {
+        if def.symbol.is_none() && !def.cell.ports.is_empty() {
+            def.symbol = Some(circuiter_model::builder::generate(&def.name, &def.cell));
+        }
+    }
+    Ok(lib)
 }
 
 /// The standard library. Its validity is covered by this crate's tests.
@@ -84,6 +91,8 @@ mod tests {
         assert_eq!(folder("nand"), "gates");
         assert_eq!(folder("resistor"), "resistors");
         assert_eq!(folder("nmos"), "transistors");
+        assert_eq!(folder("regfile"), "memory");
+        assert_eq!(folder("control"), "riscv");
         for def in lib.cells.values() {
             assert!(!def.folder.is_empty(), "{} is not in a folder", def.name);
         }
@@ -94,8 +103,10 @@ mod tests {
         for def in library().cells.values() {
             assert!(def.symbol.is_some(), "{} has no symbol", def.name);
             assert!(
-                def.cell.global_net.is_some() || def.has_view(ViewKind::Spice),
-                "{} has no SPICE view",
+                def.cell.global_net.is_some()
+                    || def.has_view(ViewKind::Spice)
+                    || def.has_view(ViewKind::Digital),
+                "{} has no SPICE or digital view",
                 def.name
             );
         }
