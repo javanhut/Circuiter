@@ -1,4 +1,5 @@
 (
-    package: "to92",
+    package: "${param.package}",
     pins: {"b": "2", "c": "3", "e": "1"},
+    package_pins: {"sot23": {"b": "1", "c": "3", "e": "2"}},
 )

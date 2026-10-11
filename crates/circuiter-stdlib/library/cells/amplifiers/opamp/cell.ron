@@ -13,6 +13,12 @@
         ),
     ],
     params: [
+        (
+            name: "package",
+            kind: Choice(["dip", "soic"]),
+            default: "dip",
+            description: "Package: through-hole or surface-mount, for the board",
+        ),
         (name: "gain", kind: Real(unit: ""), default: "200k", description: "Open-loop gain (V/V)"),
         (
             name: "gbw",

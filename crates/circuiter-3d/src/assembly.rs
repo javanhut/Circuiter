@@ -35,7 +35,9 @@ pub fn body(def: &CellDef, overrides: &BTreeMap<String, String>) -> Result<Optio
             .map_err(|e| format!("{}: 3D parameter {k}: {e}", def.name))?;
         values.insert(k.clone(), value);
     }
-    let mesh = packages::generate(&view.package, &|k| values.get(k).cloned())
+    let package = circuiter_model::digital::expand(&view.package, &param)
+        .map_err(|e| format!("{}: 3D package: {e}", def.name))?;
+    let mesh = packages::generate(&package, &|k| values.get(k).cloned())
         .map_err(|e| format!("{}: {e}", def.name))?;
     Ok(Some(mesh))
 }

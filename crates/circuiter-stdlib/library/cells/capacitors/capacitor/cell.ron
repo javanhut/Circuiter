@@ -3,6 +3,12 @@
     prefix: "C",
     ports: [(name: "a"), (name: "b")],
     params: [
+        (
+            name: "package",
+            kind: Choice(["disc", "0603", "0805", "1206"]),
+            default: "disc",
+            description: "Package: through-hole or surface-mount, for the board",
+        ),
         (name: "C", kind: Real(unit: "F"), default: "1u", description: "Capacitance"),
         (name: "Vmax", kind: Real(unit: "V"), default: "50", description: "Voltage rating"),
     ],

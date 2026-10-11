@@ -4,6 +4,12 @@
     ports: [(name: "a", description: "Anode"), (name: "k", description: "Cathode")],
     params: [
         (
+            name: "package",
+            kind: Choice(["led", "0805"]),
+            default: "led",
+            description: "Package: through-hole or surface-mount, for the board",
+        ),
+        (
             name: "color",
             kind: Choice(["red", "orange", "yellow", "green", "blue", "white"]),
             default: "red",

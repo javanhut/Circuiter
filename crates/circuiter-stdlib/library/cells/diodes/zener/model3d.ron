@@ -1,5 +1,5 @@
 (
-    package: "axial",
+    package: "${param.package}",
     params: {
         "band": "black",
         "color": "glass",

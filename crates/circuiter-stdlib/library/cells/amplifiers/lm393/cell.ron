@@ -10,6 +10,12 @@
     ],
     params: [
         (
+            name: "package",
+            kind: Choice(["dip", "soic"]),
+            default: "dip",
+            description: "Package: through-hole or surface-mount, for the board",
+        ),
+        (
             name: "isink",
             kind: Real(unit: "A"),
             default: "16m",

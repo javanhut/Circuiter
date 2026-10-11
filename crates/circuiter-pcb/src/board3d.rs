@@ -180,6 +180,10 @@ pub fn build_live(design: &Design, layout: &Layout, fills: &[ZoneFill], live: &L
     side(layout, fills, false, t, &mut out.board);
     for part in &layout.parts {
         let Some(place) = part.place else { continue };
+        // Parts left off aren't there to see.
+        if part.dnp() {
+            continue;
+        }
         if WIRED.contains(&part.package.as_str()) {
             out.without.push(part.path.clone());
             continue;
@@ -209,6 +213,75 @@ pub fn build_live(design: &Design, layout: &Layout, fills: &[ZoneFill], live: &L
             }
             Ok(None) => out.without.push(part.path.clone()),
             Err(e) => out.errors.push(format!("{}: {e}", part.path)),
+        }
+    }
+    out
+}
+
+/// Parts whose bodies run into each other, as Altium's component clearance check
+/// finds them: pairs (by index in [`Board3d::parts`]), how deep they overlap (mm), and
+/// where on the board. Leads within the board itself are left to the hole checks.
+pub fn clashes(built: &Board3d, thickness: f32) -> Vec<(usize, usize, f32, P)> {
+    let bounds: Vec<Option<(V3, V3)>> = built.parts.iter().map(|(_, m)| m.bounds()).collect();
+    let solids: Vec<std::cell::OnceCell<circuiter_3d::solid::Solid>> =
+        built.parts.iter().map(|_| std::cell::OnceCell::new()).collect();
+    let solid =
+        |k: usize| solids[k].get_or_init(|| circuiter_3d::solid::Solid::new(&built.parts[k].1));
+    // Touching isn't running into.
+    let skin = 0.02;
+    let in_board = |v: V3| v[2] < skin && v[2] > -thickness - skin;
+    let mut out = Vec::new();
+    for a in 0..built.parts.len() {
+        for b in a + 1..built.parts.len() {
+            let (Some((alo, ahi)), Some((blo, bhi))) = (bounds[a], bounds[b]) else { continue };
+            let lo = [0, 1, 2].map(|k| alo[k].max(blo[k]) + skin);
+            let hi = [0, 1, 2].map(|k| ahi[k].min(bhi[k]) - skin);
+            if (0..3).any(|k| lo[k] >= hi[k]) {
+                continue;
+            }
+            // Points of each inside the other, and a lattice through where their boxes
+            // overlap inside both.
+            let near = |v: &V3| (0..3).all(|k| v[k] >= lo[k] && v[k] <= hi[k]) && !in_board(*v);
+            let mut hits: Vec<V3> = Vec::new();
+            for (from, into) in [(a, b), (b, a)] {
+                hits.extend(
+                    built.parts[from]
+                        .1
+                        .vertices
+                        .iter()
+                        .map(|v| v.pos)
+                        .filter(|v| near(v) && solid(into).within(*v)),
+                );
+            }
+            let n = 8;
+            for i in 0..n {
+                for j in 0..n {
+                    for k in 0..n {
+                        let f = |t: usize, d: usize| {
+                            lo[d] + (hi[d] - lo[d]) * (t as f32 + 0.5) / n as f32
+                        };
+                        let v = [f(i, 0), f(j, 1), f(k, 2)];
+                        if !in_board(v) && solid(a).within(v) && solid(b).within(v) {
+                            hits.push(v);
+                        }
+                    }
+                }
+            }
+            if hits.is_empty() {
+                continue;
+            }
+            let depth = (0..3)
+                .map(|d| {
+                    let (l, h) = hits
+                        .iter()
+                        .fold((f32::MAX, f32::MIN), |(l, h), v| (l.min(v[d]), h.max(v[d])));
+                    h - l
+                })
+                .fold(f32::MAX, f32::min)
+                .max(0.01);
+            let c = hits.iter().fold([0.0f32; 3], |s, v| [s[0] + v[0], s[1] + v[1], s[2] + v[2]]);
+            let m = hits.len() as f32;
+            out.push((a, b, depth, footprint_point([c[0] / m, c[1] / m, c[2] / m])));
         }
     }
     out

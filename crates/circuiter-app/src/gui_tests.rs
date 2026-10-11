@@ -965,3 +965,164 @@ fn board_tools_work_from_the_editor() {
         other => panic!("{other:?}"),
     }
 }
+
+/// Power analysis on the blinker's board: the operating point's currents through its
+/// tracks, each net's drop, and the tracks coloured by how hard they're worked.
+#[test]
+fn power_analysis_uses_the_simulated_currents() {
+    let tmp = example_copy("analog_lab");
+    let args = Args {
+        project: Some(tmp.path().to_owned()),
+        cell: Some("blinker".into()),
+        theme: None,
+        view: Some("pcb".into()),
+        select: None,
+        simulate: Some("op".into()),
+        heat: false,
+        program: None,
+        live: false,
+        results: None,
+        screenshot: None,
+    };
+    let mut h = Harness::builder()
+        .with_size(Vec2::new(1600.0, 1000.0))
+        .build_eframe(move |cc| CircuiterApp::new(cc, args));
+    for _ in 0..200 {
+        h.run_steps(2);
+        if h.state().workspace().is_some_and(|w| w.fresh_sim().is_some()) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(h.state().workspace().unwrap().fresh_sim().is_some(), "the operating point ran");
+    let tools = format!("{}  Tools", crate::style::icon::GEAR_SIX);
+    h.get_by_label(&tools).click();
+    h.run_steps(2);
+    h.get_by_label("Power Analysis…").click();
+    h.run_steps(4);
+    let pw = h.state().pcb_view().power.clone().expect("open");
+    assert_eq!(pw.why, None);
+    assert!(!pw.nets.is_empty());
+    let shown = pw.nets.iter().find(|n| Some(&n.net) == pw.shown.as_ref()).unwrap();
+    assert!(shown.peak > 0.0 && !shown.tracks.is_empty(), "{shown:?}");
+    // Analysing again finds the same.
+    h.get_by_label("Analyse").click();
+    h.run_steps(2);
+    assert!(h.state().pcb_view().power.as_ref().is_some_and(|p| !p.nets.is_empty()));
+}
+
+/// The Diff Pairs tab makes a pair, and Route says why it can't route nets joining
+/// more than two pads each.
+#[test]
+fn differential_pairs_are_set_up_in_their_tab() {
+    let tmp = example_copy("analog_lab");
+    let args = Args {
+        project: Some(tmp.path().to_owned()),
+        cell: Some("blinker".into()),
+        theme: None,
+        view: Some("pcb".into()),
+        select: Some("none".into()),
+        simulate: None,
+        heat: false,
+        program: None,
+        live: false,
+        results: Some("pairs".into()),
+        screenshot: None,
+    };
+    let mut h = Harness::builder()
+        .with_size(Vec2::new(1600.0, 1000.0))
+        .build_eframe(move |cc| CircuiterApp::new(cc, args));
+    h.run_steps(4);
+    h.get_by_label(&format!("{}  New Pair", crate::style::icon::PLUS)).click();
+    h.run_steps(4);
+    let pairs = board(&h).pairs;
+    assert_eq!(pairs.len(), 1);
+    assert_ne!(pairs[0].positive, pairs[0].negative);
+    h.get_by_label("Route").click();
+    h.run_steps(4);
+    let note = h.state().pcb_view().note.clone().unwrap_or_default();
+    assert!(note.contains("Couldn't route") || note.contains("Routed"), "{note}");
+}
+
+/// A panel set up in the board's properties is written with the fabrication files.
+#[test]
+fn panels_are_made_and_written() {
+    let tmp = example_copy("analog_lab");
+    let args = Args {
+        project: Some(tmp.path().to_owned()),
+        cell: Some("blinker".into()),
+        theme: None,
+        view: Some("pcb".into()),
+        select: Some("none".into()),
+        simulate: None,
+        heat: false,
+        program: None,
+        live: false,
+        results: None,
+        screenshot: None,
+    };
+    let mut h = Harness::builder()
+        .with_size(Vec2::new(1600.0, 1400.0))
+        .build_eframe(move |cc| CircuiterApp::new(cc, args));
+    h.run_steps(4);
+    h.get_by_label(&format!("{}  Make a Panel", crate::style::icon::GRID_FOUR)).click();
+    h.run_steps(4);
+    let panel = board(&h).panel.expect("a panel");
+    assert_eq!((panel.rows, panel.columns), (2, 2));
+    h.get_by_label(&format!("{}  Fabrication Files…", crate::style::icon::EXPORT)).click();
+    h.run_steps(4);
+    let dir = tmp.path().join("fab").join("blinker");
+    for f in [
+        "blinker-panel-F_Cu.gbr",
+        "blinker-panel-Edge_Cuts.gbr",
+        "blinker-panel-NPTH.drl",
+        "blinker-panel.svg",
+        "blinker-F_Cu.gbr",
+    ] {
+        assert!(dir.join(f).exists(), "{f}: {:?}", h.state().pcb_view().note);
+    }
+}
+
+/// A variant made in the board's properties leaves a part off when it's unticked, and
+/// the export writes the variant's bill of materials.
+#[test]
+fn assembly_variants_from_the_editor() {
+    let tmp = example_copy("analog_lab");
+    let args = Args {
+        project: Some(tmp.path().to_owned()),
+        cell: Some("blinker".into()),
+        theme: None,
+        view: Some("pcb".into()),
+        select: Some("none".into()),
+        simulate: None,
+        heat: false,
+        program: None,
+        live: false,
+        results: None,
+        screenshot: None,
+    };
+    let mut h = Harness::builder()
+        .with_size(Vec2::new(1600.0, 1600.0))
+        .build_eframe(move |cc| CircuiterApp::new(cc, args));
+    h.run_steps(4);
+    h.get_by_label(&format!("{}  New Variant", crate::style::icon::PLUS)).click();
+    h.run_steps(4);
+    let b = board(&h);
+    assert_eq!(b.variant.as_deref(), Some("Variant 1"));
+    // Select a part and untick Fitted.
+    let path = b.footprints[0].path.clone();
+    h.state_mut().pcb_view_mut().selected = Some(super::app::pcb::Pick::Footprint(path.clone()));
+    h.run_steps(4);
+    h.get_by_label("Fitted").click();
+    h.run_steps(4);
+    let b = board(&h);
+    assert!(b.variants[0].parts.get(&path).is_some_and(|o| o.not_fitted), "{:?}", b.variants);
+    let layout = h.state().pcb_view().layout().unwrap().clone();
+    let k = layout.part(&path).unwrap();
+    assert!(layout.parts[k].dnp());
+    h.get_by_label(&format!("{}  Fabrication Files…", crate::style::icon::EXPORT)).click();
+    h.run_steps(4);
+    let bom =
+        std::fs::read_to_string(tmp.path().join("fab/blinker/blinker-Variant_1-bom.csv")).unwrap();
+    assert!(bom.contains("DNP"), "{bom}");
+}

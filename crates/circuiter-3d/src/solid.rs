@@ -54,15 +54,28 @@ impl Solid {
 
     /// Whether `p` is inside.
     pub fn contains(&self, p: V3) -> bool {
+        self.crossings(p).0 % 2 == 1
+    }
+
+    /// Whether `p` is inside any of the closed pieces the mesh is made of, where they
+    /// overlap too (a body built of boxes and cylinders run into each other, which
+    /// [`Solid::contains`] would count as outside where two meet): by winding number,
+    /// each crossing counted by which way the surface faces.
+    pub fn within(&self, p: V3) -> bool {
+        self.crossings(p).1 != 0
+    }
+
+    /// Crossings of the ray from `p` along +X: how many, and their sum by facing.
+    fn crossings(&self, p: V3) -> (u32, i32) {
         if (0..3).any(|k| p[k] < self.min[k] || p[k] > self.max[k]) {
-            return false;
+            return (0, 0);
         }
         // Nudged off the grid of round numbers bodies are drawn on, so the ray doesn't
         // run exactly along an edge.
         let (y, z) = (p[1] + 1.37e-4, p[2] + 2.91e-4);
         let c = (((y - self.lo[0]) / self.cell).floor() as isize).clamp(0, self.cols as isize - 1);
         let r = (((z - self.lo[1]) / self.cell).floor() as isize).clamp(0, self.rows as isize - 1);
-        let mut crossings = 0;
+        let (mut crossings, mut winding) = (0, 0);
         for &k in &self.buckets[r as usize * self.cols + c as usize] {
             let [a, b, d] = self.tris[k as usize];
             // Where (y, z) falls in the triangle seen along X.
@@ -78,9 +91,10 @@ impl Solid {
             let x = a[0] + u * (b[0] - a[0]) + v * (d[0] - a[0]);
             if x > p[0] {
                 crossings += 1;
+                winding += if det > 0.0 { 1 } else { -1 };
             }
         }
-        crossings % 2 == 1
+        (crossings, winding)
     }
 }
 
@@ -127,5 +141,12 @@ mod tests {
         assert!(!shell.contains([0.0, 0.0, 5.0]), "the cavity is empty");
         assert!(shell.contains([9.0, 0.0, 5.0]), "in the wall");
         assert!(shell.contains([0.0, 0.0, 1.0]), "in the floor");
+        // Two boxes run into each other: where they overlap is inside both, which
+        // parity alone gets wrong.
+        let mut two = cuboid([0.0, 0.0, 0.0], [10.0, 4.0, 2.0], color("grey"));
+        two.append(cuboid([2.0, 0.0, 0.0], [4.0, 4.0, 2.0], color("grey")));
+        let two = Solid::new(&two);
+        assert!(!two.contains([3.0, 2.0, 1.0]) && two.within([3.0, 2.0, 1.0]));
+        assert!(two.within([5.5, 2.0, 1.0]) && !two.within([10.5, 2.0, 1.0]));
     }
 }

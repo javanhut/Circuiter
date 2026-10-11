@@ -3,6 +3,12 @@
     prefix: "R",
     ports: [(name: "a"), (name: "b")],
     params: [
+        (
+            name: "package",
+            kind: Choice(["axial", "0603", "0805", "1206"]),
+            default: "axial",
+            description: "Package: through-hole or surface-mount, for the board",
+        ),
         (name: "R", kind: Real(unit: "Ω"), default: "1k", description: "Resistance"),
         (name: "P", kind: Real(unit: "W"), default: "250m", description: "Power rating"),
     ],

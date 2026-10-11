@@ -240,8 +240,33 @@ fn graphic_layer(item: &Graphic) -> Layer {
     }
 }
 
-fn copper(layout: &Layout, fills: &[ZoneFill], layer: Layer, index: usize) -> Output {
+/// What a panel adds to its copies' files: fiducials (copper dots in wider mask
+/// openings), unplated holes (mouse bites, tooling) and V-score lines.
+#[derive(Debug, Clone, Default)]
+struct Extras {
+    fiducials: Vec<P>,
+    holes: Vec<(P, f64)>,
+    vscores: Vec<(P, P)>,
+}
+
+/// A fiducial's copper dot and the opening round it.
+const FIDUCIAL: f64 = 1.0;
+const FIDUCIAL_MASK: f64 = 2.0;
+
+fn copper(
+    layout: &Layout,
+    fills: &[ZoneFill],
+    layer: Layer,
+    index: usize,
+    extras: &Extras,
+) -> Output {
     let mut g = Gerber::new();
+    if layer == Layer::FCu && !extras.fiducials.is_empty() {
+        let d = g.aperture(format!("C,{FIDUCIAL:.6}"), Some("FiducialPad,Global"));
+        for f in &extras.fiducials {
+            g.flash(d, *f);
+        }
+    }
     // Pours first, largest first so that islands inside another's holes come after it.
     let mut pieces: Vec<&geometry::Shape> =
         fills.iter().filter(|f| f.layer == layer).flat_map(|f| f.shapes.iter()).collect();
@@ -290,10 +315,41 @@ fn copper(layout: &Layout, fills: &[ZoneFill], layer: Layer, index: usize) -> Ou
 
 /// Every file for the board house, named after `project`.
 pub fn outputs(layout: &Layout, fills: &[ZoneFill], project: &str) -> Vec<Output> {
+    let mut out = outputs_with(layout, fills, project, &Extras::default());
+    out.push(Output { name: format!("{project}-bom.csv"), contents: bom(layout) });
+    out.push(Output {
+        name: format!("{project}-fab.svg"),
+        contents: crate::drawing::fabrication(layout, project),
+    });
+    out.push(Output {
+        name: format!("{project}-assembly.svg"),
+        contents: crate::drawing::assembly(layout, project),
+    });
+    out
+}
+
+/// The files for a panel, named `<project>-panel-…`: the copies' copper, mask, paste,
+/// legend and drills, the panel's edge with what's routed out, its V-scores, and every
+/// copy's parts in the placement file. The bill of materials stays the board's.
+pub fn panel_outputs(panel: &crate::panel::Panelized, project: &str) -> Vec<Output> {
+    let extras = Extras {
+        fiducials: panel.fiducials.clone(),
+        holes: panel.holes.clone(),
+        vscores: panel.vscores.clone(),
+    };
+    outputs_with(&panel.layout, &panel.fills, &format!("{project}-panel"), &extras)
+}
+
+fn outputs_with(
+    layout: &Layout,
+    fills: &[ZoneFill],
+    project: &str,
+    extras: &Extras,
+) -> Vec<Output> {
     let board = &layout.board;
     let mut out = Vec::new();
     for (k, layer) in board.copper().into_iter().enumerate() {
-        out.push(copper(layout, fills, layer, k));
+        out.push(copper(layout, fills, layer, k, extras));
     }
     let graphics: Vec<Graphic> = (0..layout.parts.len())
         .flat_map(|k| layout.graphics(k))
@@ -309,6 +365,12 @@ pub fn outputs(layout: &Layout, fills: &[ZoneFill], project: &str) -> Vec<Output
             .filter(|pd| pd.layers.contains(&cu) || matches!(pd.kind, PadKind::Hole { .. }))
         {
             pad(&mut mask, layout, pd, 0.0, None, false);
+        }
+        if front && !extras.fiducials.is_empty() {
+            let d = mask.aperture(format!("C,{FIDUCIAL_MASK:.6}"), None);
+            for f in &extras.fiducials {
+                mask.flash(d, *f);
+            }
         }
         let mask_layer = if front { Layer::FMask } else { Layer::BMask };
         out.push(Output {
@@ -348,13 +410,26 @@ pub fn outputs(layout: &Layout, fills: &[ZoneFill], project: &str) -> Vec<Output
         graphic(&mut edge, item, Some("Profile"));
     }
     out.push(Output { name: "Edge_Cuts".into(), contents: edge.finish("Profile,NP", false) });
+    if !extras.vscores.is_empty() {
+        let mut v = Gerber::new();
+        for (a, b) in &extras.vscores {
+            v.stroke(EDGE_WIDTH, &[*a, *b], None);
+        }
+        out.push(Output { name: "V_Score".into(), contents: v.finish("Vcut", false) });
+    }
     for o in &mut out {
         o.name = format!("{project}-{}.gbr", o.name);
     }
-    out.push(Output { name: format!("{project}-PTH.drl"), contents: drill(layout, true) });
-    out.push(Output { name: format!("{project}-NPTH.drl"), contents: drill(layout, false) });
+    out.push(Output {
+        name: format!("{project}-PTH.drl"),
+        contents: drill_with(layout, true, &[]),
+    });
+    out.push(Output {
+        name: format!("{project}-NPTH.drl"),
+        contents: drill_with(layout, false, &extras.holes),
+    });
     out.push(Output { name: format!("{project}-pos.csv"), contents: positions(layout) });
-    out.push(Output { name: format!("{project}-bom.csv"), contents: bom(layout) });
+    out.push(Output { name: format!("{project}-ipc356.ipc"), contents: ipc356(layout, project) });
     out
 }
 
@@ -367,6 +442,11 @@ fn num(v: f64) -> String {
 
 /// An Excellon drill file: the plated holes (pads and vias) or the unplated ones.
 pub fn drill(layout: &Layout, plated: bool) -> String {
+    drill_with(layout, plated, &[])
+}
+
+/// [`drill`] with more holes (a panel's).
+fn drill_with(layout: &Layout, plated: bool, more: &[(P, f64)]) -> String {
     let copper = layout.board.copper().len();
     // Holes by tool: (diameter in µm, is a via) → positions.
     let mut tools: BTreeMap<(i64, bool), Vec<P>> = BTreeMap::new();
@@ -380,6 +460,9 @@ pub fn drill(layout: &Layout, plated: bool) -> String {
             }
             _ => {}
         }
+    }
+    for (at, d) in more {
+        tools.entry(((d * 1e3).round() as i64, false)).or_default().push(*at);
     }
     if plated {
         for v in &layout.board.vias {
@@ -487,6 +570,86 @@ pub fn bom(layout: &Layout) -> String {
             if *dnp { "DNP" } else { "" }
         );
     }
+    out
+}
+
+/// The netlist for the bare-board electrical test (IPC-D-356A, metric): every pad and
+/// via, where it is, its hole and size, and which net it's on, so the tester can check
+/// each net is joined and no two are. Fixed columns; nets with names too long for
+/// their 14 are given aliases first.
+pub fn ipc356(layout: &Layout, project: &str) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "C  IPC-D-356A netlist from Circuiter {}", env!("CARGO_PKG_VERSION"));
+    let _ = writeln!(out, "C  Board: {project}");
+    out.push_str("P  JOB   ");
+    out.push_str(&project.chars().take(60).collect::<String>());
+    out.push('\n');
+    out.push_str(
+        "P  CODE  00\nP  UNITS CUST 1\nP  DIM   N\nP  VER   IPC-D-356A\nP  IMAGE PRIMARY\n",
+    );
+    // Long names get aliases.
+    let mut alias: BTreeMap<String, String> = BTreeMap::new();
+    let mut names: Vec<&String> = layout.nets.iter().collect();
+    names.sort();
+    for n in names {
+        if n.len() > 14 || n.contains(' ') {
+            let a = format!("NNAME{}", alias.len() + 1);
+            let _ = writeln!(out, "P  {a:<8}{n}");
+            alias.insert(n.clone(), a);
+        }
+    }
+    out.push_str("C\n");
+    let net = |n: Option<&str>| -> String {
+        match n {
+            Some(n) => alias.get(n).cloned().unwrap_or_else(|| n.to_owned()),
+            None => "N/C".into(),
+        }
+    };
+    let xy = |v: P| {
+        let (x, y) = ((v[0] * 1e3).round() as i64, (-v[1] * 1e3).round() as i64);
+        let sign = |v: i64| if v < 0 { '-' } else { '+' };
+        format!("X{}{:06}Y{}{:06}", sign(x), x.abs().min(999_999), sign(y), y.abs().min(999_999))
+    };
+    let size = |v: f64| ((v * 1e3).round() as i64).clamp(0, 9999);
+    for pd in &layout.pads {
+        let part = &layout.parts[pd.part];
+        let (code, drill, access) = match pd.kind {
+            PadKind::Through { drill } => {
+                ("317", format!("D{:04}P", size(drill.mm())), "A00".to_owned())
+            }
+            PadKind::Hole { drill } => {
+                ("367", format!("D{:04}U", size(drill.mm())), "A00".to_owned())
+            }
+            PadKind::Smd => {
+                let back = pd.layers.contains(&Layer::BCu) && !pd.layers.contains(&Layer::FCu);
+                ("327", "      ".to_owned(), if back { "A02".to_owned() } else { "A01".to_owned() })
+            }
+        };
+        let rot = (pd.rotation.rem_euclid(360.0).round() as i64) % 360;
+        let _ = writeln!(
+            out,
+            "{code}{:<14.14}   {:<6.6}-{:<4.4} {drill}{access}{}X{:04}Y{:04}R{rot:03} S0",
+            net(pd.net.as_deref()),
+            part.reference,
+            pd.number,
+            xy(pd.center),
+            size(pd.size.0),
+            size(pd.size.1),
+        );
+    }
+    for v in &layout.board.vias {
+        let _ = writeln!(
+            out,
+            "317{:<14.14}   {:<6.6}-{:<4.4}MD{:04}PA00{}X{:04}Y0000R000 S3",
+            net(Some(&v.net)),
+            "VIA",
+            "",
+            size(v.drill.mm()),
+            xy(p(v.at)),
+            size(v.diameter.mm()),
+        );
+    }
+    out.push_str("999\n");
     out
 }
 

@@ -188,6 +188,9 @@ active one on top.
 | Action | How |
 |---|---|
 | Move a part | Drag it (snaps to the grid); the tracks on its pads come with it. `R` turns it 90°, `F` flips it to the back (tracks follow both), `L` locks it, `Delete` takes it off |
+| Select several | Drag a box round parts, or Shift+click them, and drag them together. Tools → Align lines them up by their left, right, top or bottom edges or centres, or spaces them evenly across or down |
+| Packages | Resistors, capacitors, diodes, LEDs, transistors, op-amps, the 555 and logic gates each have a Package parameter: through-hole (axial, disc, TO-92, DIP) or surface mount (0603, 0805, 1206, SOD-123, SOT-23, SOIC), with KiCad's footprint names and 3D bodies that sit on their pads |
+| Keepouts | The keepout tool draws an area that bars tracks, vias, pours or parts, on chosen layers or all; the autorouter goes round it and the rules check flags anything inside |
 | Rearrange tracks | Drag a track: it slides square to itself and the tracks either side stretch to meet it at their own angles (a new leg joins it to a pad). Drag a corner where tracks meet, or a via, and the tracks there follow. `Delete` removes the piece selected |
 | Routing modes | As in Altium: `Shift+R` cycles Walkaround (the track finds its way round other nets' copper as you move, live), Stop at obstacle (it stops short of the first thing in the way) and Ignore (straight over; the rules check flags it). `Shift+Space` cycles 45°, 90° and any-angle corners, `Space` flips which leg comes first, `3` cycles the track width (minimum, preferred, double). **Ctrl+click** finishes the connection by itself, through vias if it must. Finishing a route that makes a second way between two points takes the old way off (loop removal). The status line gives the route's length |
 | Autoroute | Autoroute → Route All turns every ratsnest line into tracks: shortest first, at 0°, 45° and 90°, keeping each net's clearance, across every copper layer with vias where it must change side (the front prefers to run across, the back up and down), each path pulled as straight as it can go. Route the Selection's Nets does only the nets of the selected part, track or via. Whatever can't get through stays on the ratsnest, named |
@@ -199,21 +202,32 @@ active one on top.
 | Rules | Properties → Design rules: clearance, track width, via size, the board house's minimums, edge clearance, hole spacing |
 | Nets | The Nets tab under the board lists every net, as Altium's PCB panel does: its colour (click the swatch; `F5` shows net colours on the routing), class, pads, routed length (tracks plus the board's thickness per via, yellow when shorter than its class allows, red when longer), vias and connections still to route. Click a net to show it |
 | Net classes | The Net Classes tab: classes with their own clearance, track width, via, minimum and maximum routed length and impedance profile; put a net in one from the Nets tab. Selecting a part on the schematic selects it on the board, and the other way round |
+| Differential pairs | The Diff Pairs tab: two nets carrying one signal (USB's D+/D−, LVDS), routed side by side at a set width and gap. From Net Names finds them by name (`X_P`/`X_N`, `X+`/`X-`, `XP`/`XN`); Route routes a pair as one, from one pair of pads to the other; the tab shows each half's length and the skew between them, and the rules check flags skew over the pair's limit |
 | Stack-up | The Stack-up tab (Altium's Layer Stack Manager): each layer's material, thickness and dielectric constant, starting from a standard FR-4 stack; impedance profiles (50 Ω single, 100 Ω pairs, any layer) work out the track width they need by IPC-2141's formulas, microstrip outside and stripline inside, and size a net class's tracks |
-| Tools | Optimise Placement moves and turns the unlocked parts to shorten their connections. Add Teardrops widens every track where it meets a pad or via (left out where it would break a clearance, and following the routing as it changes). Via Stitching adds vias of a net on a grid wherever they fit in its pours. Tune Length lays an accordion of mitered bumps along the selected segment to bring its net to a length. Measure (`Ctrl+M`) shows a distance and its X and Y. Others: `Shift+S` shows the working layer alone |
+| Tools | Optimise Placement moves and turns the unlocked parts to shorten their connections. Add Teardrops widens every track where it meets a pad or via (left out where it would break a clearance, and following the routing as it changes). Via Stitching adds vias of a net on a grid wherever they fit in its pours. Tune Length lays an accordion of mitered bumps along the selected segment to bring its net to a length. Measure (`Ctrl+M`) shows a distance and its X and Y. Power Analysis (below). Others: `Shift+S` shows the working layer alone |
+| Power analysis | Tools → Power Analysis…, after an operating point (`F9`), as Altium's PDN Analyzer: each net's copper becomes resistors (tracks by length, width and copper weight, vias by their plated barrels, pours as sheets), the simulated current of every pin goes in at its pad, and solving it gives every track's current and the voltage lost on the way to each pad. Nets are listed worst drop first with their peak current and the tracks carrying more than IPC-2221 allows for the rise you set; the shown net's tracks are coloured cool to hot by how hard they're worked, and Widen sizes the overloaded ones. A calculator gives the width a current needs, outside and in |
+| Variants | Properties → Variants: the same board built differently (a cheaper model, a test build). Pick the variant being built, then select a part to untick Fitted or give it another value. The BOM, placement file, 3D view and assembly drawing follow it, and Fabrication Files writes each variant's BOM and placement file too |
+| Panel | Properties → Panel: copies across and down, rails top and bottom with three fiducials and four tooling holes, separated by V-scores (rectangular boards, butted) or mouse bites (a routed gap held by drilled tabs). Fabrication Files then writes the panel's own Gerbers, drills and placement file, with a picture of it |
 | Update | Update from Schematic opens the Engineering Change Order, as in Altium: the parts to add, the footprints whose parts are gone, the routing of nets that no longer exist, each ticked to make or unticked to leave |
 | Undo | `Ctrl+Z`, as anywhere |
 
 The design rule check runs as you go and lists, under Design Rules below the board,
 shorts, clearances, narrow tracks, small drills, thin annular rings, copper too near
-the edge, holes too close, overlapping courtyards and unrouted connections; click one
-to go there. The status line counts what's unrouted and what's wrong.
+the edge, holes too close, overlapping courtyards, parts' 3D bodies running into each
+other (a tall capacitor leaning over its neighbour, though their footprints keep
+clear), lengths outside a class's limits, pair skew, silkscreen on pads, anything in a
+keepout, and unrouted connections; click one to go there. The status line counts what's unrouted and what's wrong.
 
 **Fabrication files** writes, into a folder you choose: a Gerber file per layer
 (RS-274X with X2 attributes: copper, solder mask, paste, silkscreen, board outline),
 Excellon drill files for plated and unplated holes, the placement file for the
 assembly machine, the bill of materials (grouped, with MPN and manufacturer, DNP parts
-apart), and an SVG picture of the board. Tools → Export KiCad Netlist… writes the
+apart), an SVG picture of the board, the IPC-D-356 netlist for the bare-board
+electrical test, and two drawings as Altium's Draftsman makes them: the fabrication
+drawing (the board dimensioned, every hole marked with its tool's symbol, the drill
+table, the layer stack and the board house's notes, in a title block) and the assembly
+drawing (each side's parts by outline and reference, pin 1 marked, parts left off
+dashed, beside the bill of materials). A panel and variants add their files. Tools → Export KiCad Netlist… writes the
 design as a KiCad netlist with KiCad's library footprints where they're the same, to
 lay out in Pcbnew instead; Export Bill of Materials… writes the BOM on its own.
 

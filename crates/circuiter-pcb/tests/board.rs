@@ -819,3 +819,418 @@ fn engineering_change_orders() {
     assert!(b.placed("R9").is_none() && b.tracks.is_empty());
     assert!(changes(&design, &top, &b).unwrap().is_empty());
 }
+
+/// Every surface-mount body sits on its own pads: the bottoms of its leads and
+/// terminations are over copper, in every package a part offers.
+#[test]
+fn surface_mount_bodies_sit_on_their_pads() {
+    use circuiter_pcb::board3d::footprint_point;
+    let lib = circuiter_stdlib::library();
+    let mut checked = 0;
+    let mut bad = Vec::new();
+    for def in lib.cells.values() {
+        let (Some(view), Some(choice)) = (&def.footprint, def.cell.param("package")) else {
+            continue;
+        };
+        let circuiter_model::cell::ParamKind::Choice(options) = &choice.kind else { continue };
+        for package in options {
+            let params =
+                std::collections::BTreeMap::from([("package".to_owned(), package.clone())]);
+            let ports: Vec<String> = def.cell.ports.iter().map(|p| p.name.clone()).collect();
+            let param = |name: &str| {
+                params.get(name).cloned().or_else(|| def.cell.param(name)?.default.clone())
+            };
+            let fp = circuiter_pcb::footprints::resolve(view, &ports, &param).unwrap();
+            if fp.pads.iter().any(|p| !matches!(p.kind, circuiter_model::board::PadKind::Smd)) {
+                continue;
+            }
+            checked += 1;
+            let mesh = circuiter_3d::assembly::body(def, &params).unwrap().unwrap();
+            let tin = circuiter_3d::color("tin");
+            let feet: Vec<[f64; 2]> = mesh
+                .vertices
+                .iter()
+                .filter(|v| v.pos[2] < 0.01 && v.color == tin)
+                .map(|v| footprint_point(v.pos))
+                .collect();
+            if feet.is_empty() {
+                bad.push(format!("{} {package}: nothing touches the board", def.name));
+            }
+            let on_pad = |q: [f64; 2]| {
+                fp.pads.iter().any(|p| {
+                    (q[0] - p.at.x.mm()).abs() <= p.size.0.mm() / 2.0 + 0.3
+                        && (q[1] - p.at.y.mm()).abs() <= p.size.1.mm() / 2.0 + 0.3
+                })
+            };
+            if let Some(q) = feet.iter().find(|q| !on_pad(**q)) {
+                bad.push(format!(
+                    "{} {package}: a foot at ({:.2}, {:.2}) is off its pads",
+                    def.name, q[0], q[1]
+                ));
+            }
+            for pad in &fp.pads {
+                let c = [pad.at.x.mm(), pad.at.y.mm()];
+                if !feet.iter().any(|q| {
+                    (q[0] - c[0]).abs() <= pad.size.0.mm() / 2.0 + 0.3
+                        && (q[1] - c[1]).abs() <= pad.size.1.mm() / 2.0 + 0.3
+                }) {
+                    bad.push(format!("{} {package}: nothing sits on pad {}", def.name, pad.number));
+                }
+            }
+        }
+    }
+    assert!(checked >= 20, "{checked}");
+    assert!(bad.is_empty(), "{bad:#?}");
+}
+
+/// Keepouts: the router goes round, pours stay out, and anything inside is flagged.
+#[test]
+fn keepouts_are_kept() {
+    use circuiter_model::board::Keepout;
+    use circuiter_pcb::route::{Options, autoroute};
+    let (design, top) = design();
+    let mut b = board();
+    // A strip across the middle between R1 and R2, from the edge to x = 30.
+    let strip = Keepout::new(vec![pt(0.0, 14.0), pt(30.0, 14.0), pt(30.0, 16.0), pt(0.0, 16.0)]);
+    b.keepouts.push(strip);
+    b.zones.push(Zone::new(
+        Layer::BCu,
+        "GND",
+        vec![pt(0.0, 0.0), pt(40.0, 0.0), pt(40.0, 30.0), pt(0.0, 30.0)],
+    ));
+    let layout = Layout::new(&design, &top, &b).unwrap();
+    let routed = autoroute(&layout, &Options { pitch: 0.2, ..Options::default() });
+    assert!(routed.failed.is_empty(), "{:?}", routed.failed);
+    b.tracks.extend(routed.tracks);
+    b.vias.extend(routed.vias);
+    let layout = Layout::new(&design, &top, &b).unwrap();
+    let checked = drc::check(&layout);
+    assert!(checked.violations.is_empty(), "{:#?}", checked.violations);
+    // The pour has a hole where the keepout is.
+    let fill = checked.fills.iter().find(|f| f.layer == Layer::BCu).unwrap();
+    let probe = vec![vec![circuiter_pcb::geometry::circle([15.0, 15.0], 0.3)]];
+    assert!(!circuiter_pcb::geometry::overlaps(&fill.shapes, &probe));
+    // A track straight through it is flagged.
+    b.tracks.push(track(&layout, "mid", [10.0, 12.0], [10.0, 18.0], Layer::FCu));
+    let checked = drc::check(&Layout::new(&design, &top, &b).unwrap());
+    assert!(
+        checked.violations.iter().any(|v| v.rule == Rule::Keepout),
+        "{:#?}",
+        checked.violations
+    );
+}
+
+/// Parts line up and spread out as asked, their boxes' edges and centres meeting.
+#[test]
+fn parts_align_and_distribute() {
+    use circuiter_pcb::edit::{Align, align, part_box};
+    let (design, top) = design();
+    let mut b = board();
+    // Three parts at odd places.
+    b.footprints.iter_mut().find(|f| f.path == "R2").unwrap().at = pt(25.0, 21.0);
+    let paths: Vec<String> = ["R1", "R2", "J1"].map(String::from).to_vec();
+    let boxes = |b: &Board| {
+        let l = Layout::new(&design, &top, b).unwrap();
+        paths.iter().map(|p| part_box(&l, l.part(p).unwrap()).unwrap()).collect::<Vec<_>>()
+    };
+    let layout = Layout::new(&design, &top, &b).unwrap();
+    align(&mut b, &layout, &paths, Align::Left);
+    let bx = boxes(&b);
+    assert!(bx.iter().all(|x| (x.0[0] - bx[0].0[0]).abs() < 1e-6), "{bx:?}");
+    let layout = Layout::new(&design, &top, &b).unwrap();
+    align(&mut b, &layout, &paths, Align::SpreadY);
+    let bx = boxes(&b);
+    let mut mids: Vec<f64> = bx.iter().map(|x| (x.0[1] + x.1[1]) / 2.0).collect();
+    mids.sort_by(f64::total_cmp);
+    assert!(((mids[1] - mids[0]) - (mids[2] - mids[1])).abs() < 1e-6, "{mids:?}");
+}
+
+/// A differential pair between two connectors, found by its nets' names, routed side
+/// by side at its gap, without breaking a rule and with its halves the same length.
+#[test]
+fn differential_pairs_route_together() {
+    use circuiter_model::board::DiffPair;
+    use circuiter_pcb::route::{Options, route_pair};
+    let mut d = Design::new();
+    d.add_library(circuiter_stdlib::library()).unwrap();
+    d.add_library(Library::new(LIB)).unwrap();
+    let mut sh = Sheet::new(&d, LIB);
+    let j1 = sh.part("std:header_2", "J1", 0, 0, &[]);
+    let j2 = sh.part("std:header_2", "J2", 20, 0, &[]);
+    sh.nets(j1, &[("p1", "D_P"), ("p2", "D_N")]);
+    sh.nets(j2, &[("p1", "D_P"), ("p2", "D_N")]);
+    let s = sh.s;
+    d.library_mut(LIB).unwrap().insert(CellDef {
+        name: "link".into(),
+        cell: Cell::default(),
+        schematic: Some(s),
+        ..CellDef::default()
+    });
+    let top = CellId::new(LIB, "link");
+    let mut b = Board::new(40.0, 20.0);
+    place(&mut b, "J1", 6.0, 10.0, 90.0);
+    place(&mut b, "J2", 34.0, 12.0, 90.0);
+    let layout = Layout::new(&d, &top, &b).unwrap();
+    let pairs = DiffPair::from_names(&layout.nets);
+    assert_eq!(pairs.len(), 1);
+    assert_eq!(
+        (pairs[0].positive.as_str(), pairs[0].negative.as_str(), pairs[0].name.as_str()),
+        ("D_P", "D_N", "D")
+    );
+    let mut pair = pairs[0].clone();
+    pair.gap = Length::from_mm(0.3);
+    let tracks = route_pair(&layout, &pair, &Options { pitch: 0.1, ..Options::default() }).unwrap();
+    b.tracks.extend(tracks);
+    b.pairs.push(pair.clone());
+    let layout = Layout::new(&d, &top, &b).unwrap();
+    let checked = drc::check(&layout);
+    assert!(checked.violations.is_empty(), "{:#?}", checked.violations);
+    // Side by side: the two halves' middle runs are the gap plus a width apart.
+    let longest = |net: &str| {
+        b.tracks
+            .iter()
+            .filter(|t| t.net == net)
+            .max_by(|x, y| {
+                let l = |t: &Track| (t.b.x.mm() - t.a.x.mm()).hypot(t.b.y.mm() - t.a.y.mm());
+                l(x).total_cmp(&l(y))
+            })
+            .unwrap()
+            .clone()
+    };
+    let (tp, tn) = (longest("D_P"), longest("D_N"));
+    let mid = [(tp.a.x.mm() + tp.b.x.mm()) / 2.0, (tp.a.y.mm() + tp.b.y.mm()) / 2.0];
+    let apart = circuiter_pcb::geometry::segment_distance(
+        [tn.a.x.mm(), tn.a.y.mm()],
+        [tn.b.x.mm(), tn.b.y.mm()],
+        mid,
+        mid,
+    );
+    assert!((apart - (0.3 + pair.width.mm())).abs() < 0.02, "{apart}");
+    let skew = (circuiter_pcb::nets::routed_length(&b, "D_P")
+        - circuiter_pcb::nets::routed_length(&b, "D_N"))
+    .abs();
+    assert!(skew < 1.0, "{skew}");
+}
+
+/// The power network: the routed board's `vin` carries an amp from J1 to R1 through
+/// its tracks and via, losing what their resistance says, and `GND` through its pour
+/// loses next to nothing.
+#[test]
+fn ir_drop_and_current_capacity() {
+    use circuiter_pcb::power;
+    let (design, top, b) = routed();
+    let layout = Layout::new(&design, &top, &b).unwrap();
+    let fills = circuiter_pcb::zones::fill(&layout);
+    let index = |part: &str, number: &str| {
+        let k = layout.part(part).unwrap();
+        (0..layout.pads.len())
+            .find(|&i| layout.pads[i].part == k && layout.pads[i].number == number)
+            .unwrap()
+    };
+    let (feed, load) = (index("J1", "1"), index("R1", "1"));
+    let vin = power::ir_drop(&layout, &fills, "vin", &[(feed, 1.0), (load, -1.0)], None).unwrap();
+    let length: f64 = b
+        .tracks
+        .iter()
+        .filter(|t| t.net == "vin")
+        .map(|t| (t.b.x.mm() - t.a.x.mm()).hypot(t.b.y.mm() - t.a.y.mm()))
+        .sum();
+    let t = power::copper_thickness(&layout);
+    let tracks = 1.72e-5 * length / (0.25 * t);
+    assert_eq!(vin.worst_pad, Some(load));
+    assert!(
+        vin.worst_drop > tracks && vin.worst_drop < tracks * 1.1,
+        "{} vs {tracks}",
+        vin.worst_drop
+    );
+    assert!(vin.tracks.iter().all(|(_, i)| (i - 1.0).abs() < 1e-3), "{:?}", vin.tracks);
+    // An amp is too much for a quarter-millimetre track; a tenth isn't.
+    assert_eq!(vin.overloaded.len(), 4);
+    let light = power::ir_drop(&layout, &fills, "vin", &[(feed, 0.1), (load, -0.1)], None).unwrap();
+    assert!(light.overloaded.is_empty());
+    assert!((light.worst_drop * 10.0 - vin.worst_drop).abs() < 1e-9);
+    // Ground through the pour.
+    let (gf, gl) = (index("J1", "2"), index("R2", "2"));
+    let gnd = power::ir_drop(&layout, &fills, "GND", &[(gf, 1.0), (gl, -1.0)], Some(gf)).unwrap();
+    assert!(gnd.worst_drop < vin.worst_drop / 5.0, "{} vs {}", gnd.worst_drop, vin.worst_drop);
+    assert!(gnd.worst_drop > 0.0);
+}
+
+/// Pin currents from a simulation land on the pads their ports use, and the feed is
+/// found when the supply is off the board.
+#[test]
+fn simulated_currents_reach_the_pads() {
+    use circuiter_pcb::power;
+    let (design, top, b) = routed();
+    let layout = Layout::new(&design, &top, &b).unwrap();
+    // R1 draws 0.25 mA in at `a` and out at `b`.
+    let currents = power::pad_currents(&layout, |path| {
+        (path == "R1").then(|| vec![("a".to_owned(), 0.25e-3), ("b".to_owned(), -0.25e-3)])
+    });
+    assert_eq!(currents.len(), 2);
+    let r1a = currents.iter().find(|(k, _)| layout.pads[*k].net.as_deref() == Some("vin")).unwrap();
+    assert!((r1a.1 + 0.25e-3).abs() < 1e-12, "into the part is out of the copper");
+    let feed = power::feed(&layout, "vin", &currents).unwrap();
+    assert_eq!(layout.parts[layout.pads[feed].part].reference, "J1");
+    let fills = circuiter_pcb::zones::fill(&layout);
+    let all = power::analyse(&layout, &fills, &currents);
+    assert_eq!(all.iter().map(|n| n.net.as_str()).collect::<Vec<_>>().len(), 2);
+    let vin = all.iter().find(|n| n.net == "vin").unwrap();
+    assert_eq!(vin.worst_pad, Some(r1a.0));
+}
+
+/// Parts whose bodies run into each other are found in 3D, though their footprints
+/// may be told to overlap; apart, they're not.
+#[test]
+fn bodies_that_collide_are_found() {
+    let (design, top) = design();
+    let b = board();
+    let layout = Layout::new(&design, &top, &b).unwrap();
+    assert!(drc::bodies(&design, &layout).is_empty(), "{:?}", drc::bodies(&design, &layout));
+    // R2 laid over R1.
+    let mut b = board();
+    b.footprints.iter_mut().find(|f| f.path == "R2").unwrap().at = pt(23.0, 10.5);
+    let layout = Layout::new(&design, &top, &b).unwrap();
+    let found = drc::bodies(&design, &layout);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].rule, Rule::Bodies);
+    assert!(
+        found[0].message.contains("R1") && found[0].message.contains("R2"),
+        "{}",
+        found[0].message
+    );
+    let at = found[0].at.unwrap();
+    assert!((at[0] - 22.5).abs() < 4.0 && (at[1] - 10.25).abs() < 2.0, "{at:?}");
+}
+
+/// Panels: V-scored copies butted together between rails, and mouse-bitten copies
+/// routed apart and held by tabs; every copy's copper and parts in the panel's files.
+#[test]
+fn boards_are_panelized() {
+    use circuiter_model::board::{Panel, Separation};
+    use circuiter_pcb::panel::panelize;
+    let (design, top, b) = routed();
+    let layout = Layout::new(&design, &top, &b).unwrap();
+    let fills = circuiter_pcb::zones::fill(&layout);
+    let v = Panel { rows: 2, columns: 3, separation: Separation::VScore, ..Panel::default() };
+    let p = panelize(&layout, &fills, &v).unwrap();
+    assert_eq!(p.copies.len(), 6);
+    assert!((p.size.0 - 120.0).abs() < 1e-9 && (p.size.1 - 70.0).abs() < 1e-9, "{:?}", p.size);
+    // Two lines between the columns, three across (rail, middle, rail).
+    assert_eq!(p.vscores.len(), 5);
+    assert_eq!(p.layout.parts.len(), layout.parts.len() * 6);
+    assert_eq!(p.layout.board.tracks.len(), b.tracks.len() * 6);
+    assert_eq!(p.fiducials.len(), 3);
+    assert_eq!(p.holes.len(), 4, "tooling only");
+    let files = circuiter_pcb::fab::panel_outputs(&p, "divider");
+    let names: Vec<&str> = files.iter().map(|o| o.name.as_str()).collect();
+    assert!(names.contains(&"divider-panel-V_Score.gbr"), "{names:?}");
+    assert!(!names.iter().any(|n| n.contains("bom")));
+    let pos = files.iter().find(|o| o.name.ends_with("pos.csv")).unwrap();
+    assert_eq!(
+        pos.contents.lines().filter(|l| l.starts_with("\"R1\",")).count(),
+        6,
+        "{}",
+        pos.contents
+    );
+    let cu = files.iter().find(|o| o.name.ends_with("F_Cu.gbr")).unwrap();
+    assert!(cu.contents.contains("FiducialPad"));
+    // Mouse bites.
+    let m = Panel { rows: 2, columns: 2, ..Panel::default() };
+    let p = panelize(&layout, &fills, &m).unwrap();
+    if let Ok(out) = std::env::var("PANEL_SVG") {
+        std::fs::write(out, circuiter_pcb::svg::plot_panel(&p)).unwrap();
+    }
+    assert!((p.size.0 - 82.0).abs() < 1e-9 && (p.size.1 - 76.0).abs() < 1e-9, "{:?}", p.size);
+    assert!(p.vscores.is_empty());
+    // Each copy is a slot of its own in the substrate, held by tabs.
+    assert_eq!(p.substrate.len(), 1);
+    assert!(p.substrate[0].len() >= 2, "{}", p.substrate[0].len());
+    let bites = p.holes.iter().filter(|h| h.1 < 1.0).count();
+    assert!(bites >= 8 * 3, "{bites}");
+    let npth = circuiter_pcb::fab::panel_outputs(&p, "divider")
+        .into_iter()
+        .find(|o| o.name.ends_with("NPTH.drl"))
+        .unwrap();
+    assert!(npth.contents.contains("C0.500") && npth.contents.contains("C2.000"));
+    // Without rails a single column of copies has nothing holding it but each other.
+    let bare = Panel { rows: 2, columns: 1, rails: Length::from_mm(0.0), ..Panel::default() };
+    assert!(panelize(&layout, &fills, &bare).is_ok());
+    // An odd-shaped board can't be V-scored.
+    let mut odd = b.clone();
+    odd.outline = vec![pt(0.0, 0.0), pt(40.0, 0.0), pt(40.0, 30.0), pt(10.0, 30.0), pt(0.0, 20.0)];
+    let odd = Layout::new(&design, &top, &odd).unwrap();
+    assert!(panelize(&odd, &[], &v).is_err());
+}
+
+/// The drawings and the test netlist: the fabrication drawing dimensions the board and
+/// tables its holes and stack, the assembly drawing names each part, and IPC-D-356
+/// lists every pad and via on its net in fixed columns.
+#[test]
+fn drawings_and_test_netlist() {
+    let (design, top, mut b) = routed();
+    b.footprints.iter_mut().find(|f| f.path == "R2").unwrap().back = false;
+    let layout = Layout::new(&design, &top, &b).unwrap();
+    let fab = circuiter_pcb::drawing::fabrication(&layout, "divider");
+    assert!(fab.contains(">40.00<") && fab.contains(">30.00<"), "overall size dimensioned");
+    assert!(fab.contains("DRILL TABLE") && fab.contains("0.30 mm") && fab.contains("LAYER STACK"));
+    assert!(fab.contains("IPC-6012"));
+    let asm = circuiter_pcb::drawing::assembly(&layout, "divider");
+    for r in ["R1", "R2", "J1"] {
+        assert!(asm.contains(&format!(">{r}<")), "{r}");
+    }
+    assert!(asm.contains("BILL OF MATERIALS") && asm.contains("R1, R2"));
+    if let Ok(dir) = std::env::var("DRAWINGS") {
+        std::fs::write(format!("{dir}/fab.svg"), &fab).unwrap();
+        std::fs::write(format!("{dir}/asm.svg"), &asm).unwrap();
+    }
+    let ipc = circuiter_pcb::fab::ipc356(&layout, "divider");
+    assert!(ipc.contains("P  UNITS CUST 1") && ipc.ends_with("999\n"));
+    let records: Vec<&str> =
+        ipc.lines().filter(|l| l.starts_with("317") || l.starts_with("327")).collect();
+    assert_eq!(records.len(), layout.pads.len() + b.vias.len());
+    // R1 pin 1 on vin, through-hole 0.8ish mm drill, at (16.92, −10).
+    let r1 = records.iter().find(|l| &l[20..26] == "R1    " && &l[27..31] == "1   ").unwrap();
+    assert_eq!(&r1[3..17], "vin           ");
+    assert!(r1.contains("X+016920Y-010000"), "{r1}");
+    assert!(records.iter().all(|l| l.len() == records[0].len()), "fixed columns");
+    let files = circuiter_pcb::fab::outputs(&layout, &[], "divider");
+    for n in ["divider-ipc356.ipc", "divider-fab.svg", "divider-assembly.svg"] {
+        assert!(files.iter().any(|f| f.name == n), "{n}");
+    }
+}
+
+/// Assembly variants: the active one leaves parts off and changes values, in the bill
+/// of materials, the placement file and 3D; the design as drawn is untouched.
+#[test]
+fn assembly_variants() {
+    use circuiter_model::board::{Variant, VariantPart};
+    let (design, top, mut b) = routed();
+    let mut lite = Variant { name: "Lite".into(), ..Variant::default() };
+    lite.parts.insert("R2".into(), VariantPart { not_fitted: true, ..VariantPart::default() });
+    lite.parts.insert(
+        "R1".into(),
+        VariantPart {
+            value: Some("4k7".into()),
+            fields: [("MPN".to_owned(), "RC0603-4K7".to_owned())].into(),
+            ..VariantPart::default()
+        },
+    );
+    b.variants.push(lite);
+    let base = Layout::new(&design, &top, &b).unwrap();
+    assert!(circuiter_pcb::fab::bom(&base).contains("\"R1, R2\",\"10k\""));
+    b.variant = Some("Lite".into());
+    let layout = Layout::new(&design, &top, &b).unwrap();
+    let bom = circuiter_pcb::fab::bom(&layout);
+    assert!(bom.contains("\"R1\",\"4k7\"") && bom.contains("RC0603-4K7"), "{bom}");
+    assert!(bom.lines().any(|l| l.contains("\"R2\"") && l.ends_with("DNP")), "{bom}");
+    let pos = circuiter_pcb::fab::positions(&layout);
+    assert!(!pos.contains("\"R2\""));
+    let built = circuiter_pcb::board3d::build(&design, &layout, &[]);
+    assert!(!built.parts.iter().any(|(p, _)| p == "R2"));
+    assert!(circuiter_pcb::drawing::assembly(&layout, "divider").contains("R2 DNP"));
+    // A variant that's gone leaves the design as drawn.
+    b.variant = Some("Gone".into());
+    let layout = Layout::new(&design, &top, &b).unwrap();
+    assert!(circuiter_pcb::fab::bom(&layout).contains("\"R1, R2\",\"10k\""));
+}

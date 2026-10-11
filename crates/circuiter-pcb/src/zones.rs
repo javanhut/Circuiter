@@ -63,7 +63,14 @@ pub fn fill(layout: &Layout) -> Vec<ZoneFill> {
         if outline.len() < 3 {
             continue;
         }
-        let area = geometry::intersection(&vec![vec![geometry::ccw(outline)]], &inside);
+        let mut area = geometry::intersection(&vec![vec![geometry::ccw(outline)]], &inside);
+        // Keepouts that bar pours.
+        for k in
+            board.keepouts.iter().filter(|k| k.pours && k.on(zone.layer) && k.outline.len() >= 3)
+        {
+            let shape = vec![vec![geometry::ccw(k.outline.iter().map(|q| p(*q)).collect())]];
+            area = geometry::difference(&area, &geometry::offset(&shape, rules.clearance.mm()));
+        }
         let own = zone.clearance.map_or(0.0, |c| c.mm());
         // The clearance to keep from an item of net `net`.
         let gap = |net: Option<&str>| {

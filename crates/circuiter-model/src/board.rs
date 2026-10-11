@@ -165,6 +165,11 @@ pub struct FootprintView {
     /// Cell port → pad number; ports not listed are numbered in order from 1.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub pins: BTreeMap<String, String>,
+    /// Pin maps for particular packages, where `package` is chosen by a parameter
+    /// (`${param.package}`) and they number their pins differently: a BJT's SOT-23 isn't
+    /// its TO-92.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub package_pins: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 /// A footprint placed on a board.
@@ -393,6 +398,165 @@ pub struct Board {
     /// Teardrops where tracks meet pads and vias, when wanted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub teardrops: Option<Teardrops>,
+    /// Areas kept clear of tracks, vias, pours or parts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keepouts: Vec<Keepout>,
+    /// Differential pairs: two nets routed side by side.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pairs: Vec<DiffPair>,
+    /// How copies of the board are made up into a panel for manufacture, if they are.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub panel: Option<Panel>,
+    /// Assembly variants: the same board built differently.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variants: Vec<Variant>,
+    /// The variant being worked on and made, by name; the design as drawn when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variant: Option<String>,
+}
+
+/// An assembly variant (Altium's): the same bare board built with some parts left off
+/// and some given other values: a cheaper model, a region's version, a test build.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct Variant {
+    pub name: String,
+    /// How parts differ from the design, by instance path.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub parts: BTreeMap<String, VariantPart>,
+}
+
+/// How a part differs in a variant.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct VariantPart {
+    /// Left off the board.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub not_fitted: bool,
+    /// Another value for the bill of materials.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    /// Other fields (`MPN`, `Manufacturer`…).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fields: BTreeMap<String, String>,
+}
+
+/// A panel (an array, in Altium's words) of copies of the board, made and assembled
+/// together then broken apart: rows and columns of it, rails along the top and bottom
+/// for the assembly line to hold (with fiducials for its camera and tooling holes),
+/// and how the copies separate.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Panel {
+    pub rows: u32,
+    pub columns: u32,
+    /// The rails' width (none when 0).
+    pub rails: Length,
+    pub separation: Separation,
+    /// Three fiducials on the rails.
+    #[serde(default = "yes")]
+    pub fiducials: bool,
+    /// A tooling hole in each corner of the rails.
+    #[serde(default = "yes")]
+    pub tooling: bool,
+}
+
+impl Default for Panel {
+    fn default() -> Self {
+        Panel {
+            rows: 2,
+            columns: 2,
+            rails: Length::from_mm(5.0),
+            separation: Separation::default(),
+            fiducials: true,
+            tooling: true,
+        }
+    }
+}
+
+/// How the copies on a panel come apart.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum Separation {
+    /// Butted together, with V-grooves cut a third deep from each side to snap along:
+    /// for rectangular boards.
+    VScore,
+    /// Routed round with a cutter `gap` wide, held by tabs `tab` wide drilled with a
+    /// row of small holes to snap at: any shape of board.
+    MouseBites { gap: Length, tab: Length },
+}
+
+impl Default for Separation {
+    fn default() -> Self {
+        Separation::MouseBites { gap: Length::from_mm(2.0), tab: Length::from_mm(3.0) }
+    }
+}
+
+/// A differential pair (Altium's and KiCad's): two nets carrying one signal as a
+/// difference, routed side by side, `width` wide and `gap` apart, kept to within
+/// `max_skew` of the same length.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DiffPair {
+    pub name: String,
+    pub positive: String,
+    pub negative: String,
+    pub width: Length,
+    pub gap: Length,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_skew: Option<Length>,
+}
+
+impl DiffPair {
+    /// Pairs to suggest from net names: `X_P`/`X_N`, `X+`/`X-`, `XP`/`XN`.
+    pub fn from_names<'a>(nets: impl IntoIterator<Item = &'a String>) -> Vec<DiffPair> {
+        let nets: Vec<&String> = nets.into_iter().collect();
+        let mut out = Vec::new();
+        for n in &nets {
+            for (pos, neg) in [("_P", "_N"), ("+", "-"), ("P", "N"), ("_p", "_n")] {
+                let Some(base) = n.strip_suffix(pos) else { continue };
+                if base.is_empty() {
+                    continue;
+                }
+                let other = format!("{base}{neg}");
+                if nets.iter().any(|m| **m == other) {
+                    out.push(DiffPair {
+                        name: base.trim_end_matches('_').to_owned(),
+                        positive: (*n).clone(),
+                        negative: other,
+                        width: Length::from_mm(0.2),
+                        gap: Length::from_mm(0.2),
+                        max_skew: Some(Length::from_mm(0.5)),
+                    });
+                    break;
+                }
+            }
+        }
+        out
+    }
+}
+
+/// An area kept clear (Altium's keepouts, KiCad's rule areas): of tracks, vias,
+/// copper pours and parts, on the copper layers listed (every one when none are).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Keepout {
+    pub outline: Vec<Point>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layers: Vec<Layer>,
+    #[serde(default = "yes")]
+    pub tracks: bool,
+    #[serde(default = "yes")]
+    pub vias: bool,
+    #[serde(default = "yes")]
+    pub pours: bool,
+    #[serde(default)]
+    pub parts: bool,
+}
+
+impl Keepout {
+    pub fn new(outline: Vec<Point>) -> Keepout {
+        Keepout { outline, layers: Vec::new(), tracks: true, vias: true, pours: true, parts: false }
+    }
+
+    /// Whether it applies on copper layer `l`.
+    pub fn on(&self, l: Layer) -> bool {
+        self.layers.is_empty() || self.layers.contains(&l)
+    }
 }
 
 /// How big teardrops are, as fractions of the pad or via they widen onto: how far
@@ -625,6 +789,11 @@ impl Board {
             net_colours: BTreeMap::new(),
             stackup: None,
             teardrops: None,
+            keepouts: Vec::new(),
+            pairs: Vec::new(),
+            panel: None,
+            variants: Vec::new(),
+            variant: None,
         }
     }
 
@@ -639,6 +808,12 @@ impl Board {
 
     pub fn placed(&self, path: &str) -> Option<&Placed> {
         self.footprints.iter().find(|f| f.path == path)
+    }
+
+    /// The variant being worked on, if one is.
+    pub fn active_variant(&self) -> Option<&Variant> {
+        let name = self.variant.as_ref()?;
+        self.variants.iter().find(|v| &v.name == name)
     }
 }
 

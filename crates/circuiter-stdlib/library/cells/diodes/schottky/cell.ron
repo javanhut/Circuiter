@@ -3,6 +3,12 @@
     prefix: "D",
     ports: [(name: "a", description: "Anode"), (name: "k", description: "Cathode")],
     params: [
+        (
+            name: "package",
+            kind: Choice(["axial", "sod123"]),
+            default: "axial",
+            description: "Package: through-hole or surface-mount, for the board",
+        ),
         (name: "is", kind: Real(unit: "A"), default: "31.7u", description: "Saturation current"),
         (name: "n", kind: Real(unit: ""), default: "1.373", description: "Emission coefficient"),
         (name: "rs", kind: Real(unit: "Ω"), default: "51m", description: "Series resistance"),

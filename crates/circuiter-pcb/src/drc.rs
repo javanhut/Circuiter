@@ -31,6 +31,12 @@ pub enum Rule {
     Length,
     /// Silkscreen printed over a pad, where it can't stick and spoils soldering.
     SilkOverPad,
+    /// Something in a keepout that bars it.
+    Keepout,
+    /// A differential pair's two halves routed to different lengths.
+    Skew,
+    /// Parts' 3D bodies running into each other.
+    Bodies,
     Unconnected,
     Outline,
     Unplaced,
@@ -61,6 +67,9 @@ impl Rule {
             Rule::CourtyardOverlap => "Courtyards overlap",
             Rule::Length => "Net length",
             Rule::SilkOverPad => "Silkscreen over a pad",
+            Rule::Keepout => "In a keepout",
+            Rule::Skew => "Differential pair skew",
+            Rule::Bodies => "Component bodies collide",
             Rule::Unconnected => "Unconnected items",
             Rule::Outline => "Board outline",
             Rule::Unplaced => "Part not on the board",
@@ -191,6 +200,25 @@ fn courtyards(layout: &Layout) -> Vec<(usize, bool, Shapes)> {
 }
 
 /// Fills the pours, traces connectivity and checks every rule.
+/// Parts whose 3D bodies run into each other: a tall capacitor leaning over its
+/// neighbour, two connectors' shells, parts whose footprints keep clear but whose
+/// bodies don't. Builds the parts' bodies, so it needs the design they come from.
+pub fn bodies(design: &circuiter_model::Design, layout: &Layout) -> Vec<Violation> {
+    let built = crate::board3d::build(design, layout, &[]);
+    let name = |k: usize| {
+        let path = &built.parts[k].0;
+        layout.part(path).map_or(path.clone(), |i| layout.parts[i].reference.clone())
+    };
+    crate::board3d::clashes(&built, layout.board.thickness.mm() as f32)
+        .into_iter()
+        .map(|(a, b, depth, at)| Violation {
+            rule: Rule::Bodies,
+            message: format!("{} and {} run {depth:.2} mm into each other", name(a), name(b)),
+            at: Some(at),
+        })
+        .collect()
+}
+
 pub fn check(layout: &Layout) -> Checked {
     let board = &layout.board;
     let rules = &board.rules;
@@ -436,6 +464,73 @@ pub fn check(layout: &Layout) -> Checked {
                 format!("{} reaches past the board's edge", layout.parts[yards[i].0].reference),
                 at,
             );
+        }
+    }
+
+    // Differential pairs, once routed: their two halves the same length.
+    for pair in &board.pairs {
+        let routed = |n: &str| board.tracks.iter().any(|t| t.net == n);
+        let (Some(max), true, true) =
+            (pair.max_skew, routed(&pair.positive), routed(&pair.negative))
+        else {
+            continue;
+        };
+        let (a, b) = (
+            crate::nets::routed_length(board, &pair.positive),
+            crate::nets::routed_length(board, &pair.negative),
+        );
+        if (a - b).abs() > max.mm() + 1e-6 {
+            flag(
+                Rule::Skew,
+                format!(
+                    "{}: {} is {} and {} is {} ({} apart, {} allowed)",
+                    pair.name,
+                    pair.positive,
+                    mm(a),
+                    pair.negative,
+                    mm(b),
+                    mm((a - b).abs()),
+                    mm(max.mm())
+                ),
+                None,
+            );
+        }
+    }
+
+    // Keepouts.
+    for (n, k) in board.keepouts.iter().enumerate().filter(|(_, k)| k.outline.len() >= 3) {
+        let area = vec![vec![geometry::ccw(k.outline.iter().map(|q| p(*q)).collect())]];
+        let name = format!("keepout {}", n + 1);
+        for t in board.tracks.iter().filter(|t| k.tracks && k.on(t.layer)) {
+            if geometry::overlaps(&area, &vec![vec![geometry::track(t, 0.0)]]) {
+                flag(
+                    Rule::Keepout,
+                    format!("track of {} on {} crosses {name}", t.net, t.layer.name()),
+                    Some(p(t.a)),
+                );
+            }
+        }
+        for v in board.vias.iter().filter(|_| k.vias) {
+            if geometry::overlaps(&area, &vec![vec![geometry::via(v, 0.0)]]) {
+                flag(Rule::Keepout, format!("via of {} in {name}", v.net), Some(p(v.at)));
+            }
+        }
+        if k.parts {
+            for (j, part) in layout.parts.iter().enumerate() {
+                let Some(place) = part.place else { continue };
+                let (lo, hi) = crate::sync::extent(&part.footprint);
+                let c: Vec<P> = [lo, [hi[0], lo[1]], hi, [lo[0], hi[1]]]
+                    .iter()
+                    .map(|q| place.apply(*q))
+                    .collect();
+                if geometry::overlaps(&area, &vec![vec![geometry::ccw(c)]]) {
+                    flag(
+                        Rule::Keepout,
+                        format!("{} is placed in {name}", layout.parts[j].reference),
+                        Some(place.at),
+                    );
+                }
+            }
         }
     }
 

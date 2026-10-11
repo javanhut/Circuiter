@@ -1,4 +1,4 @@
 (
-    package: "axial",
+    package: "${param.package}",
     params: {"pitch": "10.16", "style": "resistor"},
 )

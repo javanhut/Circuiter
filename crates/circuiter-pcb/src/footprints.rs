@@ -9,6 +9,12 @@ use std::collections::BTreeMap;
 
 /// Every footprint package, for menus and checks.
 pub const PACKAGES: &[&str] = &[
+    "0603",
+    "0805",
+    "1206",
+    "sod123",
+    "sot23",
+    "soic",
     "axial",
     "radial",
     "disc",
@@ -243,6 +249,74 @@ pub fn generate(package: &str, p: Params<'_>) -> Result<(Vec<Pad>, Vec<Graphic>)
             outlines(&mut g, &pads, (-5.0, -3.4, 5.0, 1.3));
             g.push(line(Layer::FSilk, (-5.12, -1.9), (5.12, -1.9), SILK));
         }
+        // Surface-mount chips (resistors, capacitors, LEDs): two pads along X, pad 1
+        // on the left; IPC nominal land patterns.
+        "0603" | "0805" | "1206" => {
+            let (x, w, h, body) = match package {
+                "0603" => (0.775, 0.8, 0.95, (0.8, 0.4)),
+                "0805" => (0.9125, 1.025, 1.4, (1.0, 0.625)),
+                _ => (1.4875, 1.125, 1.75, (1.6, 0.8)),
+            };
+            pads.push(smd(1, -x, 0.0, w, h));
+            pads.push(smd(2, x, 0.0, w, h));
+            g.push(rect(Layer::FFab, -body.0, -body.1, body.0, body.1, FAB));
+            // Silk only above and below the body, clear of the pads.
+            let y = h / 2.0 + 0.2;
+            g.push(line(Layer::FSilk, (-x + w / 2.0 - 0.1, -y), (x - w / 2.0 + 0.1, -y), SILK));
+            g.push(line(Layer::FSilk, (-x + w / 2.0 - 0.1, y), (x - w / 2.0 + 0.1, y), SILK));
+            let (cx, cy) = (x + w / 2.0 + 0.25, h / 2.0 + 0.25);
+            g.push(rect(Layer::FCrtYd, -cx, -cy, cx, cy, CRT));
+            g.push(reference(-cy - 0.8));
+        }
+        // SOD-123: a diode, pad 1 (the cathode) on the left.
+        "sod123" => {
+            pads.push(smd(1, -1.635, 0.0, 0.91, 1.22));
+            pads.push(smd(2, 1.635, 0.0, 0.91, 1.22));
+            g.push(rect(Layer::FFab, -1.35, -0.8, 1.35, 0.8, FAB));
+            g.push(line(Layer::FSilk, (-2.3, -0.95), (1.2, -0.95), SILK));
+            g.push(line(Layer::FSilk, (-2.3, 0.95), (1.2, 0.95), SILK));
+            g.push(line(Layer::FSilk, (-2.3, -0.95), (-2.3, 0.95), SILK));
+            g.push(rect(Layer::FCrtYd, -2.35, -1.15, 2.35, 1.15, CRT));
+            g.push(reference(-1.9));
+        }
+        // SOT-23: pins 1 and 2 on the left, 3 on the right.
+        "sot23" => {
+            for (k, (x, y)) in
+                [(-1.1375, -0.95), (-1.1375, 0.95), (1.1375, 0.0)].into_iter().enumerate()
+            {
+                pads.push(smd(k + 1, x, y, 1.325, 0.6));
+            }
+            g.push(rect(Layer::FFab, -0.65, -1.45, 0.65, 1.45, FAB));
+            g.push(line(Layer::FSilk, (-0.76, -1.56), (0.76, -1.56), SILK));
+            g.push(line(Layer::FSilk, (-0.76, 1.56), (0.76, 1.56), SILK));
+            g.push(line(Layer::FSilk, (0.76, -1.56), (0.76, -0.65), SILK));
+            g.push(line(Layer::FSilk, (0.76, 1.56), (0.76, 0.65), SILK));
+            g.push(rect(Layer::FCrtYd, -2.05, -1.7, 2.05, 1.7, CRT));
+            g.push(reference(-2.5));
+        }
+        // SOIC with `pins` pins, 1.27 mm pitch, 3.9 mm body: numbered as a DIP is.
+        "soic" => {
+            let n = num(p, "pins", 8.0).round() as usize;
+            if !(4..=32).contains(&n) || n % 2 != 0 {
+                return Err(format!("a SOIC needs an even number of pins, 4 to 32, not {n}"));
+            }
+            let per = n / 2;
+            let span = (per - 1) as f64 * 1.27;
+            for k in 0..per {
+                pads.push(smd(k + 1, -2.475, -span / 2.0 + 1.27 * k as f64, 1.95, 0.6));
+            }
+            for k in 0..per {
+                pads.push(smd(per + k + 1, 2.475, span / 2.0 - 1.27 * k as f64, 1.95, 0.6));
+            }
+            let half = span / 2.0 + 0.6;
+            g.push(rect(Layer::FFab, -1.95, -half, 1.95, half, FAB));
+            g.push(line(Layer::FSilk, (-1.95, -half - 0.1), (1.95, -half - 0.1), SILK));
+            g.push(line(Layer::FSilk, (-1.95, half + 0.1), (1.95, half + 0.1), SILK));
+            // Pin 1's mark.
+            g.push(line(Layer::FSilk, (-3.45, -half - 0.1), (-1.95, -half - 0.1), SILK));
+            g.push(rect(Layer::FCrtYd, -3.7, -half - 0.35, 3.7, half + 0.35, CRT));
+            g.push(reference(-half - 1.2));
+        }
         "sot223" => {
             for k in 0..3 {
                 pads.push(smd(k + 1, -2.3 + 2.3 * k as f64, 3.15, 0.95, 2.0));
@@ -408,6 +482,26 @@ pub fn kicad_name(package: &str, p: Params<'_>, pads: usize) -> String {
         "to220" => "Package_TO_SOT_THT:TO-220-3_Vertical".into(),
         "sot223" => "Package_TO_SOT_SMD:SOT-223-3_TabPin2".into(),
         "dip" => format!("Package_DIP:DIP-{pads}_W7.62mm"),
+        "soic" => match pads {
+            8 => "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm".into(),
+            14 => "Package_SO:SOIC-14_3.9x8.7mm_P1.27mm".into(),
+            16 => "Package_SO:SOIC-16_3.9x9.9mm_P1.27mm".into(),
+            n => format!("Package_SO:SOIC-{n}_3.9mm_P1.27mm"),
+        },
+        "0603" | "0805" | "1206" => {
+            let metric = match package {
+                "0603" => "1608",
+                "0805" => "2012",
+                _ => "3216",
+            };
+            match p("style").as_deref() {
+                Some("capacitor") => format!("Capacitor_SMD:C_{package}_{metric}Metric"),
+                Some("led") => format!("LED_SMD:LED_{package}_{metric}Metric"),
+                _ => format!("Resistor_SMD:R_{package}_{metric}Metric"),
+            }
+        }
+        "sod123" => "Diode_SMD:D_SOD-123".into(),
+        "sot23" => "Package_TO_SOT_SMD:SOT-23".into(),
         "hc49" => "Crystal:Crystal_HC49-U_Vertical".into(),
         "header" => format!("Connector_PinHeader_2.54mm:PinHeader_1x{pads:02}_P2.54mm_Vertical"),
         "terminal" => format!("TerminalBlock:TerminalBlock_bornier-{pads}_P5.08mm"),
@@ -425,7 +519,10 @@ pub fn resolve(
     param: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Footprint, String> {
     let mut name = "Circuiter:custom".to_owned();
-    let (pads, graphics) = if view.package.is_empty() {
+    // The package may be the part's choice: `${param.package}`.
+    let package = circuiter_model::digital::expand(&view.package, param)
+        .map_err(|e| format!("footprint package: {e}"))?;
+    let (pads, graphics) = if package.is_empty() {
         (view.pads.clone(), view.graphics.clone())
     } else {
         let mut values = BTreeMap::new();
@@ -434,14 +531,15 @@ pub fn resolve(
                 .map_err(|e| format!("footprint parameter {k}: {e}"))?;
             values.insert(k.clone(), value);
         }
-        let (pads, mut graphics) = generate(&view.package, &|k| values.get(k).cloned())?;
-        name = kicad_name(&view.package, &|k| values.get(k).cloned(), pads.len());
+        let (pads, mut graphics) = generate(&package, &|k| values.get(k).cloned())?;
+        name = kicad_name(&package, &|k| values.get(k).cloned(), pads.len());
         graphics.extend(view.graphics.iter().cloned());
         (pads, graphics)
     };
     let mut pins = BTreeMap::new();
+    let map = view.package_pins.get(&package).unwrap_or(&view.pins);
     for (k, port) in ports.iter().enumerate() {
-        let number = view.pins.get(port).cloned().unwrap_or_else(|| (k + 1).to_string());
+        let number = map.get(port).cloned().unwrap_or_else(|| (k + 1).to_string());
         pins.insert(port.clone(), number);
     }
     Ok(Footprint { pads, graphics, pins, name })

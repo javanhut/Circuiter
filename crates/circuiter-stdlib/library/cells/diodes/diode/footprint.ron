@@ -1,5 +1,5 @@
 (
-    package: "axial",
+    package: "${param.package}",
     params: {"diameter": "1.9", "length": "3.9", "pitch": "7.62", "style": "diode"},
     pins: {"a": "2", "k": "1"},
 )

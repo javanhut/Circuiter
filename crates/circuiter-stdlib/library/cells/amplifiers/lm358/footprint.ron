@@ -1,5 +1,5 @@
 (
-    package: "dip",
+    package: "${param.package}",
     params: {"pins": "8"},
     pins: {"inn": "2", "inp": "3", "out": "1", "vn": "4", "vp": "8"},
 )

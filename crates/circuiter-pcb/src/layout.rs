@@ -207,6 +207,17 @@ impl Layout {
                 locked: placed.is_some_and(|f| f.locked),
                 fields: e.fields.clone(),
             });
+            // As the variant being made builds it.
+            if let Some(o) = board.active_variant().and_then(|v| v.parts.get(&e.path)) {
+                let part = out.parts.last_mut().expect("just pushed");
+                part.fields.extend(o.fields.clone());
+                if o.not_fitted {
+                    part.fields.insert("DNP".into(), "1".into());
+                }
+                if let Some(v) = &o.value {
+                    part.value = v.clone();
+                }
+            }
         }
         let copper = board.copper();
         for (k, part) in out.parts.iter().enumerate() {

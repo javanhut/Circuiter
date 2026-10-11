@@ -4,6 +4,12 @@
     ports: [(name: "a", description: "Anode"), (name: "k", description: "Cathode")],
     params: [
         (
+            name: "package",
+            kind: Choice(["axial", "sod123"]),
+            default: "axial",
+            description: "Package: through-hole or surface-mount, for the board",
+        ),
+        (
             name: "vz",
             kind: Real(unit: "V"),
             default: "5.1",

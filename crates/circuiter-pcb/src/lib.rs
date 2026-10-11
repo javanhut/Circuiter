@@ -4,6 +4,7 @@
 
 pub mod board3d;
 pub mod connect;
+pub mod drawing;
 pub mod drc;
 pub mod edit;
 pub mod enclosure;
@@ -15,6 +16,8 @@ pub mod impedance;
 pub mod kicad;
 pub mod layout;
 pub mod nets;
+pub mod panel;
+pub mod power;
 pub mod route;
 pub mod svg;
 pub mod sync;

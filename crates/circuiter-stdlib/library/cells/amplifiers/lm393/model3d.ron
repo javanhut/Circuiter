@@ -1,4 +1,4 @@
 (
-    package: "dip",
+    package: "${param.package}",
     params: {"pins": "8"},
 )

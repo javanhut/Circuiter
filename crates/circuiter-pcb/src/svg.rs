@@ -194,3 +194,47 @@ pub fn plot(layout: &Layout, fills: &[ZoneFill], connectivity: Option<&Connectiv
     s.push_str("</svg>\n");
     s
 }
+
+/// A panel as [`plot`] draws a board, with what the panel adds: the routed-out
+/// slots, mouse bites and tooling holes, fiducials and V-score lines.
+pub fn plot_panel(panel: &crate::panel::Panelized) -> String {
+    let mut s = plot(&panel.layout, &panel.fills, None);
+    s.truncate(s.len() - "</svg>\n".len());
+    let edge = colour(Layer::EdgeCuts);
+    for slot in panel.substrate.iter().flat_map(|piece| piece.iter().skip(1)) {
+        let _ = writeln!(
+            s,
+            r##"<polygon points="{}" fill="#000814" stroke="{edge}" stroke-width="0.15"/>"##,
+            polyline(slot)
+        );
+    }
+    for (at, d) in &panel.holes {
+        let _ = writeln!(
+            s,
+            r##"<circle cx="{}" cy="{}" r="{}" fill="#000814" stroke="{edge}" stroke-width="0.05"/>"##,
+            at[0],
+            at[1],
+            d / 2.0
+        );
+    }
+    for f in &panel.fiducials {
+        let _ = writeln!(
+            s,
+            r##"<circle cx="{}" cy="{}" r="1" fill="#1b5e20"/><circle cx="{}" cy="{}" r="0.5" fill="{}"/>"##,
+            f[0],
+            f[1],
+            f[0],
+            f[1],
+            colour(Layer::FCu)
+        );
+    }
+    for (a, b) in &panel.vscores {
+        let _ = writeln!(
+            s,
+            r##"<line x1="{}" y1="{}" x2="{}" y2="{}" stroke="#ffd54f" stroke-width="0.2" stroke-dasharray="1.5 1"/>"##,
+            a[0], a[1], b[0], b[1]
+        );
+    }
+    s.push_str("</svg>\n");
+    s
+}

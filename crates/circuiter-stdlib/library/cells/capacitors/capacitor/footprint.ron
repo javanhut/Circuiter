@@ -1,4 +1,4 @@
 (
-    package: "disc",
-    params: {"pitch": "5.08"},
+    package: "${param.package}",
+    params: {"pitch": "5.08", "style": "capacitor"},
 )

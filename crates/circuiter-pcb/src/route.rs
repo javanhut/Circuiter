@@ -357,6 +357,40 @@ impl Router {
                 }
             }
         }
+        // Keepouts: no track (or via) centres inside, nor within reach of their edge.
+        for k in board.keepouts.iter().filter(|k| k.outline.len() >= 3) {
+            let poly: Vec<P> = k.outline.iter().map(|q| p(*q)).collect();
+            let m = poly.len();
+            for y in 0..ny {
+                for x in 0..nx {
+                    let c = grid.centre(x, y);
+                    let mut inside = false;
+                    for e in 0..m {
+                        let (a, b) = (poly[e], poly[(e + 1) % m]);
+                        if (a[1] > c[1]) != (b[1] > c[1])
+                            && c[0] < a[0] + (c[1] - a[1]) * (b[0] - a[0]) / (b[1] - a[1])
+                        {
+                            inside = !inside;
+                        }
+                    }
+                    let near = (0..m)
+                        .map(|e| geometry::segment_distance(poly[e], poly[(e + 1) % m], c, c))
+                        .fold(f64::MAX, f64::min);
+                    for (l, layer) in layers.iter().enumerate() {
+                        if !k.on(*layer) {
+                            continue;
+                        }
+                        let i = grid.index(l, x, y);
+                        if k.tracks && (inside || near < widest / 2.0 + slack) {
+                            grid.track[i] = BLOCKED;
+                        }
+                        if k.vias && (inside || near < via_r + slack) {
+                            grid.via[i] = BLOCKED;
+                        }
+                    }
+                }
+            }
+        }
         let mut r = Router {
             grid,
             search: Search::new(nl * nx * ny * 9),
@@ -470,7 +504,7 @@ impl Router {
         let la: Vec<usize> = la.iter().filter_map(|l| self.layer_index(*l)).collect();
         let lb: Vec<usize> = lb.iter().filter_map(|l| self.layer_index(*l)).collect();
         let (via_d, via_drill) = self.rules.via_for(net);
-        let path = find(&self.grid, &mut self.search, opts, nid, (a, &la), (b, &lb))?;
+        let path = find(&self.grid, &mut self.search, opts, (nid, nid), (a, &la), (b, &lb))?;
         Some(draw(
             &self.grid,
             &path,
@@ -484,6 +518,176 @@ impl Router {
             (opts.orthogonal, opts.any_angle),
         ))
     }
+}
+
+impl Router {
+    /// A differential pair from the two `start` pads to the two `end` pads (positive
+    /// first) on `layer`: the path of their middle found as one track through room for
+    /// both, then drawn twice, either side, `width` wide and `gap` apart, with short
+    /// legs into the pads. `None` if there's no room.
+    #[allow(clippy::too_many_arguments)]
+    pub fn connect_pair(
+        &mut self,
+        (pos, neg): (&str, &str),
+        start: (P, P),
+        end: (P, P),
+        layer: Layer,
+        width: f64,
+        gap: f64,
+        pad_reach: (f64, f64),
+        opts: &Options,
+    ) -> Option<Vec<Track>> {
+        let (np, nn) = (self.id(pos), self.id(neg));
+        let l = self.layer_index(layer)?;
+        let mid = |a: P, b: P| [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
+        let (m0, m1) = (mid(start.0, start.1), mid(end.0, end.1));
+        // Each end of the middle path stands out from between its two pads, square to
+        // them and towards the other end, so both halves leave their pads cleanly.
+        let out = |pads: (P, P), m: P, towards: P, reach: f64| -> P {
+            let v = [pads.1[0] - pads.0[0], pads.1[1] - pads.0[1]];
+            let l = v[0].hypot(v[1]).max(1e-9);
+            let mut n = [-v[1] / l, v[0] / l];
+            if n[0] * (towards[0] - m[0]) + n[1] * (towards[1] - m[1]) < 0.0 {
+                n = [-n[0], -n[1]];
+            }
+            [m[0] + n[0] * reach, m[1] + n[1] * reach]
+        };
+        let lead = self.track_reach + width + gap;
+        let a = out(start, m0, m1, pad_reach.0 + lead);
+        let b = out(end, m1, m0, pad_reach.1 + lead);
+        let o = Options { vias: false, ..opts.clone() };
+        let path = find(&self.grid, &mut self.search, &o, (np, nn), (a, &[l]), (b, &[l]))?;
+        let mut centre: Vec<P> = vec![a];
+        centre.extend(path.iter().map(|&(_, x, y)| self.grid.centre(x, y)));
+        centre.push(b);
+        centre.dedup_by(|x, y| (x[0] - y[0]).hypot(x[1] - y[1]) < 1e-6);
+        let mut centre = taut(&self.grid, &centre, l, np, (o.orthogonal, false));
+        let half = (width + gap) / 2.0;
+        // No segment shorter than the pair is wide: moved sideways, it would flip.
+        loop {
+            let short = (1..centre.len().saturating_sub(1)).find(|&i| {
+                let d = |p: P, q: P| (p[0] - q[0]).hypot(p[1] - q[1]);
+                d(centre[i - 1], centre[i]) < 2.5 * half || d(centre[i], centre[i + 1]) < 2.5 * half
+            });
+            match short {
+                Some(i) => drop(centre.remove(i)),
+                None => break,
+            }
+        }
+        if centre.len() < 2 {
+            return None;
+        }
+        // The two sides; which is the positive one is whichever starts nearer its pad.
+        let (left, right) = (offset_line(&centre, half), offset_line(&centre, -half));
+        let d = |q: P, r: P| (q[0] - r[0]).hypot(q[1] - r[1]);
+        let (p_side, n_side) = if d(left[0], start.0) + d(right[0], start.1)
+            <= d(right[0], start.0) + d(left[0], start.1)
+        {
+            (left, right)
+        } else {
+            (right, left)
+        };
+        // Out of the pads first: each half starts and ends where it's clear of both
+        // pads at that end, and a lead joins it to its own.
+        let keep = self.track_reach + width / 2.0 + gap;
+        let clear_of = |q: P, ends: (P, P), r: f64| d(q, ends.0) > r && d(q, ends.1) > r;
+        let trim = |side: &[P], ends: (P, P), r: f64| -> Vec<P> {
+            // Walk along until clear.
+            for k in 0..side.len().saturating_sub(1) {
+                let (a, b) = (side[k], side[k + 1]);
+                let len = d(a, b);
+                let steps = (len / 0.02).ceil().max(1.0) as usize;
+                for j in 0..=steps {
+                    let t = j as f64 / steps as f64;
+                    let q = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+                    if clear_of(q, ends, r) {
+                        let mut out = vec![q];
+                        out.extend_from_slice(&side[k + 1..]);
+                        return out;
+                    }
+                }
+            }
+            side.to_vec()
+        };
+        let mut tracks = Vec::new();
+        for (net, side, s, e) in [(pos, &p_side, start.0, end.0), (neg, &n_side, start.1, end.1)] {
+            let r_start = keep + pad_reach.0;
+            let r_end = keep + pad_reach.1;
+            let mut side = trim(side, start, r_start);
+            side.reverse();
+            let mut side = trim(&side, end, r_end);
+            side.reverse();
+            let mut pts = vec![s];
+            pts.extend(side.iter().copied());
+            pts.push(e);
+            pts.dedup_by(|x, y| (x[0] - y[0]).hypot(x[1] - y[1]) < 1e-6);
+            for w in pts.windows(2) {
+                tracks.push(Track {
+                    layer,
+                    a: point(w[0]),
+                    b: point(w[1]),
+                    width: Length::from_mm(width),
+                    net: net.to_owned(),
+                });
+            }
+        }
+        // Each side clear of every other net (the pair's two nets of each other only by
+        // their gap, which the rules check confirms).
+        let ok = tracks.iter().all(|t| {
+            let other = if t.net == pos { nn } else { np };
+            let me = if t.net == pos { np } else { nn };
+            let (pa, pb) = (p(t.a), p(t.b));
+            let len = (pb[0] - pa[0]).hypot(pb[1] - pa[1]);
+            let n = (len / (self.grid.pitch / 3.0)).ceil().max(1.0) as usize;
+            (0..=n).all(|k| {
+                let t = k as f64 / n as f64;
+                let (x, y) =
+                    self.grid.cell([pa[0] + (pb[0] - pa[0]) * t, pa[1] + (pb[1] - pa[1]) * t]);
+                let i = self.grid.index(l, x, y);
+                self.grid.passable(false, i, me) || self.grid.passable(false, i, other)
+            })
+        });
+        ok.then_some(tracks)
+    }
+}
+
+/// A polyline moved `d` to its left (negative: right), its corners mitered where the
+/// moved segments meet.
+pub fn offset_line(pts: &[P], d: f64) -> Vec<P> {
+    let n = pts.len();
+    let normal = |a: P, b: P| {
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        let l = dx.hypot(dy).max(1e-12);
+        [-dy / l * d, dx / l * d]
+    };
+    let mut out = Vec::with_capacity(n);
+    for k in 0..n {
+        if k == 0 || k == n - 1 {
+            let (a, b) = if k == 0 { (pts[0], pts[1]) } else { (pts[n - 2], pts[n - 1]) };
+            let m = normal(a, b);
+            out.push([pts[k][0] + m[0], pts[k][1] + m[1]]);
+            continue;
+        }
+        let (m1, m2) = (normal(pts[k - 1], pts[k]), normal(pts[k], pts[k + 1]));
+        // Where the two moved lines cross.
+        let (a1, b1) = (
+            [pts[k - 1][0] + m1[0], pts[k - 1][1] + m1[1]],
+            [pts[k][0] + m1[0], pts[k][1] + m1[1]],
+        );
+        let (a2, b2) = (
+            [pts[k][0] + m2[0], pts[k][1] + m2[1]],
+            [pts[k + 1][0] + m2[0], pts[k + 1][1] + m2[1]],
+        );
+        let (r, s) = ([b1[0] - a1[0], b1[1] - a1[1]], [b2[0] - a2[0], b2[1] - a2[1]]);
+        let den = r[0] * s[1] - r[1] * s[0];
+        if den.abs() < 1e-12 {
+            out.push(b1);
+        } else {
+            let t = ((a2[0] - a1[0]) * s[1] - (a2[1] - a1[1]) * s[0]) / den;
+            out.push([a1[0] + t * r[0], a1[1] + t * r[1]]);
+        }
+    }
+    out
 }
 
 /// Routes the board's ratsnest (or the nets `opts` names).
@@ -548,7 +752,7 @@ fn find(
     grid: &Grid,
     s: &mut Search,
     o: &Options,
-    nid: i32,
+    (nid, alt): (i32, i32),
     (a, la): (P, &[usize]),
     (b, lb): (P, &[usize]),
 ) -> Option<Vec<Node>> {
@@ -620,7 +824,10 @@ fn find(
             }
             let (x2, y2) = (x2 as usize, y2 as usize);
             let c2 = grid.index(l, x2, y2);
-            if !goal.contains(&c2) && !grid.passable(false, c2, nid) {
+            if !goal.contains(&c2)
+                && !grid.passable(false, c2, nid)
+                && !grid.passable(false, c2, alt)
+            {
                 continue;
             }
             let bend = if dir == 8 {
@@ -646,7 +853,10 @@ fn find(
         }
         // Through a via to another layer.
         if grid.layers > 1 && o.vias {
-            let clear = (0..grid.layers).all(|k| grid.passable(true, grid.index(k, x, y), nid));
+            let clear = (0..grid.layers).all(|k| {
+                let i = grid.index(k, x, y);
+                grid.passable(true, i, nid) || grid.passable(true, i, alt)
+            });
             if clear {
                 for l2 in (0..grid.layers).filter(|&k| k != l) {
                     let c2 = grid.index(l2, x, y);
@@ -760,6 +970,62 @@ fn taut(
         i = j;
     }
     out
+}
+
+/// Routes differential pair `pair` from end to end: its two nets' pads (two each) are
+/// matched up by which lie nearest each other, on the layer they share.
+pub fn route_pair(
+    layout: &Layout,
+    pair: &circuiter_model::board::DiffPair,
+    opts: &Options,
+) -> Result<Vec<Track>, String> {
+    let pads = |net: &str| -> Vec<&PadAt> {
+        layout.pads.iter().filter(|p| p.net.as_deref() == Some(net)).collect()
+    };
+    let (ps, ns) = (pads(&pair.positive), pads(&pair.negative));
+    if ps.len() != 2 || ns.len() != 2 {
+        return Err(format!(
+            "a pair joins two pads on each net; {} has {} and {} has {}",
+            pair.positive,
+            ps.len(),
+            pair.negative,
+            ns.len()
+        ));
+    }
+    let d = |a: P, b: P| (a[0] - b[0]).hypot(a[1] - b[1]);
+    // Ends: the positive pad and the negative pad closest to it.
+    let (n0, n1) = if d(ps[0].center, ns[0].center) <= d(ps[0].center, ns[1].center) {
+        (ns[0], ns[1])
+    } else {
+        (ns[1], ns[0])
+    };
+    let layer = [Layer::FCu, Layer::BCu]
+        .into_iter()
+        .chain(layout.board.copper())
+        .find(|l| [ps[0], ps[1], n0, n1].iter().all(|pad| pad.layers.contains(l)))
+        .ok_or("the pair's pads share no copper layer")?;
+    let mut router = Router::new(layout, opts.pitch).ok_or("the board has no outline")?;
+    router
+        .connect_pair(
+            (&pair.positive, &pair.negative),
+            (ps[0].center, n0.center),
+            (ps[1].center, n1.center),
+            layer,
+            pair.width.mm(),
+            pair.gap.mm(),
+            (
+                ps[0].size.0.max(ps[0].size.1).max(n0.size.0.max(n0.size.1)) / 2.0,
+                ps[1].size.0.max(ps[1].size.1).max(n1.size.0.max(n1.size.1)) / 2.0,
+            ),
+            opts,
+        )
+        .ok_or_else(|| {
+            format!(
+                "no room for {} as a pair on {}: move parts apart or route it by hand",
+                pair.name,
+                layer.name()
+            )
+        })
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
 (
-    package: "axial",
+    package: "${param.package}",
     params: {"R": "${param.R}", "style": "resistor"},
 )

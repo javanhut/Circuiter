@@ -561,7 +561,8 @@ impl CircuiterApp {
         app.pcb.bottom_tab = match args.results.as_deref() {
             Some("nets") => 1,
             Some("classes") => 2,
-            Some("stackup") => 3,
+            Some("pairs") => 3,
+            Some("stackup") => 4,
             _ => 0,
         };
         if let Some(tab) = args.results.as_deref() {

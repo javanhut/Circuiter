@@ -12,6 +12,12 @@ use std::f32::consts::{FRAC_PI_2, PI};
 
 /// Every package, for menus and checks.
 pub const PACKAGES: &[&str] = &[
+    "0603",
+    "0805",
+    "1206",
+    "sod123",
+    "sot23",
+    "soic",
     "axial",
     "disc",
     "led",
@@ -94,6 +100,10 @@ pub fn generate(package: &str, p: Params<'_>) -> Result<Mesh, String> {
         "to220" => to220(p),
         "sot223" => sot223(),
         "dip" => dip(p)?,
+        "0603" | "0805" | "1206" => chip(package, p),
+        "sod123" => sod123(),
+        "sot23" => sot23(),
+        "soic" => soic(p)?,
         "bridge" => bridge(),
         "hc49" => hc49(),
         "fuse" => fuse(p),
@@ -366,6 +376,92 @@ fn to220(p: Params<'_>) -> Mesh {
 }
 
 /// SOT-223, surface mount: body, three gull-wing leads and the tab.
+/// A surface-mount chip lying along X: a resistor (black, white-printed top), a
+/// capacitor (tan) or an LED (its colour), with tinned ends over the pads.
+fn chip(package: &str, p: Params<'_>) -> Mesh {
+    let (l, w, h) = match package {
+        "0603" => (1.6, 0.8, 0.45),
+        "0805" => (2.0, 1.25, 0.5),
+        _ => (3.2, 1.6, 0.55),
+    };
+    let end = l * 0.18;
+    let style = text(p, "style", "resistor");
+    let body = match style.as_str() {
+        "capacitor" => [196, 160, 110, 255],
+        "led" => color(&text(p, "color", "red")),
+        _ => color("black"),
+    };
+    let mut m = cuboid([-l / 2.0 + end, -w / 2.0, 0.0], [l / 2.0 - end, w / 2.0, h], body);
+    for s in [-1.0f32, 1.0] {
+        let (a, b) = if s < 0.0 { (-l / 2.0, -l / 2.0 + end) } else { (l / 2.0 - end, l / 2.0) };
+        m.append(cuboid([a, -w / 2.0, 0.0], [b, w / 2.0, h], tin()));
+    }
+    if style == "led" {
+        // The cathode mark: a green dot at the −X end, over pad 1.
+        m.append(cuboid(
+            [-l / 2.0 + end, -w / 4.0, h],
+            [-l / 2.0 + end * 1.6, w / 4.0, h + 0.01],
+            color("green"),
+        ));
+    }
+    m
+}
+
+/// SOD-123: a small moulded diode with a band at its cathode (−X) and bent leads.
+fn sod123() -> Mesh {
+    let mut m = cuboid([-1.35, -0.8, 0.05], [1.35, 0.8, 1.1], color("black"));
+    m.append(cuboid([-1.1, -0.8, 1.1], [-0.7, 0.8, 1.11], color("grey")));
+    m.append(cuboid([-1.9, -0.35, 0.0], [-1.35, 0.35, 0.12], tin()));
+    m.append(cuboid([1.35, -0.35, 0.0], [1.9, 0.35, 0.12], tin()));
+    m
+}
+
+/// A gull-wing lead from the body's edge at height `z` out to `x_out`, at `y`.
+fn gull(x_edge: f32, x_out: f32, y: f32, half: f32, z: f32) -> Mesh {
+    let (a, b) = (x_edge.min(x_out), x_edge.max(x_out));
+    let mut m = cuboid([a, y - half, 0.0], [b, y + half, 0.12], tin());
+    let foot = if x_out > x_edge {
+        x_edge + (x_out - x_edge) * 0.35
+    } else {
+        x_edge - (x_edge - x_out) * 0.35
+    };
+    let (c, d) = (x_edge.min(foot), x_edge.max(foot));
+    m.append(cuboid([c, y - half, 0.0], [d, y + half, z], tin()));
+    m
+}
+
+/// SOT-23: a black body, pins 1 and 2 on the left (at +Y and −Y on the board), 3 on
+/// the right.
+fn sot23() -> Mesh {
+    let mut m = cuboid([-0.65, -1.45, 0.1], [0.65, 1.45, 1.0], color("black"));
+    for (x, y) in [(-1.2f32, 0.95f32), (-1.2, -0.95), (1.2, 0.0)] {
+        let edge = if x < 0.0 { -0.65 } else { 0.65 };
+        m.append(gull(edge, x, y, 0.2, 0.5));
+    }
+    m
+}
+
+/// SOIC with `pins` pins, 1.27 mm apart, numbered as the footprint has them: pin 1 at
+/// the top left.
+fn soic(p: Params<'_>) -> Result<Mesh, String> {
+    let n = num(p, "pins", 8.0).round() as i32;
+    if !(4..=32).contains(&n) || n % 2 != 0 {
+        return Err(format!("a SOIC needs an even number of pins, 4 to 32, not {n}"));
+    }
+    let per = n / 2;
+    let span = (per - 1) as f32 * 1.27;
+    let half = span / 2.0 + 0.6;
+    let mut m = cuboid([-1.95, -half, 0.1], [1.95, half, 1.55], color("black"));
+    // Pin 1's dimple.
+    m.append(cylinder(0.3, 1.55, 1.57, 16, color("grey")).translated([-1.2, half - 0.7, 0.0]));
+    for k in 0..per {
+        let y = -span / 2.0 + 1.27 * k as f32;
+        m.append(gull(-1.95, -3.0, y, 0.2, 0.75));
+        m.append(gull(1.95, 3.0, y, 0.2, 0.75));
+    }
+    Ok(m)
+}
+
 fn sot223() -> Mesh {
     let mut m = cuboid([-3.25, -1.75, 0.1], [3.25, 1.75, 1.7], color("black"));
     for x in [-2.3f32, 0.0, 2.3] {
@@ -633,7 +729,7 @@ mod tests {
             assert!(m.triangles() > 10, "{name}");
             let (lo, hi) = m.bounds().unwrap();
             assert!(lo[2] >= BELOW - 1e-3, "{name} reaches below the leads: {lo:?}");
-            assert!(hi[2] > 0.5, "{name} rises above the board: {hi:?}");
+            assert!(hi[2] > 0.3, "{name} rises above the board: {hi:?}");
             assert!(hi[0] - lo[0] < 140.0 && hi[1] - lo[1] < 200.0, "{name} size {lo:?} {hi:?}");
         }
         let p = params(&[("pins", "7")]);

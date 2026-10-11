@@ -8,6 +8,14 @@
         (name: "vdd", kind: PowerIn, description: "Supply, joined to VDD", global: "VDD"),
         (name: "gnd", kind: PowerIn, description: "Ground, joined to GND", global: "GND"),
     ],
+    params: [
+        (
+            name: "package",
+            kind: Choice(["dip", "soic"]),
+            default: "dip",
+            description: "Package: through-hole or surface-mount, for the board",
+        ),
+    ],
     physics: (
         limits: [Voltage(ports: ("vdd", "gnd"), max: "7")],
         failure: (mode: Short("vdd", "gnd"), effect: Smoke),

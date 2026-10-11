@@ -519,6 +519,103 @@ pub fn tune_length(
     Err("there's no room either side of the segment for the bumps".into())
 }
 
+/// How to line parts up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Align {
+    Left,
+    Right,
+    Top,
+    Bottom,
+    /// Centres on one vertical line.
+    CentreX,
+    /// Centres on one horizontal line.
+    CentreY,
+    /// Evenly spaced across, the outermost staying put.
+    SpreadX,
+    /// Evenly spaced down.
+    SpreadY,
+}
+
+/// The box a placed part takes up on the board.
+pub fn part_box(layout: &Layout, k: usize) -> Option<(P, P)> {
+    let part = &layout.parts[k];
+    let place = part.place?;
+    let (lo, hi) = crate::sync::extent(&part.footprint);
+    let c = [lo, [hi[0], lo[1]], hi, [lo[0], hi[1]]].map(|q| place.apply(q));
+    Some((
+        [
+            c.iter().map(|q| q[0]).fold(f64::MAX, f64::min),
+            c.iter().map(|q| q[1]).fold(f64::MAX, f64::min),
+        ],
+        [
+            c.iter().map(|q| q[0]).fold(f64::MIN, f64::max),
+            c.iter().map(|q| q[1]).fold(f64::MIN, f64::max),
+        ],
+    ))
+}
+
+/// Lines up the parts `paths` by their boxes, as Altium's Align commands do: edges to
+/// the outermost one's, centres to their middle, or spread evenly between the two
+/// outermost. Their tracks come with them; locked parts stay.
+pub fn align(board: &mut Board, layout: &Layout, paths: &[String], how: Align) {
+    let items: Vec<(String, (P, P))> = paths
+        .iter()
+        .filter(|p| !board.placed(p).is_some_and(|f| f.locked))
+        .filter_map(|p| Some((p.clone(), part_box(layout, layout.part(p)?)?)))
+        .collect();
+    if items.len() < 2 {
+        return;
+    }
+    let lo = |i: usize| items.iter().map(|(_, b)| b.0[i]).fold(f64::MAX, f64::min);
+    let hi = |i: usize| items.iter().map(|(_, b)| b.1[i]).fold(f64::MIN, f64::max);
+    let mid = |b: &(P, P), i: usize| (b.0[i] + b.1[i]) / 2.0;
+    let mut moves: Vec<(String, P)> = Vec::new();
+    match how {
+        Align::Left => {
+            moves = items.iter().map(|(p, b)| (p.clone(), [lo(0) - b.0[0], 0.0])).collect()
+        }
+        Align::Right => {
+            moves = items.iter().map(|(p, b)| (p.clone(), [hi(0) - b.1[0], 0.0])).collect()
+        }
+        Align::Top => {
+            moves = items.iter().map(|(p, b)| (p.clone(), [0.0, lo(1) - b.0[1]])).collect()
+        }
+        Align::Bottom => {
+            moves = items.iter().map(|(p, b)| (p.clone(), [0.0, hi(1) - b.1[1]])).collect()
+        }
+        Align::CentreX => {
+            let c = items.iter().map(|(_, b)| mid(b, 0)).sum::<f64>() / items.len() as f64;
+            moves = items.iter().map(|(p, b)| (p.clone(), [c - mid(b, 0), 0.0])).collect();
+        }
+        Align::CentreY => {
+            let c = items.iter().map(|(_, b)| mid(b, 1)).sum::<f64>() / items.len() as f64;
+            moves = items.iter().map(|(p, b)| (p.clone(), [0.0, c - mid(b, 1)])).collect();
+        }
+        Align::SpreadX | Align::SpreadY => {
+            let i = usize::from(how == Align::SpreadY);
+            let mut sorted = items.clone();
+            sorted.sort_by(|a, b| mid(&a.1, i).total_cmp(&mid(&b.1, i)));
+            let (first, last) = (mid(&sorted[0].1, i), mid(&sorted[sorted.len() - 1].1, i));
+            let step = (last - first) / (sorted.len() - 1) as f64;
+            for (k, (p, b)) in sorted.iter().enumerate() {
+                let mut d = [0.0, 0.0];
+                d[i] = first + step * k as f64 - mid(b, i);
+                moves.push((p.clone(), d));
+            }
+        }
+    }
+    for (path, d) in moves {
+        if d[0].abs() < 1e-9 && d[1].abs() < 1e-9 {
+            continue;
+        }
+        if let Some(f) = board.placed(&path).cloned() {
+            let mut moved = f.clone();
+            moved.at = point([p(f.at)[0] + d[0], p(f.at)[1] + d[1]]);
+            move_footprint(board, layout, &path, moved);
+        }
+    }
+}
+
 /// Takes off every track and via of `net` (all nets when `None`).
 pub fn unroute(board: &mut Board, net: Option<&str>) {
     board.tracks.retain(|t| net.is_some_and(|n| t.net != n));

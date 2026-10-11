@@ -272,9 +272,11 @@ impl CircuiterApp {
             let mut tab = self.pcb.bottom_tab;
             style::strip(ui, |ui| {
                 ui.horizontal(|ui| {
-                    if let Some(t) =
-                        style::tab_strip(ui, &[&title, "Nets", "Net Classes", "Stack-up"], tab)
-                    {
+                    if let Some(t) = style::tab_strip(
+                        ui,
+                        &[&title, "Nets", "Net Classes", "Diff Pairs", "Stack-up"],
+                        tab,
+                    ) {
                         tab = t;
                     }
                     style::trailing(ui, |ui| {
@@ -293,7 +295,8 @@ impl CircuiterApp {
                 |ui| match tab {
                     1 => super::pcb::nets_panel(self, ui),
                     2 => super::pcb::classes_panel(self, ui),
-                    3 => super::pcb::stackup_panel(self, ui),
+                    3 => super::pcb::pairs_panel(self, ui),
+                    4 => super::pcb::stackup_panel(self, ui),
                     _ => super::pcb::drc_panel(self, ui),
                 },
             );

@@ -20,6 +20,12 @@
         (name: "vcc", kind: PowerIn, description: "Supply (pin 8)"),
     ],
     params: [
+        (
+            name: "package",
+            kind: Choice(["dip", "soic"]),
+            default: "dip",
+            description: "Package: through-hole or surface-mount, for the board",
+        ),
         (name: "vmax", kind: Real(unit: "V"), default: "16", description: "Supply voltage rating"),
     ],
     physics: (

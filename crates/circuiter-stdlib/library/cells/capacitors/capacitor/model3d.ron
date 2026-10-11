@@ -1,4 +1,4 @@
 (
-    package: "disc",
-    params: {"color": "orange"},
+    package: "${param.package}",
+    params: {"color": "orange", "style": "capacitor"},
 )

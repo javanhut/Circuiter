@@ -7,6 +7,12 @@
         (name: "e", description: "Emitter"),
     ],
     params: [
+        (
+            name: "package",
+            kind: Choice(["to92", "sot23"]),
+            default: "to92",
+            description: "Package: through-hole or surface-mount, for the board",
+        ),
         (name: "is", kind: Real(unit: "A"), default: "1.41f", description: "Saturation current"),
         (name: "bf", kind: Real(unit: ""), default: "180.7", description: "Forward current gain"),
         (name: "br", kind: Real(unit: ""), default: "4.977", description: "Reverse current gain"),
