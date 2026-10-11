@@ -102,6 +102,14 @@ pub fn fill(layout: &Layout) -> Vec<ZoneFill> {
         for v in board.vias.iter().filter(|v| v.net != zone.net) {
             keep_out.push(vec![geometry::via(v, gap(Some(&v.net)))]);
         }
+        for t in crate::teardrops::shapes(layout)
+            .iter()
+            .filter(|t| t.layer == zone.layer && t.net != zone.net)
+        {
+            keep_out.push(vec![
+                geometry::offset(&vec![vec![t.outline.clone()]], gap(Some(&t.net)))[0][0].clone(),
+            ]);
+        }
         for f in done.iter().filter(|f| f.layer == zone.layer && f.net != zone.net) {
             keep_out.extend(geometry::offset(&f.shapes, gap(Some(&f.net))));
         }

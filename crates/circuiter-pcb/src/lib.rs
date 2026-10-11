@@ -11,11 +11,14 @@ pub mod fab;
 pub mod font;
 pub mod footprints;
 pub mod geometry;
+pub mod impedance;
 pub mod kicad;
 pub mod layout;
+pub mod nets;
 pub mod route;
 pub mod svg;
 pub mod sync;
+pub mod teardrops;
 pub mod zones;
 
 #[cfg(test)]

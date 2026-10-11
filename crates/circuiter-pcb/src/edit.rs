@@ -260,6 +260,265 @@ pub fn clean_up(board: &mut Board, layout: &Layout) -> usize {
     before - board.tracks.len()
 }
 
+/// Loop removal, as Altium's router does it: when a new route (tracks `fresh`) makes
+/// another way between two points of `net`, the old tracks it duplicates come off. A
+/// track is redundant when both its ends are joined to the rest of the net's copper by
+/// other means; tracks in `fresh` are kept. Returns how many were taken off.
+pub fn remove_loops(board: &mut Board, layout: &Layout, net: &str, fresh: &[Track]) -> usize {
+    let mut removed = 0;
+    loop {
+        let candidates: Vec<usize> = (0..board.tracks.len())
+            .filter(|&k| board.tracks[k].net == net && !fresh.contains(&board.tracks[k]))
+            .collect();
+        let mut gone = None;
+        for k in candidates {
+            if redundant(board, layout, k) {
+                gone = Some(k);
+                break;
+            }
+        }
+        match gone {
+            Some(k) => {
+                let t = board.tracks.remove(k);
+                removed += 1;
+                // The rest of the old way, left hanging, comes off with it.
+                let mut freed = vec![(t.layer, p(t.a)), (t.layer, p(t.b))];
+                while let Some((layer, q)) = freed.pop() {
+                    let hanging = (0..board.tracks.len()).find(|&j| {
+                        let o = &board.tracks[j];
+                        o.net == net
+                            && o.layer == layer
+                            && !fresh.contains(o)
+                            && [p(o.a), p(o.b)].iter().any(|e| near(*e, q))
+                            && !attached(board, layout, j, q)
+                    });
+                    if let Some(j) = hanging {
+                        let o = board.tracks.remove(j);
+                        removed += 1;
+                        let other = if near(p(o.a), q) { p(o.b) } else { p(o.a) };
+                        freed.push((o.layer, other));
+                    }
+                }
+            }
+            None => return removed,
+        }
+    }
+}
+
+/// Whether the end of track `k` at `q` touches other copper of its net: a pad, a via
+/// or another track.
+fn attached(board: &Board, layout: &Layout, k: usize, q: P) -> bool {
+    let t = &board.tracks[k];
+    layout.pads.iter().any(|pad| {
+        pad.net.as_deref() == Some(t.net.as_str())
+            && pad.layers.contains(&t.layer)
+            && crate::geometry::overlaps(
+                &vec![vec![crate::geometry::pad(pad, 0.0)]],
+                &vec![vec![crate::geometry::circle(q, 0.01)]],
+            )
+    }) || board.vias.iter().any(|v| {
+        v.net == t.net && (p(v.at)[0] - q[0]).hypot(p(v.at)[1] - q[1]) <= v.diameter.mm() / 2.0
+    }) || board.tracks.iter().enumerate().any(|(j, o)| {
+        j != k
+            && o.net == t.net
+            && o.layer == t.layer
+            && crate::geometry::segment_distance(p(o.a), p(o.b), q, q) <= o.width.mm() / 2.0
+    })
+}
+
+/// Whether track `k`'s two ends are joined through the rest of its net's copper.
+fn redundant(board: &Board, layout: &Layout, k: usize) -> bool {
+    let t = &board.tracks[k];
+    // The net's copper other than this track: pads, vias, tracks, as nodes.
+    #[derive(Clone, Copy)]
+    enum Node {
+        Pad(usize),
+        Via(usize),
+        Track(usize),
+    }
+    let mut nodes = Vec::new();
+    for (j, pad) in layout.pads.iter().enumerate() {
+        if pad.net.as_deref() == Some(t.net.as_str()) {
+            nodes.push(Node::Pad(j));
+        }
+    }
+    for (j, v) in board.vias.iter().enumerate() {
+        if v.net == t.net {
+            nodes.push(Node::Via(j));
+        }
+    }
+    for (j, o) in board.tracks.iter().enumerate() {
+        if j != k && o.net == t.net {
+            nodes.push(Node::Track(j));
+        }
+    }
+    // Whether a node's copper covers point `q` on `layer`.
+    let covers = |n: Node, q: P, layer: Layer| -> bool {
+        match n {
+            Node::Pad(j) => {
+                let pad = &layout.pads[j];
+                pad.layers.contains(&layer)
+                    && crate::geometry::overlaps(
+                        &vec![vec![crate::geometry::pad(pad, 0.0)]],
+                        &vec![vec![crate::geometry::circle(q, 0.01)]],
+                    )
+            }
+            Node::Via(j) => {
+                let v = &board.vias[j];
+                (p(v.at)[0] - q[0]).hypot(p(v.at)[1] - q[1]) <= v.diameter.mm() / 2.0
+            }
+            Node::Track(j) => {
+                let o = &board.tracks[j];
+                o.layer == layer
+                    && crate::geometry::segment_distance(p(o.a), p(o.b), q, q) <= o.width.mm() / 2.0
+            }
+        }
+    };
+    // Whether two nodes touch.
+    let touch = |a: Node, b: Node| -> bool {
+        match (a, b) {
+            (Node::Track(i), other) | (other, Node::Track(i)) => {
+                let o = &board.tracks[i];
+                [p(o.a), p(o.b)].iter().any(|&q| covers(other, q, o.layer))
+                    || match other {
+                        Node::Track(j) => {
+                            let w = &board.tracks[j];
+                            w.layer == o.layer
+                                && [p(w.a), p(w.b)]
+                                    .iter()
+                                    .any(|&q| covers(Node::Track(i), q, o.layer))
+                        }
+                        _ => false,
+                    }
+            }
+            (Node::Via(i), Node::Pad(j)) | (Node::Pad(j), Node::Via(i)) => {
+                let v = &board.vias[i];
+                layout.pads[j].layers.iter().any(|l| covers(Node::Pad(j), p(v.at), *l))
+            }
+            (Node::Via(i), Node::Via(j)) => {
+                let (a, b) = (&board.vias[i], &board.vias[j]);
+                (p(a.at)[0] - p(b.at)[0]).hypot(p(a.at)[1] - p(b.at)[1])
+                    < (a.diameter.mm() + b.diameter.mm()) / 2.0
+            }
+            (Node::Pad(_), Node::Pad(_)) => false,
+        }
+    };
+    let n = nodes.len();
+    let mut parent: Vec<usize> = (0..n).collect();
+    fn find(p: &mut [usize], mut x: usize) -> usize {
+        while p[x] != x {
+            p[x] = p[p[x]];
+            x = p[x];
+        }
+        x
+    }
+    for i in 0..n {
+        for j in i + 1..n {
+            if touch(nodes[i], nodes[j]) {
+                let (a, b) = (find(&mut parent, i), find(&mut parent, j));
+                parent[a] = b;
+            }
+        }
+    }
+    let ends = |q: P| -> Vec<usize> { (0..n).filter(|&i| covers(nodes[i], q, t.layer)).collect() };
+    let (ea, eb) = (ends(p(t.a)), ends(p(t.b)));
+    ea.iter()
+        .any(|&i| eb.iter().any(|&j| find(&mut parent.clone(), i) == find(&mut parent.clone(), j)))
+}
+
+/// The points of an accordion along the x axis from 0 to `len`: `bumps` square bumps
+/// `amplitude` high and `space` wide, starting and ending `space` in, every corner
+/// mitered (Altium's mitered-lines style).
+fn accordion(len: f64, bumps: usize, amplitude: f64, space: f64) -> Vec<P> {
+    let m = space.min(amplitude) * 0.25;
+    let start = (len - (2 * bumps) as f64 * space) / 2.0;
+    let mut pts = vec![[0.0, 0.0]];
+    for k in 0..bumps {
+        let x0 = start + (2 * k) as f64 * space;
+        pts.extend([
+            [x0 - m, 0.0],
+            [x0, m],
+            [x0, amplitude - m],
+            [x0 + m, amplitude],
+            [x0 + space - m, amplitude],
+            [x0 + space, amplitude - m],
+            [x0 + space, m],
+            [x0 + space + m, 0.0],
+        ]);
+    }
+    pts.push([len, 0.0]);
+    pts.dedup_by(|a, b| near(*a, *b));
+    pts
+}
+
+fn polyline_length(pts: &[P]) -> f64 {
+    pts.windows(2).map(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1])).sum()
+}
+
+/// Lengthens track `k` by `extra` mm with an accordion along it, as Altium's
+/// interactive length tuning does: bumps `space` apart, no taller than
+/// `max_amplitude`, on whichever side `clear` (asked of each new segment's points)
+/// finds room. Returns the length added.
+pub fn tune_length(
+    board: &mut Board,
+    k: usize,
+    extra: f64,
+    max_amplitude: f64,
+    space: f64,
+    clear: &mut dyn FnMut(&[P]) -> bool,
+) -> Result<f64, String> {
+    let t = board.tracks.get(k).cloned().ok_or("no such track")?;
+    if extra <= 1e-6 {
+        return Err("it's already long enough".into());
+    }
+    let (a, b) = (p(t.a), p(t.b));
+    let len = (b[0] - a[0]).hypot(b[1] - a[1]);
+    let space = space.max(t.width.mm() * 2.0);
+    let bumps = ((len - 2.0 * space) / (2.0 * space)).floor();
+    if bumps < 1.0 {
+        return Err(format!(
+            "the segment is too short to tune: it needs at least {:.2} mm",
+            4.0 * space
+        ));
+    }
+    let bumps = bumps as usize;
+    // The amplitude that adds `extra`, by bisection.
+    let added = |amp: f64| polyline_length(&accordion(len, bumps, amp, space)) - len;
+    if added(max_amplitude) < extra {
+        return Err(format!(
+            "{} mm more needs bumps taller than {:.2} mm here: tune a longer segment, or allow more",
+            (extra * 100.0).round() / 100.0,
+            max_amplitude
+        ));
+    }
+    let (mut lo, mut hi) = (0.0, max_amplitude);
+    for _ in 0..60 {
+        let mid = (lo + hi) / 2.0;
+        if added(mid) < extra {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let local = accordion(len, bumps, hi, space);
+    let u = [(b[0] - a[0]) / len, (b[1] - a[1]) / len];
+    for side in [1.0, -1.0] {
+        let n = [-u[1] * side, u[0] * side];
+        let pts: Vec<P> = local
+            .iter()
+            .map(|q| [a[0] + u[0] * q[0] + n[0] * q[1], a[1] + u[1] * q[0] + n[1] * q[1]])
+            .collect();
+        if clear(&pts) {
+            board.tracks.remove(k);
+            for w in pts.windows(2) {
+                board.tracks.push(Track { a: point(w[0]), b: point(w[1]), ..t.clone() });
+            }
+            return Ok(polyline_length(&pts) - len);
+        }
+    }
+    Err("there's no room either side of the segment for the bumps".into())
+}
+
 /// Takes off every track and via of `net` (all nets when `None`).
 pub fn unroute(board: &mut Board, net: Option<&str>) {
     board.tracks.retain(|t| net.is_some_and(|n| t.net != n));
@@ -308,6 +567,67 @@ mod tests {
         // The free end, with nothing to slide along, gets a leg.
         assert_eq!(b.tracks.len(), 3);
         assert_eq!(e[2], ([15.0, 5.0], [15.0, 3.0]));
+    }
+
+    #[test]
+    fn loops_lose_their_old_way() {
+        // Two ways from (0,0) to (10,0): straight, and up and over. The new straight one
+        // stays; the old way round comes off; a stub that goes nowhere stays.
+        let mut b = Board::new(50.0, 50.0);
+        let old = vec![
+            track([0.0, 0.0], [0.0, -5.0]),
+            track([0.0, -5.0], [10.0, -5.0]),
+            track([10.0, -5.0], [10.0, 0.0]),
+        ];
+        let fresh = vec![track([0.0, 0.0], [10.0, 0.0])];
+        let stub = track([10.0, 0.0], [10.0, 8.0]);
+        b.tracks = old.into_iter().chain(fresh.clone()).chain([stub.clone()]).collect();
+        let layout = Layout::new(
+            &circuiter_model::Design::new(),
+            &circuiter_model::CellId::new("x", "y"),
+            &b,
+        );
+        // No schematic here: a layout of the bare board.
+        let layout = layout.unwrap_or_else(|_| Layout {
+            board: b.clone(),
+            parts: Vec::new(),
+            pads: Vec::new(),
+            nets: Default::default(),
+            unplaced: Vec::new(),
+            orphans: Vec::new(),
+            off_board: Vec::new(),
+            errors: Vec::new(),
+        });
+        let removed = remove_loops(&mut b, &layout, "n", &fresh);
+        assert_eq!(removed, 3, "{:?}", ends(&b));
+        assert!(b.tracks.contains(&fresh[0]) && b.tracks.contains(&stub));
+    }
+
+    #[test]
+    fn an_accordion_adds_the_length_asked() {
+        let mut b = Board::new(50.0, 50.0);
+        b.tracks = vec![track([0.0, 10.0], [20.0, 10.0])];
+        let added = tune_length(&mut b, 0, 6.0, 3.0, 1.0, &mut |_| true).unwrap();
+        assert!((added - 6.0).abs() < 1e-6, "{added}");
+        // Lengths are kept to the nanometre, so the tracks add up to within a few.
+        let total: f64 =
+            b.tracks.iter().map(|t| (p(t.b)[0] - p(t.a)[0]).hypot(p(t.b)[1] - p(t.a)[1])).sum();
+        assert!((total - 26.0).abs() < 1e-4, "{total}");
+        // Joined end to end, starting and ending where the track did.
+        assert!(
+            b.tracks.iter().any(|t| near(p(t.a), [0.0, 10.0]))
+                && b.tracks.iter().any(|t| near(p(t.b), [20.0, 10.0]))
+        );
+        // Every corner mitered: no square turns.
+        for w in b.tracks.windows(2) {
+            let d = |t: &Track| [p(t.b)[0] - p(t.a)[0], p(t.b)[1] - p(t.a)[1]];
+            let (u, v) = (d(&w[0]), d(&w[1]));
+            assert!(u[0] * v[0] + u[1] * v[1] > -1e-9, "no turn sharper than 90°");
+        }
+        // Too much for the room: refused.
+        let mut b = Board::new(50.0, 50.0);
+        b.tracks = vec![track([0.0, 10.0], [8.0, 10.0])];
+        assert!(tune_length(&mut b, 0, 50.0, 2.0, 1.0, &mut |_| true).is_err());
     }
 
     #[test]

@@ -269,22 +269,34 @@ impl CircuiterApp {
                 .map_or(0, |c| c.violations.len());
             let title = format!("Design Rules ({count})");
             let mut hide = false;
+            let mut tab = self.pcb.bottom_tab;
             style::strip(ui, |ui| {
                 ui.horizontal(|ui| {
-                    style::tab_strip(ui, &[&title], 0);
+                    if let Some(t) =
+                        style::tab_strip(ui, &[&title, "Nets", "Net Classes", "Stack-up"], tab)
+                    {
+                        tab = t;
+                    }
                     style::trailing(ui, |ui| {
                         hide = style::icon_button(ui, icon::X, "Hide this panel", true, false)
                             .clicked();
                     });
                 })
             });
+            self.pcb.bottom_tab = tab;
             if hide {
                 self.show_bottom = false;
                 return;
             }
-            egui::Frame::new()
-                .inner_margin(egui::Margin::symmetric(12, 8))
-                .show(ui, |ui| super::pcb::drc_panel(self, ui));
+            egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 8)).show(
+                ui,
+                |ui| match tab {
+                    1 => super::pcb::nets_panel(self, ui),
+                    2 => super::pcb::classes_panel(self, ui),
+                    3 => super::pcb::stackup_panel(self, ui),
+                    _ => super::pcb::drc_panel(self, ui),
+                },
+            );
             return;
         }
         let problems = self.workspace.as_ref().map_or(0, |ws| ws.problems().len());

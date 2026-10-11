@@ -848,3 +848,120 @@ fn boards_autoroute_and_tracks_rearrange() {
     h.run_steps(2);
     assert_eq!(h.state().pcb_view().layer, circuiter_model::board::Layer::FCu);
 }
+
+/// Altium-style board tools: Ctrl+click finishes a connection by itself, the Tools
+/// menu optimises placement and adds teardrops, Update from Schematic says when there's
+/// nothing to do, and Ctrl+M measures.
+#[test]
+fn board_tools_work_from_the_editor() {
+    let tmp = example_copy("analog_lab");
+    let args = Args {
+        project: Some(tmp.path().to_owned()),
+        cell: Some("blinker".into()),
+        theme: None,
+        view: Some("pcb".into()),
+        select: None,
+        simulate: None,
+        heat: false,
+        program: None,
+        live: false,
+        results: None,
+        screenshot: None,
+    };
+    let mut h = Harness::builder()
+        .with_size(Vec2::new(1600.0, 1000.0))
+        .build_eframe(move |cc| CircuiterApp::new(cc, args));
+    h.run_steps(4);
+    let menu = |h: &mut Harness<'_, CircuiterApp>, menu: &str, item: &str| {
+        h.get_by_label(menu).click();
+        h.run_steps(2);
+        h.get_by_label(item).click();
+        h.run_steps(4);
+    };
+    let autoroute = format!("{}  Autoroute", crate::style::icon::FLOW_ARROW);
+    let tools = format!("{}  Tools", crate::style::icon::GEAR_SIX);
+    menu(&mut h, &autoroute, "Unroute All");
+    let unrouted = |h: &Harness<'_, CircuiterApp>| {
+        h.state()
+            .pcb_view()
+            .analysis
+            .as_ref()
+            .and_then(|a| a.checked.as_ref())
+            .map(|c| (c.connectivity.unrouted(), c.errors()))
+            .unwrap()
+    };
+    // Optimise first (nothing routed to lose), then teardrops on.
+    menu(&mut h, &tools, "Optimise Placement");
+    assert!(
+        h.state().pcb_view().note.as_deref().is_some_and(|n| n.contains("shorter")),
+        "{:?}",
+        h.state().pcb_view().note
+    );
+    menu(&mut h, &tools, "Add Teardrops");
+    assert!(board(&h).teardrops.is_some());
+
+    // Ctrl+click a pad with a connection to make: X, then Ctrl+click.
+    let (before, _) = unrouted(&h);
+    let (_, a, _) = h
+        .state()
+        .pcb_view()
+        .analysis
+        .as_ref()
+        .unwrap()
+        .checked
+        .as_ref()
+        .unwrap()
+        .connectivity
+        .ratsnest[0]
+        .clone();
+    let at = on_board(&h, a);
+    h.hover_at(at);
+    h.step();
+    h.key_press(egui::Key::X);
+    h.run_steps(2);
+    // Ctrl held through the click.
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::COMMAND));
+    h.step();
+    h.event(egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::COMMAND,
+    });
+    h.step();
+    h.event(egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::COMMAND,
+    });
+    h.step();
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    h.run_steps(4);
+    let (after, errors) = unrouted(&h);
+    assert_eq!(after, before - 1, "{:?}", h.state().pcb_view().note);
+    assert_eq!(errors, 0);
+    h.key_press(egui::Key::Escape);
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+
+    // Nothing for the schematic to change.
+    h.get_by_label(&format!("{}  Update from Schematic", crate::style::icon::ARROWS_CLOCKWISE))
+        .click();
+    h.run_steps(3);
+    assert_eq!(h.state().pcb_view().note.as_deref(), Some("The board matches the schematic"));
+
+    // Ctrl+M, then two clicks.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::M);
+    h.run_steps(2);
+    let (p1, p2) = (on_board(&h, [10.0, 20.0]), on_board(&h, [20.0, 20.0]));
+    for q in [p1, p2] {
+        click_at(&mut h, q);
+    }
+    match &h.state().pcb_view().tool {
+        crate::app::pcb::PcbTool::Measure { from: Some(f), to: Some(t) } => {
+            assert!(((t[0] - f[0]) - 10.0).abs() < 0.7, "{f:?} {t:?}")
+        }
+        other => panic!("{other:?}"),
+    }
+}

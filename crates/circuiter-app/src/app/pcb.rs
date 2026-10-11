@@ -12,6 +12,7 @@ use circuiter_model::{CellId, Design};
 use circuiter_pcb::drc::{self, Checked, Severity};
 use circuiter_pcb::geometry::{self, Contour};
 use circuiter_pcb::layout::{Layout, P, PadAt, Place, p, point};
+use circuiter_pcb::route::{Options as RouteOptions, Router};
 use circuiter_pcb::{fab, font, sync};
 use circuiter_scene::Pt;
 use eframe::egui::{self, Color32, Pos2, RichText, Sense, Stroke};
@@ -69,6 +70,11 @@ pub enum PcbTool {
     Outline {
         points: Vec<P>,
     },
+    /// Measuring: from a point, to another (Ctrl+M).
+    Measure {
+        from: Option<P>,
+        to: Option<P>,
+    },
 }
 
 /// What to do with the tool in hand, for the status bar.
@@ -89,6 +95,9 @@ pub fn hint(tool: &PcbTool) -> &'static str {
         PcbTool::Outline { .. } => {
             "Click the board's corners · double-click or Enter to finish · Esc cancels"
         }
+        PcbTool::Measure { .. } => {
+            "Click where to measure from, then where to · the distance and its X and Y show · Esc done"
+        }
     }
 }
 
@@ -99,6 +108,7 @@ impl PcbTool {
             PcbTool::Route { .. } => "Route",
             PcbTool::Zone { .. } => "Zone",
             PcbTool::Outline { .. } => "Outline",
+            PcbTool::Measure { .. } => "Measure",
         }
     }
 }
@@ -122,6 +132,8 @@ pub struct Analysis {
     fills: Vec<(Layer, Vec<P>, Vec<u32>)>,
     /// The board's face, as triangles.
     face: (Vec<P>, Vec<u32>),
+    /// Teardrops, worked out from the routing.
+    teardrops: Vec<circuiter_pcb::teardrops::Teardrop>,
 }
 
 impl Analysis {
@@ -156,7 +168,8 @@ impl Analysis {
             }
             _ => (Vec::new(), Vec::new()),
         };
-        Analysis { cell: cell.clone(), revision, layout, checked, fills, face }
+        let teardrops = layout.as_ref().map(circuiter_pcb::teardrops::shapes).unwrap_or_default();
+        Analysis { cell: cell.clone(), revision, layout, checked, fills, face, teardrops }
     }
 }
 
@@ -194,6 +207,78 @@ impl Default for Visible {
             high_contrast: false,
         }
     }
+}
+
+/// What the interactive router does about obstacles, as Altium's conflict modes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteMode {
+    /// Finds a way round what's in the way.
+    Walkaround,
+    /// Stops short of the first thing in the way.
+    Stop,
+    /// Goes straight over it (the rules check will say).
+    Ignore,
+}
+
+impl RouteMode {
+    pub fn name(self) -> &'static str {
+        match self {
+            RouteMode::Walkaround => "Walkaround",
+            RouteMode::Stop => "Stop at obstacle",
+            RouteMode::Ignore => "Ignore obstacles",
+        }
+    }
+
+    fn next(self) -> RouteMode {
+        match self {
+            RouteMode::Walkaround => RouteMode::Stop,
+            RouteMode::Stop => RouteMode::Ignore,
+            RouteMode::Ignore => RouteMode::Walkaround,
+        }
+    }
+}
+
+/// The corners routes take.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Corner {
+    /// 45° corners.
+    Diagonal,
+    /// 90° corners.
+    Square,
+    /// Any angle: straight from corner to corner.
+    Any,
+}
+
+impl Corner {
+    pub fn name(self) -> &'static str {
+        match self {
+            Corner::Diagonal => "45°",
+            Corner::Square => "90°",
+            Corner::Any => "any angle",
+        }
+    }
+
+    fn next(self) -> Corner {
+        match self {
+            Corner::Diagonal => Corner::Square,
+            Corner::Square => Corner::Any,
+            Corner::Any => Corner::Diagonal,
+        }
+    }
+}
+
+/// Two legs from `a` to `b` in `corner`'s style, `flip` choosing which comes first.
+pub fn legs(a: P, b: P, corner: Corner, flip: bool) -> Vec<P> {
+    let mut out = match corner {
+        Corner::Diagonal => return posture(a, b, flip),
+        Corner::Square => {
+            let c = if flip { [a[0], b[1]] } else { [b[0], a[1]] };
+            vec![a, c, b]
+        }
+        Corner::Any => vec![a, b],
+    };
+    out.dedup_by(|x, y| (x[0] - y[0]).hypot(x[1] - y[1]) < 1e-9);
+    out
 }
 
 /// What's being dragged with the select tool.
@@ -258,6 +343,35 @@ pub struct PcbView {
     pub show_layers: bool,
     /// A layer picked (in the panel) while routing: a via takes the track there.
     pending_layer: Option<Layer>,
+    /// How the interactive router deals with what's in the way, and its corners.
+    pub mode: RouteMode,
+    pub corner: Corner,
+    /// The routing grid for the board as it is (rebuilt when it changes).
+    router: Option<(CellId, u64, Router)>,
+    /// The route to the pointer as it would be laid, and whether it's blocked.
+    pub route_preview: Option<(Vec<P>, bool)>,
+    /// Tracks laid in the route under way (kept by loop removal).
+    route_laid: Vec<Track>,
+    /// The last route worked out, and what it was worked out for.
+    route_cache: Option<(String, (Vec<P>, bool))>,
+    /// Only the layer being worked on shows (Shift+S).
+    pub single_layer: bool,
+    /// Net colours shown on the routing (F5).
+    pub net_colours: bool,
+    /// The net picked in the Nets panel, shown bright.
+    pub highlight: Option<String>,
+    /// Which tab of the panel under the board shows.
+    pub bottom_tab: usize,
+    /// The schematic part last seen selected, to follow it (cross-select).
+    cross: Option<String>,
+    /// Ctrl+Shift+wheel travel, a layer per notch.
+    wheel: f32,
+    /// The Engineering Change Order being reviewed: each change and whether to make it.
+    pub eco: Option<Vec<(bool, circuiter_pcb::sync::Change)>>,
+    /// Via stitching being set up: the net and the spacing.
+    pub stitching: Option<(String, f64)>,
+    /// Length tuning being set up: target length, tallest bump, bump spacing.
+    pub tuning: Option<(f64, f64, f64)>,
     pub grid: f64,
     /// The net new pours are of.
     pub zone_net: String,
@@ -283,6 +397,21 @@ impl Default for PcbView {
             visible: Visible::default(),
             show_layers: true,
             pending_layer: None,
+            mode: RouteMode::Walkaround,
+            corner: Corner::Diagonal,
+            router: None,
+            route_preview: None,
+            route_laid: Vec::new(),
+            route_cache: None,
+            single_layer: false,
+            net_colours: false,
+            highlight: None,
+            bottom_tab: 0,
+            cross: None,
+            wheel: 0.0,
+            eco: None,
+            stitching: None,
+            tuning: None,
             grid: 0.635,
             zone_net: String::new(),
             diagonal_first: false,
@@ -310,6 +439,88 @@ impl PcbView {
 
     pub fn layout(&self) -> Option<&Layout> {
         self.analysis.as_ref()?.layout.as_ref().ok()
+    }
+
+    /// The routing grid for the board as it is now.
+    fn router(&mut self) -> Option<&mut Router> {
+        let a = self.analysis.as_ref()?;
+        let layout = a.layout.as_ref().ok()?;
+        let fresh = self.router.as_ref().is_some_and(|(c, r, _)| *c == a.cell && *r == a.revision);
+        if !fresh {
+            let router = Router::new(layout, 0.15)?;
+            self.router = Some((a.cell.clone(), a.revision, router));
+        }
+        self.router.as_mut().map(|(_, _, r)| r)
+    }
+
+    /// The track from `from` to `to` for `net` on `layer` as the router would lay it,
+    /// by the mode and corner style; and whether something's in the way.
+    fn route_to(&mut self, net: &str, width: f64, layer: Layer, from: P, to: P) -> (Vec<P>, bool) {
+        // Worked out again only when something it depends on changed.
+        let key = format!(
+            "{net} {width} {layer:?} {from:?} {to:?} {:?} {:?} {} {:?}",
+            self.mode,
+            self.corner,
+            self.diagonal_first,
+            self.analysis.as_ref().map(|a| a.revision)
+        );
+        if let Some((k, found)) = &self.route_cache {
+            if *k == key {
+                return found.clone();
+            }
+        }
+        let found = self.route_uncached(net, width, layer, from, to);
+        self.route_cache = Some((key, found.clone()));
+        found
+    }
+
+    fn route_uncached(
+        &mut self,
+        net: &str,
+        width: f64,
+        layer: Layer,
+        from: P,
+        to: P,
+    ) -> (Vec<P>, bool) {
+        let (mode, corner, flip) = (self.mode, self.corner, self.diagonal_first);
+        let straight = legs(from, to, corner, flip);
+        let Some(layout) = self.layout().cloned() else { return (straight, false) };
+        match mode {
+            RouteMode::Ignore => {
+                let blocked = route_margin(&layout, net, &straight, width, layer) < -1e-6;
+                (straight, blocked)
+            }
+            RouteMode::Stop => {
+                let Some(router) = self.router() else { return (straight, false) };
+                let cut = router.until_blocked(net, layer, &straight);
+                let end = *cut.last().expect("a start");
+                let short = (end[0] - to[0]).hypot(end[1] - to[1]) > 1e-6;
+                (cut, short)
+            }
+            RouteMode::Walkaround => {
+                // Straight if nothing's in the way; else around it.
+                if route_margin(&layout, net, &straight, width, layer) >= -1e-6 {
+                    return (straight, false);
+                }
+                let opts = RouteOptions {
+                    vias: false,
+                    orthogonal: corner == Corner::Square,
+                    any_angle: corner == Corner::Any,
+                    limit: 400_000,
+                    against: 0.0,
+                    ..RouteOptions::default()
+                };
+                let Some(router) = self.router() else { return (straight, true) };
+                match router.connect(net, from, &[layer], to, &[layer], width, &opts) {
+                    Some((tracks, _)) if !tracks.is_empty() => {
+                        let mut pts = vec![p(tracks[0].a)];
+                        pts.extend(tracks.iter().map(|t| p(t.b)));
+                        (pts, false)
+                    }
+                    _ => (straight, true),
+                }
+            }
+        }
     }
 
     pub fn snap(&self, v: P) -> P {
@@ -591,8 +802,39 @@ impl CircuiterApp {
             }
             return;
         }
+        self.pcb_cross_select(true);
         self.pcb_interact(ui, rect, &response);
+        self.pcb_cross_select(false);
         self.pcb_paint(ui, rect);
+        self.pcb_windows(&ui.ctx().clone());
+    }
+
+    /// Cross-select, as Altium's: a part selected on the schematic is selected on the
+    /// board (`inbound`), and one selected on the board is selected on the schematic.
+    fn pcb_cross_select(&mut self, inbound: bool) {
+        let Some(ws) = &mut self.workspace else { return };
+        let Some(schematic) = ws.schematic() else { return };
+        let on_sheet = match ws.selection.iter().collect::<Vec<_>>()[..] {
+            [circuiter_scene::Owner::Instance(i)] => {
+                schematic.instances.get(*i).map(|x| x.name.clone())
+            }
+            _ => None,
+        };
+        if inbound {
+            if on_sheet.is_some() && on_sheet != self.pcb.cross {
+                self.pcb.selected = on_sheet.clone().map(Pick::Footprint);
+                self.pcb.cross = on_sheet;
+            }
+            return;
+        }
+        if let Some(Pick::Footprint(path)) = &self.pcb.selected {
+            if Some(path) != on_sheet.as_ref() {
+                if let Some(i) = schematic.instances.iter().position(|x| x.name == *path) {
+                    ws.select_only(Some(circuiter_scene::Owner::Instance(i)));
+                    self.pcb.cross = Some(path.clone());
+                }
+            }
+        }
     }
 
     /// The Layers panel: every layer with its colour, shown or hidden, and the copper
@@ -728,6 +970,76 @@ impl CircuiterApp {
                 Err(e) => self.error = Some(e),
             }
         }
+    }
+
+    /// Ctrl+click: routes from `from` to the nearest copper of `net` not yet joined to
+    /// it, through vias if it must; the edit to make, if a way was found.
+    fn pcb_auto_complete(
+        &mut self,
+        layout: &Layout,
+        net: &str,
+        from: P,
+        width: f64,
+    ) -> Option<BoardEdit> {
+        let checked = self.pcb.analysis.as_ref()?.checked.as_ref()?;
+        let probe = vec![vec![geometry::circle(from, 0.05)]];
+        let here: Vec<usize> = checked
+            .copper
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.net.as_deref() == Some(net) && geometry::overlaps(&c.shape, &probe))
+            .map(|(k, _)| checked.connectivity.island[k])
+            .collect();
+        let target = checked
+            .copper
+            .iter()
+            .enumerate()
+            .filter(|(k, c)| {
+                c.net.as_deref() == Some(net) && !here.contains(&checked.connectivity.island[*k])
+            })
+            .flat_map(|(_, c)| c.anchors.iter().copied())
+            .min_by(|a, b| {
+                let d = |q: &P| (q[0] - from[0]).hypot(q[1] - from[1]);
+                d(a).total_cmp(&d(b))
+            });
+        let Some(to) = target else {
+            self.pcb.note = Some(format!("{net} is already connected"));
+            return None;
+        };
+        let mut la = circuiter_pcb::route::layers_of(layout, from, net);
+        if !la.contains(&self.pcb.layer) {
+            la.push(self.pcb.layer);
+        }
+        let lb = circuiter_pcb::route::layers_of(layout, to, net);
+        let opts = RouteOptions {
+            orthogonal: self.pcb.corner == Corner::Square,
+            any_angle: self.pcb.corner == Corner::Any,
+            ..RouteOptions::default()
+        };
+        let found = self.pcb.router()?.connect(net, from, &la, to, &lb, width, &opts);
+        let Some((mut tracks, vias)) = found else {
+            self.pcb.note =
+                Some(format!("No way through for {net}: route it by hand, or move parts apart"));
+            return None;
+        };
+        for t in &mut tracks {
+            t.width = Length::from_mm(width);
+        }
+        let mut laid = std::mem::take(&mut self.pcb.route_laid);
+        laid.extend(tracks.iter().cloned());
+        let length: f64 =
+            tracks.iter().map(|t| (t.b.x.mm() - t.a.x.mm()).hypot(t.b.y.mm() - t.a.y.mm())).sum();
+        self.pcb.note =
+            Some(format!("Auto-completed {net}: {length:.2} mm, {} via(s)", vias.len()));
+        self.pcb.tool = PcbTool::Route { net: String::new(), width: 0.0, points: Vec::new() };
+        self.pcb.route_preview = None;
+        let (layout, net) = (layout.clone(), net.to_owned());
+        Some(Box::new(move |b: &mut Board| {
+            b.tracks.extend(tracks);
+            b.vias.extend(vias);
+            circuiter_pcb::edit::remove_loops(b, &layout, &net, &laid);
+            Ok(())
+        }))
     }
 
     /// Routes the ratsnest automatically: of `nets`, or everything.
@@ -882,29 +1194,216 @@ impl CircuiterApp {
         }
     }
 
-    /// Brings the board up to date with the schematic.
+    /// Opens the Engineering Change Order: what updating from the schematic would do,
+    /// each change to tick or untick before it's made.
     pub(super) fn pcb_update_from_schematic(&mut self) {
         let Some(ws) = &mut self.workspace else { return };
-        let done = ws.edit_board(|design, id, board| match board {
-            Some(b) => sync::update(design, id, b, true),
-            None => {
+        let cell = ws.current().cell.clone();
+        let Some(board) = ws.current_def().and_then(|d| d.board.clone()) else {
+            if let Err(e) = ws.edit_board(|design, id, board| {
                 *board = Some(sync::new_board(design, id)?);
-                Ok(sync::Update::default())
+                Ok(())
+            }) {
+                self.error = Some(e);
             }
+            return;
+        };
+        match sync::changes(&ws.design, &cell, &board) {
+            Ok(c) if c.is_empty() => self.pcb.note = Some("The board matches the schematic".into()),
+            Ok(c) => self.pcb.eco = Some(c.into_iter().map(|c| (true, c)).collect()),
+            Err(e) => self.error = Some(e),
+        }
+    }
+
+    /// The board tools' windows: the Engineering Change Order, via stitching, length
+    /// tuning.
+    fn pcb_windows(&mut self, ctx: &egui::Context) {
+        let mut run: Option<&str> = None;
+        if let Some(eco) = &mut self.pcb.eco {
+            let mut open = true;
+            egui::Window::new("Engineering Change Order").open(&mut open).collapsible(false).resizable(true).show(ctx, |ui| {
+                ui.label("Updating the board from the schematic will make these changes. Untick any to leave out.");
+                ui.add_space(4.0);
+                egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
+                    for (on, c) in eco.iter_mut() {
+                        ui.checkbox(on, c.describe());
+                    }
+                });
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button(RichText::new("Execute Changes").strong()).clicked() {
+                        run = Some("eco");
+                    }
+                    if ui.button("All").clicked() {
+                        eco.iter_mut().for_each(|(on, _)| *on = true);
+                    }
+                    if ui.button("None").clicked() {
+                        eco.iter_mut().for_each(|(on, _)| *on = false);
+                    }
+                });
+            });
+            if !open {
+                self.pcb.eco = None;
+            }
+        }
+        let nets: Vec<String> =
+            self.pcb.layout().map(|l| l.nets.iter().cloned().collect()).unwrap_or_default();
+        if let Some((net, spacing)) = &mut self.pcb.stitching {
+            let mut open = true;
+            egui::Window::new("Via Stitching").open(&mut open).collapsible(false).show(ctx, |ui| {
+                ui.label("Vias through the board on a grid, wherever one fits inside the net's pours and clear of everything else: they join the pours on every layer.");
+                ui.horizontal(|ui| {
+                    ui.label("Net");
+                    egui::ComboBox::from_id_salt("stitch-net").selected_text(net.clone()).show_ui(ui, |ui| {
+                        for n in &nets {
+                            ui.selectable_value(net, n.clone(), n);
+                        }
+                    });
+                    ui.label("every");
+                    ui.add(egui::DragValue::new(spacing).range(1.0..=50.0).speed(0.1).suffix(" mm"));
+                });
+                if ui.button(RichText::new("Add Stitching Vias").strong()).clicked() {
+                    run = Some("stitch");
+                }
+            });
+            if !open {
+                self.pcb.stitching = None;
+            }
+        }
+        let selected = match (&self.pcb.selected, self.pcb.layout()) {
+            (Some(Pick::Track(k)), Some(l)) => l
+                .board
+                .tracks
+                .get(*k)
+                .map(|t| (t.net.clone(), circuiter_pcb::nets::routed_length(&l.board, &t.net))),
+            _ => None,
+        };
+        if let Some((target, amplitude, space)) = &mut self.pcb.tuning {
+            let mut open = true;
+            egui::Window::new("Length Tuning").open(&mut open).collapsible(false).show(ctx, |ui| {
+                match &selected {
+                    Some((net, now)) => {
+                        ui.label(format!("{net} is routed {now:.2} mm. The selected straight segment gets an accordion of mitered bumps adding the rest."));
+                        egui::Grid::new("tune").num_columns(2).show(ui, |ui| {
+                            ui.label("Target length");
+                            ui.add(egui::DragValue::new(target).range(0.0..=10000.0).speed(0.1).suffix(" mm"));
+                            ui.end_row();
+                            ui.label("Tallest bump");
+                            ui.add(egui::DragValue::new(amplitude).range(0.2..=20.0).speed(0.05).suffix(" mm"));
+                            ui.end_row();
+                            ui.label("Bump spacing");
+                            ui.add(egui::DragValue::new(space).range(0.2..=10.0).speed(0.05).suffix(" mm"));
+                            ui.end_row();
+                        });
+                        if ui.button(RichText::new("Tune").strong()).clicked() {
+                            run = Some("tune");
+                        }
+                    }
+                    None => {
+                        ui.label("Select a straight track segment of the net to tune.");
+                    }
+                }
+            });
+            if !open {
+                self.pcb.tuning = None;
+            }
+        }
+        match run {
+            Some("eco") => {
+                let chosen: Vec<_> = self
+                    .pcb
+                    .eco
+                    .take()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|(on, _)| *on)
+                    .map(|(_, c)| c)
+                    .collect();
+                let Some(ws) = &mut self.workspace else { return };
+                match ws.edit_board(|design, id, b| {
+                    sync::apply(design, id, b.as_mut().ok_or("no board")?, &chosen)
+                }) {
+                    Ok(_) => {
+                        self.pcb.note =
+                            Some(format!("Made {} change(s) from the schematic", chosen.len()))
+                    }
+                    Err(e) => self.error = Some(e),
+                }
+            }
+            Some("stitch") => {
+                let Some((net, spacing)) = self.pcb.stitching.clone() else { return };
+                let Some(a) = &self.pcb.analysis else { return };
+                let (Ok(layout), Some(checked)) = (&a.layout, &a.checked) else { return };
+                let vias = circuiter_pcb::teardrops::stitch(layout, &checked.fills, &net, spacing);
+                if vias.is_empty() {
+                    self.pcb.note = Some(format!(
+                        "No room for stitching vias: {net} needs a pour (zone) for them to sit in"
+                    ));
+                    return;
+                }
+                let n = vias.len();
+                board_edit(self, |b| b.vias.extend(vias));
+                self.pcb.note = Some(format!("Added {n} stitching via(s) to {net}"));
+                self.pcb.stitching = None;
+            }
+            Some("tune") => {
+                let Some((target, amplitude, space)) = self.pcb.tuning else { return };
+                let (Some(Pick::Track(k)), Some(layout)) =
+                    (self.pcb.selected.clone(), self.pcb.layout().cloned())
+                else {
+                    return;
+                };
+                let Some(t) = layout.board.tracks.get(k).cloned() else { return };
+                let extra = target - circuiter_pcb::nets::routed_length(&layout.board, &t.net);
+                let mut board = layout.board.clone();
+                let mut router = self.pcb.router();
+                let mut clear = |pts: &[P]| match router.as_deref_mut() {
+                    Some(r) => pts.windows(2).all(|w| r.clear(&t.net, t.layer, w[0], w[1])),
+                    None => true,
+                };
+                match circuiter_pcb::edit::tune_length(
+                    &mut board, k, extra, amplitude, space, &mut clear,
+                ) {
+                    Ok(added) => {
+                        board_edit(self, |b| *b = board);
+                        self.pcb.note = Some(format!("Added {added:.2} mm to {}", t.net));
+                        self.pcb.selected = None;
+                        self.pcb.tuning = None;
+                    }
+                    Err(e) => self.error = Some(e),
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Rearranges the parts to shorten their connections (taking the routing off first:
+    /// it'd no longer fit).
+    fn pcb_optimise(&mut self) {
+        let Some(ws) = &mut self.workspace else { return };
+        let mut result = (0.0, 0.0);
+        let mut unrouted = false;
+        let done = ws.edit_board(|design, id, b| {
+            let b = b.as_mut().ok_or("no board")?;
+            if !b.tracks.is_empty() || !b.vias.is_empty() {
+                circuiter_pcb::edit::unroute(b, None);
+                unrouted = true;
+            }
+            result = sync::optimize(design, id, b)?;
+            Ok(())
         });
         match done {
-            Ok(u) if u.added.is_empty() && u.removed.is_empty() => {
-                self.pcb.note = Some("The board matches the schematic".into())
-            }
-            Ok(u) => {
-                let mut parts = Vec::new();
-                if !u.added.is_empty() {
-                    parts.push(format!("placed {}", u.added.join(", ")));
-                }
-                if !u.removed.is_empty() {
-                    parts.push(format!("removed {}", u.removed.join(", ")));
-                }
-                self.pcb.note = Some(format!("Updated from the schematic: {}", parts.join("; ")));
+            Ok(()) => {
+                let (before, after) = result;
+                let saved = if before > 0.0 { (1.0 - after / before) * 100.0 } else { 0.0 };
+                self.pcb.note = Some(format!(
+                    "Placement optimised: connections {saved:.0}% shorter ({before:.0} → {after:.0} mm){}",
+                    if unrouted {
+                        "; the old routing was taken off, Autoroute to route again"
+                    } else {
+                        ""
+                    }
+                ));
             }
             Err(e) => self.error = Some(e),
         }
@@ -933,7 +1432,7 @@ impl CircuiterApp {
                 if tool(ui, icon::CURSOR, "Select", "Select and move  (Esc)\nDrag parts, tracks, corners and vias · R turn · F flip · L lock · Del delete") {
                     view.tool = PcbTool::Select;
                 }
-                if tool(ui, icon::PATH, "Route", "Route tracks  (X)\nClick a pad to start, click to add corners, click a pad of the same net to finish.\nV: via and change layer · /: corner style · Backspace: last leg · Esc: stop") {
+                if tool(ui, icon::PATH, "Route", "Route tracks  (X)\nClick a pad to start, click to add corners, click a pad of the same net to finish; Ctrl+click finishes it automatically.\nShift+R: walkaround / stop at obstacle / ignore · Shift+Space: 45° / 90° / any-angle corners · Space: flip the corner · 3: track width · V: via · Backspace: last leg · Esc: stop") {
                     view.tool = PcbTool::Route { net: String::new(), width: 0.0, points: Vec::new() };
                 }
                 if tool(ui, icon::POLYGON, "Zone", "Copper pour: click its corners, double-click to finish") {
@@ -981,6 +1480,32 @@ impl CircuiterApp {
                 });
                 ui.separator();
                 let can = editable && has_board;
+                let teardrops = self.pcb.layout().is_some_and(|l| l.board.teardrops.is_some());
+                let track_selected = matches!(self.pcb.selected, Some(Pick::Track(_)));
+                ui.menu_button(format!("{}  Tools", icon::GEAR_SIX), |ui| {
+                    if ui.add_enabled(can, egui::Button::new("Optimise Placement")).on_hover_text("Move and turn parts to shorten their connections (unlocked parts only)").clicked() {
+                        action = Some("optimise");
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.add_enabled(can, egui::Button::new(if teardrops { "Remove Teardrops" } else { "Add Teardrops" })).on_hover_text("Widen tracks where they meet pads and vias").clicked() {
+                        action = Some("teardrops");
+                        ui.close();
+                    }
+                    if ui.add_enabled(can, egui::Button::new("Via Stitching…")).clicked() {
+                        action = Some("stitching");
+                        ui.close();
+                    }
+                    if ui.add_enabled(can && track_selected, egui::Button::new("Tune Length…")).on_hover_text("Select a straight segment of the net first").clicked() {
+                        action = Some("tuning");
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("Measure   Ctrl+M").clicked() {
+                        action = Some("measure");
+                        ui.close();
+                    }
+                });
                 ui.menu_button(format!("{}  Autoroute", icon::FLOW_ARROW), |ui| {
                     if ui.add_enabled(can, egui::Button::new("Route All")).on_hover_text("Turn every ratsnest line into tracks: shortest first, at 45°, with vias where it must change layer").clicked() {
                         action = Some("route-all");
@@ -1031,6 +1556,37 @@ impl CircuiterApp {
                 }
             }
             Some(a @ ("clean" | "unroute-net" | "unroute-all")) => self.pcb_tracks(a),
+            Some("optimise") => self.pcb_optimise(),
+            Some("teardrops") => {
+                board_edit(self, |b| {
+                    b.teardrops =
+                        if b.teardrops.is_some() { None } else { Some(Default::default()) }
+                });
+            }
+            Some("stitching") => {
+                let net =
+                    self.pcb.layout().and_then(|l| {
+                        l.board.zones.first().map(|z| z.net.clone()).or_else(|| {
+                            l.nets.iter().find(|n| n.eq_ignore_ascii_case("gnd")).cloned()
+                        })
+                    });
+                self.pcb.stitching = Some((net.unwrap_or_default(), 5.0));
+            }
+            Some("tuning") => {
+                let start = match (&self.pcb.selected, self.pcb.layout()) {
+                    (Some(Pick::Track(k)), Some(l)) => l.board.tracks.get(*k).map(|t| {
+                        let now = circuiter_pcb::nets::routed_length(&l.board, &t.net);
+                        l.board
+                            .rules
+                            .class(&t.net)
+                            .and_then(|c| c.min_length)
+                            .map_or(now + 5.0, |m| m.mm())
+                    }),
+                    _ => None,
+                };
+                self.pcb.tuning = Some((start.unwrap_or(10.0), 1.5, 1.0));
+            }
+            Some("measure") => self.pcb.tool = PcbTool::Measure { from: None, to: None },
             Some("update") => self.pcb_update_from_schematic(),
             Some("fab") => self.pcb_export(),
             Some("3d") => {
@@ -1106,7 +1662,14 @@ impl CircuiterApp {
         }
         let mut cam = self.pcb.camera.expect("fitted");
         // Navigation: wheel zooms about the pointer; middle or right drag pans.
-        if response.hovered() {
+        // Ctrl+Shift+wheel steps through the copper layers, as in Altium.
+        let (ctrl_shift, wheel_step) = ui.input(|i| {
+            (
+                i.modifiers.command && i.modifiers.shift,
+                i.smooth_scroll_delta.y + i.smooth_scroll_delta.x,
+            )
+        });
+        if response.hovered() && !ctrl_shift {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
             if let (true, Some(at)) = (scroll != 0.0, response.hover_pos()) {
                 cam.zoom_about(rect, at, (scroll * 0.002).exp());
@@ -1274,9 +1837,43 @@ impl CircuiterApp {
                     Some((Some(n), q)) if n == net => q,
                     _ => self.pcb.snap(h),
                 });
+                let shift_down = ui.input(|i| i.modifiers.shift);
+                // Altium's keys: Shift+R the conflict mode, Shift+Space the corner style,
+                // Space (or /) which leg comes first, 3 the track width.
+                if !typing && shift_down && ui.input(|i| i.key_pressed(egui::Key::R)) {
+                    self.pcb.mode = self.pcb.mode.next();
+                    self.pcb.note = Some(format!("Routing mode: {}", self.pcb.mode.name()));
+                }
+                if keys(egui::Key::Space) && !points.is_empty() {
+                    if shift_down {
+                        self.pcb.corner = self.pcb.corner.next();
+                        self.pcb.note = Some(format!("Corners: {}", self.pcb.corner.name()));
+                    } else {
+                        self.pcb.diagonal_first = !self.pcb.diagonal_first;
+                    }
+                }
                 if keys(egui::Key::Slash) {
                     self.pcb.diagonal_first = !self.pcb.diagonal_first;
                 }
+                if keys(egui::Key::Num3) && !net.is_empty() {
+                    let rules = &layout.board.rules;
+                    let preferred = rules.track_width_for(&net).mm();
+                    let choices = [rules.min_track_width.mm(), preferred, preferred * 2.0];
+                    let k = choices
+                        .iter()
+                        .position(|w| (w - width).abs() < 1e-9)
+                        .map_or(1, |k| (k + 1) % 3);
+                    self.pcb.tool = PcbTool::Route {
+                        net: net.clone(),
+                        width: choices[k],
+                        points: points.clone(),
+                    };
+                    self.pcb.note = Some(format!("Track width {:.3} mm", choices[k]));
+                }
+                let width = match &self.pcb.tool {
+                    PcbTool::Route { width, .. } => *width,
+                    _ => width,
+                };
                 // Another layer picked mid-route: a via where the track has got to.
                 if let (Some(next), Some(&head)) = (self.pcb.pending_layer.take(), points.last()) {
                     if next != layer {
@@ -1290,20 +1887,34 @@ impl CircuiterApp {
                         }));
                     }
                 }
+                let ctrl_click = response.clicked_by(egui::PointerButton::Primary) && cmd;
                 if keys(egui::Key::Escape) {
+                    self.pcb.route_preview = None;
                     self.pcb.tool = if points.is_empty() {
                         PcbTool::Select
                     } else {
                         PcbTool::Route { net: String::new(), width: 0.0, points: Vec::new() }
                     };
                 } else if points.is_empty() {
+                    self.pcb.route_preview = None;
                     if response.clicked_by(egui::PointerButton::Primary) {
                         match hover.and_then(|h| copper_at(&layout, h, tolerance, layer)) {
                             Some((Some(n), start)) => {
                                 let w = layout.board.rules.track_width_for(&n).mm();
-                                self.pcb.note = Some(format!("Routing {n} on {}", layer.name()));
-                                self.pcb.tool =
-                                    PcbTool::Route { net: n, width: w, points: vec![start] };
+                                self.pcb.route_laid.clear();
+                                if ctrl_click {
+                                    // Ctrl+click: start here and finish it automatically.
+                                    edit = self.pcb_auto_complete(&layout, &n, start, w);
+                                } else {
+                                    self.pcb.note = Some(format!(
+                                        "Routing {n} on {} · {} · {} corners · Shift+R mode, Shift+Space corners, 3 width, Ctrl+click to finish automatically",
+                                        layer.name(),
+                                        self.pcb.mode.name(),
+                                        self.pcb.corner.name()
+                                    ));
+                                    self.pcb.tool =
+                                        PcbTool::Route { net: n, width: w, points: vec![start] };
+                                }
                             }
                             Some((None, _)) => {
                                 self.pcb.note = Some(
@@ -1318,9 +1929,14 @@ impl CircuiterApp {
                             }
                         }
                     }
+                } else if ctrl_click {
+                    let head = *points.last().expect("started");
+                    edit = self.pcb_auto_complete(&layout, &net, head, width);
                 } else if let Some(to) = at {
                     let from = *points.last().expect("started");
-                    let legs = posture(from, to, self.pcb.diagonal_first);
+                    let (path, blocked) = self.pcb.route_to(&net, width, layer, from, to);
+                    self.pcb.route_preview = Some((path.clone(), blocked));
+                    let end = *path.last().expect("a start");
                     // V goes to the other side.
                     let target = keys(egui::Key::V)
                         .then(|| if layer == Layer::FCu { Layer::BCu } else { Layer::FCu });
@@ -1350,15 +1966,19 @@ impl CircuiterApp {
                                 Ok(())
                             }));
                         }
-                    } else if response.clicked_by(egui::PointerButton::Primary)
+                    } else if (response.clicked_by(egui::PointerButton::Primary)
                         || response.double_clicked()
-                        || via
+                        || via)
+                        && path.len() >= 2
                     {
-                        // Lay the legs; finish on copper of the net, or with a double-click.
-                        let ends = copper_at(&layout, to, tolerance, layer)
-                            .is_some_and(|(n, _)| n.as_deref() == Some(net.as_str()));
+                        // Lay the legs (as far as they got); finish on copper of the net,
+                        // or with a double-click.
+                        let reached = (end[0] - to[0]).hypot(end[1] - to[1]) < 1e-6;
+                        let ends = reached
+                            && copper_at(&layout, to, tolerance, layer)
+                                .is_some_and(|(n, _)| n.as_deref() == Some(net.as_str()));
                         let finish = (ends && !via) || response.double_clicked();
-                        let tracks: Vec<Track> = legs
+                        let tracks: Vec<Track> = path
                             .windows(2)
                             .map(|w| Track {
                                 layer,
@@ -1370,28 +1990,54 @@ impl CircuiterApp {
                             .collect();
                         let (dia, drill) = layout.board.rules.via_for(&net);
                         let new_via = via.then(|| Via {
-                            at: point(to),
+                            at: point(end),
                             diameter: dia,
                             drill,
                             net: net.clone(),
                         });
                         let mut pts = points.clone();
-                        pts.extend(legs.iter().skip(1));
+                        pts.extend(path.iter().skip(1));
                         if let Some(other) = target {
                             self.pcb.layer = other;
                             self.pcb.note = Some(format!("Via: routing {net} on {}", other.name()));
                         }
+                        self.pcb.route_laid.extend(tracks.iter().cloned());
+                        let laid = self.pcb.route_laid.clone();
+                        self.pcb.route_preview = None;
                         self.pcb.tool = if finish {
-                            self.pcb.note = Some(format!("Routed {net}"));
+                            let length: f64 = laid
+                                .iter()
+                                .map(|t| (t.b.x.mm() - t.a.x.mm()).hypot(t.b.y.mm() - t.a.y.mm()))
+                                .sum();
+                            self.pcb.note = Some(format!("Routed {net}: {length:.2} mm"));
                             PcbTool::Route { net: String::new(), width: 0.0, points: Vec::new() }
                         } else {
                             PcbTool::Route { net: net.clone(), width, points: pts }
                         };
+                        let layout = layout.clone();
+                        let net = net.clone();
                         edit = Some(Box::new(move |b: &mut Board| {
                             b.tracks.extend(tracks);
                             b.vias.extend(new_via);
+                            // Loop removal: a new way between two points replaces the old.
+                            if finish {
+                                circuiter_pcb::edit::remove_loops(b, &layout, &net, &laid);
+                            }
                             Ok(())
                         }));
+                    }
+                }
+            }
+            PcbTool::Measure { from, to } => {
+                if keys(egui::Key::Escape) {
+                    self.pcb.tool = PcbTool::Select;
+                } else if response.clicked_by(egui::PointerButton::Primary) {
+                    if let Some(h) = hover {
+                        let q = self.pcb.snap(h);
+                        self.pcb.tool = match (from, to) {
+                            (Some(f), None) => PcbTool::Measure { from: Some(f), to: Some(q) },
+                            _ => PcbTool::Measure { from: Some(q), to: None },
+                        };
                     }
                 }
             }
@@ -1443,16 +2089,42 @@ impl CircuiterApp {
         {
             self.pcb.tool = PcbTool::Route { net: String::new(), width: 0.0, points: Vec::new() };
         }
-        // Page Up / Down step through the copper layers, as in KiCad; while routing,
-        // with a via.
+        if !typing && cmd && ui.input(|i| i.key_pressed(egui::Key::M)) {
+            self.pcb.tool = PcbTool::Measure { from: None, to: None };
+        }
+        // Page Up / Down (or Ctrl+Shift+wheel, or the keypad's + and −) step through
+        // the copper layers; while routing, with a via.
         let copper = layout.board.copper();
-        let step = if keys(egui::Key::PageUp) {
+        if ctrl_shift && response.hovered() {
+            self.pcb.wheel += wheel_step;
+        } else {
+            self.pcb.wheel = 0.0;
+        }
+        let notch = if self.pcb.wheel.abs() >= 40.0 {
+            let s = -self.pcb.wheel.signum() as i32;
+            self.pcb.wheel = 0.0;
+            s
+        } else {
+            0
+        };
+        let step = if keys(egui::Key::PageUp) || keys(egui::Key::Minus) || notch < 0 {
             -1
-        } else if keys(egui::Key::PageDown) {
+        } else if keys(egui::Key::PageDown)
+            || keys(egui::Key::Plus)
+            || keys(egui::Key::Equals)
+            || notch > 0
+        {
             1
         } else {
             0
         };
+        // Shift+S: the working layer alone. F5: net colours on the routing.
+        if !typing && shift && ui.input(|i| i.key_pressed(egui::Key::S)) {
+            self.pcb.single_layer = !self.pcb.single_layer;
+        }
+        if keys(egui::Key::F5) {
+            self.pcb.net_colours = !self.pcb.net_colours;
+        }
         if step != 0 {
             let k = copper.iter().position(|l| *l == self.pcb.layer).unwrap_or(0) as i32;
             let next = copper[(k + step).clamp(0, copper.len() as i32 - 1) as usize];
@@ -1527,6 +2199,15 @@ impl CircuiterApp {
             Some(Pick::Track(k)) => routed.tracks.get(*k).map(|t| t.net.clone()),
             Some(Pick::Via(k)) => routed.vias.get(*k).map(|v| v.net.clone()),
             _ => None,
+        }
+        .or_else(|| view.highlight.clone());
+        // A net's own colour, when net colours are on (F5).
+        let net_colour = |net: &str, fallback: Color32| -> Color32 {
+            match board.net_colours.get(net).filter(|_| view.net_colours) {
+                Some([r, g, b]) => Color32::from_rgb(*r, *g, *b)
+                    .gamma_multiply(if fallback.a() < 255 { 0.6 } else { 1.0 }),
+                None => fallback,
+            }
         };
         // Bottom to top, the layer being worked on last.
         let mut layers = board.copper();
@@ -1537,7 +2218,7 @@ impl CircuiterApp {
         }
         let dim = if view.visible.high_contrast { 0.18 } else { 0.45 };
         for layer in layers {
-            if !view.visible.shows(layer) {
+            if !view.visible.shows(layer) || (view.single_layer && layer != view.layer) {
                 continue;
             }
             let active = layer == view.layer;
@@ -1550,13 +2231,17 @@ impl CircuiterApp {
                     }
                 }
             }
+            for t in analysis.teardrops.iter().filter(|t| t.layer == layer) {
+                d.convex(&t.outline, net_colour(&t.net, colour));
+            }
             for (k, t) in routed.tracks.iter().enumerate().filter(|(_, t)| t.layer == layer) {
                 let hi = view.selected == Some(Pick::Track(k))
                     || net_hi.as_deref() == Some(t.net.as_str());
+                let c = net_colour(&t.net, colour);
                 d.stroke(
                     &[p(t.a), p(t.b)],
                     t.width.mm(),
-                    if hi { colour.gamma_multiply(1.4).to_opaque() } else { colour },
+                    if hi { c.gamma_multiply(1.4).to_opaque() } else { c },
                 );
             }
             for pad in layout.pads.iter().filter(|pd| pd.layers.contains(&layer)) {
@@ -1659,27 +2344,40 @@ impl CircuiterApp {
         let ghost = Stroke::new(1.5, Color32::from_rgba_unmultiplied(255, 255, 255, 180));
         match &view.tool {
             PcbTool::Route { net, width, points } if !points.is_empty() => {
-                if let Some(c) = view.cursor {
-                    let to = match copper_at(layout, c, f64::from(4.0 / cam.scale), view.layer) {
-                        Some((Some(n), q)) if n == *net => q,
-                        _ => view.snap(c),
-                    };
-                    let legs = posture(*points.last().expect("started"), to, view.diagonal_first);
-                    let margin = route_margin(layout, net, &legs, *width, view.layer);
-                    let colour = if margin < -1e-6 {
+                if let Some((path, blocked)) = &view.route_preview {
+                    let colour = if *blocked {
                         Color32::from_rgb(255, 80, 80)
                     } else {
                         layer_colour(view.layer).gamma_multiply(1.3).to_opaque()
                     };
-                    d.stroke(&legs, *width, colour.gamma_multiply(0.8));
-                    // The clearance it must keep, faintly.
+                    d.stroke(path, *width, colour.gamma_multiply(0.8));
+                    // The clearance it keeps, faintly.
                     let clearance = layout.board.rules.clearance_for(net).mm();
-                    for seg in legs.windows(2) {
+                    for seg in path.windows(2) {
                         d.outline(
                             &geometry::capsule(seg[0], seg[1], width + 2.0 * clearance),
                             Stroke::new(1.0, colour.gamma_multiply(0.35)),
                         );
                     }
+                    let _ = points;
+                }
+            }
+            PcbTool::Measure { from: Some(f), to } => {
+                if let Some(t) = to.or(view.cursor.map(|c| view.snap(c))) {
+                    let (a, b) = (d.at(*f), d.at(t));
+                    let ruler = Stroke::new(1.5, Color32::from_rgb(255, 230, 120));
+                    painter.line_segment([a, b], ruler);
+                    for e in [a, b] {
+                        painter.circle_stroke(e, 4.0, ruler);
+                    }
+                    let (dx, dy) = (t[0] - f[0], t[1] - f[1]);
+                    painter.text(
+                        b + egui::vec2(10.0, -10.0),
+                        egui::Align2::LEFT_BOTTOM,
+                        format!("{:.3} mm\nΔX {dx:.3}  ΔY {dy:.3}", dx.hypot(dy)),
+                        egui::FontId::monospace(12.0),
+                        Color32::from_rgb(255, 230, 120),
+                    );
                 }
             }
             PcbTool::Zone { points } | PcbTool::Outline { points } if !points.is_empty() => {
@@ -2273,5 +2971,467 @@ pub fn drc_panel(app: &mut CircuiterApp, ui: &mut egui::Ui) {
     if let (Some(at), Some(cam)) = (focus, &mut app.pcb.camera) {
         cam.center = Pt::new(at[0], at[1]);
         cam.scale = cam.scale.max(20.0);
+    }
+}
+
+/// Colours offered for nets.
+const NET_PALETTE: &[[u8; 3]] = &[
+    [255, 99, 71],
+    [255, 165, 0],
+    [255, 215, 0],
+    [50, 205, 50],
+    [0, 206, 209],
+    [30, 144, 255],
+    [186, 85, 211],
+    [255, 105, 180],
+];
+
+/// Changes the board with undo; an error goes to the toast.
+fn board_edit(app: &mut CircuiterApp, f: impl FnOnce(&mut Board)) {
+    let Some(ws) = &mut app.workspace else { return };
+    if let Err(e) = ws.edit_board(|_, _, b| {
+        f(b.as_mut().ok_or("no board")?);
+        Ok(())
+    }) {
+        app.error = Some(e);
+    }
+}
+
+/// Every net, as Altium's PCB panel lists them: colour, class, pads, routed length
+/// (flagged against its class's limits), vias and what's left to route. Click one to
+/// see it on the board.
+pub fn nets_panel(app: &mut CircuiterApp, ui: &mut egui::Ui) {
+    let p = style::palette(ui);
+    let (Some(layout), Some(checked)) =
+        (app.pcb.layout(), app.pcb.analysis.as_ref().and_then(|a| a.checked.as_ref()))
+    else {
+        ui.label(RichText::new("No board.").color(p.weak));
+        return;
+    };
+    let nets = circuiter_pcb::nets::nets(layout, checked);
+    let layout = layout.clone();
+    let colours = layout.board.net_colours.clone();
+    let classes: Vec<String> = layout.board.rules.classes.iter().map(|c| c.name.clone()).collect();
+    let editable = app.workspace.as_ref().is_some_and(|ws| ws.editable());
+    let mut focus: Option<String> = None;
+    let mut recolour: Option<(String, Option<[u8; 3]>)> = None;
+    let mut reclass: Option<(String, Option<String>)> = None;
+    let mut net_colours = app.pcb.net_colours;
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut net_colours, "Show net colours on routing  (F5)");
+        if let Some(h) = &app.pcb.highlight {
+            ui.label(RichText::new(format!("Showing {h}")).color(p.accent));
+            if ui.small_button("Clear").clicked() {
+                focus = Some(String::new());
+            }
+        }
+    });
+    app.pcb.net_colours = net_colours;
+    egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
+        egui::Grid::new("pcb-nets").striped(true).num_columns(7).show(ui, |ui| {
+            for h in ["", "Net", "Class", "Pads", "Routed", "Vias", "Unrouted"] {
+                ui.label(RichText::new(h).small().color(p.weak));
+            }
+            ui.end_row();
+            for n in &nets {
+                // The colour swatch: click for the next colour, right-click for none.
+                let c = colours.get(&n.name).copied();
+                let (r, resp) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::click());
+                match c {
+                    Some([cr, cg, cb]) => {
+                        ui.painter().rect_filled(r, 2.0, Color32::from_rgb(cr, cg, cb));
+                    }
+                    None => {
+                        ui.painter().rect_stroke(r, 2.0, Stroke::new(1.0, p.weak), egui::StrokeKind::Inside);
+                    }
+                }
+                if editable && resp.clicked() {
+                    let k = c.and_then(|c| NET_PALETTE.iter().position(|x| *x == c)).map_or(0, |k| (k + 1) % NET_PALETTE.len());
+                    recolour = Some((n.name.clone(), Some(NET_PALETTE[k])));
+                }
+                if editable && resp.secondary_clicked() {
+                    recolour = Some((n.name.clone(), None));
+                }
+                let name = RichText::new(&n.name).strong().color(if app.pcb.highlight.as_deref() == Some(&n.name) { p.accent } else { p.text });
+                if ui.add(egui::Label::new(name).sense(Sense::click())).on_hover_text("Show it on the board").clicked() {
+                    focus = Some(n.name.clone());
+                }
+                ui.add_enabled_ui(editable, |ui| {
+                    egui::ComboBox::from_id_salt(("net-class", &n.name))
+                        .selected_text(n.class.clone().unwrap_or_else(|| "Default".into()))
+                        .width(90.0)
+                        .show_ui(ui, |ui| {
+                            if ui.selectable_label(n.class.is_none(), "Default").clicked() {
+                                reclass = Some((n.name.clone(), None));
+                            }
+                            for c in &classes {
+                                if ui.selectable_label(n.class.as_deref() == Some(c), c).clicked() {
+                                    reclass = Some((n.name.clone(), Some(c.clone())));
+                                }
+                            }
+                        });
+                });
+                ui.label(n.pads.to_string());
+                let length = RichText::new(format!("{:.2} mm", n.routed));
+                ui.label(match n.length {
+                    Some(std::cmp::Ordering::Less) => length.background_color(Color32::from_rgb(120, 110, 20)),
+                    Some(std::cmp::Ordering::Greater) => length.background_color(Color32::from_rgb(130, 30, 30)),
+                    _ => length,
+                })
+                .on_hover_text("Tracks, plus the board's thickness for each via. Yellow: shorter than its class allows; red: longer");
+                ui.label(n.vias.to_string());
+                ui.label(if n.unrouted == 0 { RichText::new("—").color(p.weak) } else { RichText::new(n.unrouted.to_string()).color(p.warning) });
+                ui.end_row();
+            }
+        });
+    });
+    if let Some(net) = focus {
+        if net.is_empty() {
+            app.pcb.highlight = None;
+        } else {
+            // Centre on its copper.
+            let pts: Vec<P> = layout
+                .pads
+                .iter()
+                .filter(|pad| pad.net.as_deref() == Some(net.as_str()))
+                .map(|pad| pad.center)
+                .collect();
+            if let (Some(cam), false) = (&mut app.pcb.camera, pts.is_empty()) {
+                let n = pts.len() as f64;
+                cam.center = Pt::new(
+                    pts.iter().map(|q| q[0]).sum::<f64>() / n,
+                    pts.iter().map(|q| q[1]).sum::<f64>() / n,
+                );
+            }
+            app.pcb.highlight = Some(net);
+        }
+    }
+    if let Some((net, c)) = recolour {
+        board_edit(app, |b| match c {
+            Some(c) => drop(b.net_colours.insert(net, c)),
+            None => drop(b.net_colours.remove(&net)),
+        });
+        app.pcb.net_colours = true;
+    }
+    if let Some((net, class)) = reclass {
+        board_edit(app, |b| {
+            for c in &mut b.rules.classes {
+                c.nets.retain(|n| *n != net);
+            }
+            if let Some(c) = class.and_then(|c| b.rules.classes.iter_mut().find(|x| x.name == c)) {
+                c.nets.push(net);
+            }
+        });
+    }
+}
+
+/// Net classes: their clearance, track width, via, length limits and impedance profile.
+pub fn classes_panel(app: &mut CircuiterApp, ui: &mut egui::Ui) {
+    let p = style::palette(ui);
+    let Some(layout) = app.pcb.layout() else { return };
+    let board = layout.board.clone();
+    let stack = board.stack();
+    let editable = app.workspace.as_ref().is_some_and(|ws| ws.editable());
+    let mut rules = board.rules.clone();
+    let mut add = false;
+    let mut remove = None;
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Nets not in a class follow the board's design rules (Properties). A class sets its own; assign nets in the Nets tab.").color(p.weak));
+        if ui.add_enabled(editable, egui::Button::new(format!("{}  New Class", icon::PLUS))).clicked() {
+            add = true;
+        }
+    });
+    egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
+        ui.add_enabled_ui(editable, |ui| {
+            egui::Grid::new("net-classes").striped(true).num_columns(10).show(ui, |ui| {
+                for h in [
+                    "Class",
+                    "Nets",
+                    "Clearance",
+                    "Track",
+                    "Via",
+                    "Drill",
+                    "Min length",
+                    "Max length",
+                    "Impedance",
+                    "",
+                ] {
+                    ui.label(RichText::new(h).small().color(p.weak));
+                }
+                ui.end_row();
+                for (k, c) in rules.classes.iter_mut().enumerate() {
+                    ui.add(egui::TextEdit::singleline(&mut c.name).desired_width(80.0));
+                    ui.label(c.nets.len().to_string()).on_hover_text(c.nets.join(", "));
+                    for v in [
+                        &mut c.clearance,
+                        &mut c.track_width,
+                        &mut c.via_diameter,
+                        &mut c.via_drill,
+                    ] {
+                        let mut mm = v.mm();
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut mm)
+                                    .range(0.05..=20.0)
+                                    .speed(0.01)
+                                    .max_decimals(3),
+                            )
+                            .changed()
+                        {
+                            *v = Length::from_mm(mm);
+                        }
+                    }
+                    for v in [&mut c.min_length, &mut c.max_length] {
+                        let mut on = v.is_some();
+                        ui.horizontal(|ui| {
+                            if ui.checkbox(&mut on, "").changed() {
+                                *v = on.then(|| Length::from_mm(50.0));
+                            }
+                            if let Some(l) = v {
+                                let mut mm = l.mm();
+                                if ui
+                                    .add(
+                                        egui::DragValue::new(&mut mm)
+                                            .range(0.0..=10000.0)
+                                            .speed(0.5)
+                                            .suffix(" mm"),
+                                    )
+                                    .changed()
+                                {
+                                    *l = Length::from_mm(mm);
+                                }
+                            }
+                        });
+                    }
+                    egui::ComboBox::from_id_salt(("class-profile", k))
+                        .selected_text(c.impedance.clone().unwrap_or_else(|| "—".into()))
+                        .show_ui(ui, |ui| {
+                            if ui.selectable_label(c.impedance.is_none(), "—").clicked() {
+                                c.impedance = None;
+                            }
+                            for prof in &stack.profiles {
+                                if ui
+                                    .selectable_label(
+                                        c.impedance.as_deref() == Some(&prof.name),
+                                        &prof.name,
+                                    )
+                                    .clicked()
+                                {
+                                    c.impedance = Some(prof.name.clone());
+                                    // The profile sizes the class's tracks.
+                                    if let Some(w) =
+                                        circuiter_pcb::impedance::profile_width(&stack, prof)
+                                    {
+                                        c.track_width =
+                                            Length::from_mm((w * 1000.0).round() / 1000.0);
+                                    }
+                                }
+                            }
+                        });
+                    if ui.small_button(icon::TRASH).on_hover_text("Delete the class").clicked() {
+                        remove = Some(k);
+                    }
+                    ui.end_row();
+                }
+            });
+        });
+    });
+    if add {
+        let name = (1..)
+            .map(|k| format!("Class{k}"))
+            .find(|n| !rules.classes.iter().any(|c| c.name == *n))
+            .expect("a name");
+        rules.classes.push(circuiter_model::board::NetClass::new(&name, &rules));
+    }
+    if let Some(k) = remove {
+        rules.classes.remove(k);
+    }
+    if rules != board.rules {
+        board_edit(app, |b| b.rules = rules);
+    }
+}
+
+/// The layer stack (Altium's Layer Stack Manager): each layer's material and
+/// thickness, and impedance profiles with the track widths they need.
+pub fn stackup_panel(app: &mut CircuiterApp, ui: &mut egui::Ui) {
+    use circuiter_model::board::{ImpedanceProfile, StackKind};
+    let p = style::palette(ui);
+    let Some(layout) = app.pcb.layout() else { return };
+    let board = layout.board.clone();
+    let editable = app.workspace.as_ref().is_some_and(|ws| ws.editable());
+    let mut stack = board.stack();
+    let before = stack.clone();
+    let mut reset = false;
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(format!(
+                "{} copper layers · {:.3} mm in all",
+                board.copper_layers,
+                stack.thickness()
+            ))
+            .strong(),
+        );
+        if ui
+            .add_enabled(editable, egui::Button::new("Standard FR-4"))
+            .on_hover_text("1 oz copper, FR-4 cores and prepregs, the board's thickness")
+            .clicked()
+        {
+            reset = true;
+        }
+    });
+    egui::ScrollArea::both().auto_shrink([false; 2]).show(ui, |ui| {
+        ui.add_enabled_ui(editable, |ui| {
+            egui::Grid::new("stack").striped(true).num_columns(5).show(ui, |ui| {
+                for h in ["", "Layer", "Type", "Thickness", "εr"] {
+                    ui.label(RichText::new(h).small().color(p.weak));
+                }
+                ui.end_row();
+                for l in &mut stack.layers {
+                    let (r, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), Sense::hover());
+                    let c = match l.kind {
+                        StackKind::Copper => Color32::from_rgb(200, 120, 60),
+                        StackKind::SolderMask => Color32::from_rgb(40, 140, 70),
+                        _ => Color32::from_rgb(190, 180, 120),
+                    };
+                    ui.painter().rect_filled(r, 1.0, c);
+                    ui.label(&l.name);
+                    ui.label(match l.kind {
+                        StackKind::Copper => "Copper",
+                        StackKind::Core => "Core",
+                        StackKind::Prepreg => "Prepreg",
+                        StackKind::SolderMask => "Solder mask",
+                    });
+                    let mut mm = l.thickness.mm();
+                    if ui.add(egui::DragValue::new(&mut mm).range(0.005..=5.0).speed(0.005).max_decimals(3).suffix(" mm")).changed() {
+                        l.thickness = Length::from_mm(mm);
+                    }
+                    if l.kind == StackKind::Copper {
+                        ui.label("");
+                    } else {
+                        ui.add(egui::DragValue::new(&mut l.er).range(1.0..=12.0).speed(0.01).max_decimals(2));
+                    }
+                    ui.end_row();
+                }
+            });
+        });
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Impedance profiles").strong());
+            if ui.add_enabled(editable, egui::Button::new(format!("{}  Add", icon::PLUS))).clicked() {
+                let name = (1..).map(|k| format!("Z{k}")).find(|n| !stack.profiles.iter().any(|x| x.name == *n)).expect("a name");
+                stack.profiles.push(ImpedanceProfile { name, ohms: 50.0, layer: Layer::FCu, differential: false, gap: Length::from_mm(0.2) });
+            }
+        });
+        let copper = board.copper();
+        let mut remove = None;
+        ui.add_enabled_ui(editable, |ui| {
+            egui::Grid::new("profiles").striped(true).num_columns(7).show(ui, |ui| {
+                for h in ["Name", "Target", "Layer", "Pair", "Gap", "Width", ""] {
+                    ui.label(RichText::new(h).small().color(p.weak));
+                }
+                ui.end_row();
+                let snapshot = stack.clone();
+                for (k, prof) in stack.profiles.iter_mut().enumerate() {
+                    ui.add(egui::TextEdit::singleline(&mut prof.name).desired_width(60.0));
+                    ui.add(egui::DragValue::new(&mut prof.ohms).range(10.0..=200.0).speed(0.5).suffix(" Ω"));
+                    egui::ComboBox::from_id_salt(("profile-layer", k)).selected_text(prof.layer.name()).show_ui(ui, |ui| {
+                        for &l in &copper {
+                            ui.selectable_value(&mut prof.layer, l, l.name());
+                        }
+                    });
+                    ui.checkbox(&mut prof.differential, "");
+                    let mut gap = prof.gap.mm();
+                    if ui.add_enabled(prof.differential, egui::DragValue::new(&mut gap).range(0.05..=5.0).speed(0.01).suffix(" mm")).changed() {
+                        prof.gap = Length::from_mm(gap);
+                    }
+                    match circuiter_pcb::impedance::profile_width(&snapshot, prof) {
+                        Some(w) => ui.label(RichText::new(format!("{w:.3} mm")).strong().color(p.go)),
+                        None => ui.label(RichText::new("out of reach").color(p.error)),
+                    };
+                    if ui.small_button(icon::TRASH).clicked() {
+                        remove = Some(k);
+                    }
+                    ui.end_row();
+                }
+            });
+        });
+        if let Some(k) = remove {
+            stack.profiles.remove(k);
+        }
+        ui.label(
+            RichText::new("Widths by IPC-2141's formulas: microstrip on outer layers, stripline on inner ones. Within a few per cent; confirm with your board house. Give a net class a profile (Net Classes tab) to size its tracks.")
+                .small()
+                .color(p.weak),
+        );
+    });
+    if reset {
+        stack = circuiter_model::board::Stackup {
+            profiles: stack.profiles,
+            ..circuiter_model::board::Stackup::standard(board.copper_layers, board.thickness.mm())
+        };
+    }
+    if stack != before {
+        let thickness = Length::from_mm(stack.thickness());
+        board_edit(app, |b| {
+            b.thickness = thickness;
+            b.stackup = Some(stack);
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use circuiter_model::Project;
+    use std::path::Path;
+
+    /// A ratsnest line whose straight route runs into another net's copper: walkaround
+    /// finds a clear way round, stop-at-obstacle stops short, ignore goes straight over.
+    #[test]
+    fn walkaround_goes_round_what_stop_stops_at() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/analog_lab");
+        let project = Project::load(&root).unwrap();
+        let mut design = Design::for_project(&project, circuiter_stdlib::load().unwrap()).unwrap();
+        let id = CellId::new("analog_lab", "blinker");
+        let board = sync::new_board(&design, &id).unwrap();
+        design.cell_mut(&id).unwrap().board = Some(board);
+        let mut view = PcbView::default();
+        view.update(&design, &id, 1);
+        let layout = view.layout().unwrap().clone();
+        let checked = view.analysis.as_ref().unwrap().checked.as_ref().unwrap();
+        let width = layout.board.rules.track_width.mm();
+        let blocked = checked
+            .connectivity
+            .ratsnest
+            .iter()
+            .find(|(net, a, b)| {
+                route_margin(
+                    &layout,
+                    net,
+                    &legs(*a, *b, Corner::Diagonal, false),
+                    width,
+                    Layer::FCu,
+                ) < -1e-6
+            })
+            .cloned()
+            .expect("a blocked straight route");
+        let (net, a, b) = blocked;
+        view.mode = RouteMode::Walkaround;
+        let (path, stuck) = view.route_to(&net, width, Layer::FCu, a, b);
+        assert!(!stuck, "walkaround finds a way");
+        assert!(
+            route_margin(&layout, &net, &path, width, Layer::FCu) >= -1e-6,
+            "clear of other nets: {path:?}"
+        );
+        let end = *path.last().unwrap();
+        assert!((end[0] - b[0]).hypot(end[1] - b[1]) < 1e-6, "it gets there");
+        view.mode = RouteMode::Stop;
+        let (cut, short) = view.route_to(&net, width, Layer::FCu, a, b);
+        assert!(short);
+        let end = *cut.last().unwrap();
+        assert!((end[0] - b[0]).hypot(end[1] - b[1]) > 0.1, "stopped short");
+        view.mode = RouteMode::Ignore;
+        let (_, over) = view.route_to(&net, width, Layer::FCu, a, b);
+        assert!(over, "ignore says it's blocked but goes anyway");
     }
 }

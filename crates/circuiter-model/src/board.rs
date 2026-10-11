@@ -271,6 +271,31 @@ pub struct NetClass {
     pub track_width: Length,
     pub via_diameter: Length,
     pub via_drill: Length,
+    /// Routed length limits (Altium's Length rule): too short or too long is flagged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_length: Option<Length>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_length: Option<Length>,
+    /// The impedance profile its tracks are sized by, if any (from the stack-up).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impedance: Option<String>,
+}
+
+impl NetClass {
+    /// A class like the board's defaults, named `name`.
+    pub fn new(name: &str, rules: &Rules) -> NetClass {
+        NetClass {
+            name: name.to_owned(),
+            nets: Vec::new(),
+            clearance: rules.clearance,
+            track_width: rules.track_width,
+            via_diameter: rules.via_diameter,
+            via_drill: rules.via_drill,
+            min_length: None,
+            max_length: None,
+            impedance: None,
+        }
+    }
 }
 
 /// Design rules: what the board house can make, and what the design asks for.
@@ -358,6 +383,144 @@ pub struct Board {
     /// The product's case, if it has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enclosure: Option<Enclosure>,
+    /// Colours given to nets, to show on their routing.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub net_colours: BTreeMap<String, [u8; 3]>,
+    /// The layer stack, top to bottom, and its impedance profiles; a standard FR-4
+    /// stack for the layer count and thickness when not given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stackup: Option<Stackup>,
+    /// Teardrops where tracks meet pads and vias, when wanted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub teardrops: Option<Teardrops>,
+}
+
+/// How big teardrops are, as fractions of the pad or via they widen onto: how far
+/// they reach past its edge, and how wide they are where they meet it (Altium's
+/// length and width percentages).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Teardrops {
+    pub length: f64,
+    pub width: f64,
+}
+
+impl Default for Teardrops {
+    fn default() -> Self {
+        Teardrops { length: 0.5, width: 0.7 }
+    }
+}
+
+/// What a layer of the stack is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StackKind {
+    SolderMask,
+    Copper,
+    /// A cured laminate.
+    Core,
+    /// The bonding layers pressed between cores.
+    Prepreg,
+}
+
+/// One layer of the stack.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StackLayer {
+    pub name: String,
+    pub kind: StackKind,
+    pub thickness: Length,
+    /// Dielectric constant (εr), for dielectrics.
+    #[serde(default)]
+    pub er: f64,
+}
+
+/// A target impedance for tracks on a layer, as Altium's impedance profiles: single
+/// tracks, or differential pairs `gap` apart.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImpedanceProfile {
+    pub name: String,
+    pub ohms: f64,
+    pub layer: Layer,
+    #[serde(default)]
+    pub differential: bool,
+    #[serde(default = "default_gap")]
+    pub gap: Length,
+}
+
+fn default_gap() -> Length {
+    Length::from_mm(0.2)
+}
+
+/// The board's layers through its thickness.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct Stackup {
+    pub layers: Vec<StackLayer>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub profiles: Vec<ImpedanceProfile>,
+}
+
+impl Stackup {
+    /// A standard stack: 1 oz (35 µm) copper, FR-4 (εr 4.5) between, solder mask over
+    /// both sides, cores and prepregs sharing `thickness` (mm) as boards are pressed.
+    pub fn standard(copper_layers: u8, thickness: f64) -> Stackup {
+        let mm = Length::from_mm;
+        let cu = 0.035;
+        let n = copper_layers.max(2) as usize;
+        let mask = |name: &str| StackLayer {
+            name: name.into(),
+            kind: StackKind::SolderMask,
+            thickness: mm(0.01),
+            er: 3.8,
+        };
+        let dielectric_total = (thickness - n as f64 * cu - 0.02).max(0.1);
+        let gaps = n - 1;
+        // Thin prepregs under the outer layers, the rest in the cores.
+        let prepreg = if gaps > 1 { (dielectric_total * 0.12).min(0.2) } else { 0.0 };
+        let cores = gaps - if gaps > 1 { 2 } else { 0 };
+        let core =
+            (dielectric_total - prepreg * if gaps > 1 { 2.0 } else { 0.0 }) / cores.max(1) as f64;
+        let mut layers = vec![mask("Top Solder Mask")];
+        for k in 0..n {
+            let name = match k {
+                0 => "F.Cu".to_owned(),
+                _ if k == n - 1 => "B.Cu".to_owned(),
+                _ => format!("In{k}.Cu"),
+            };
+            layers.push(StackLayer { name, kind: StackKind::Copper, thickness: mm(cu), er: 0.0 });
+            if k + 1 < n {
+                let outer = gaps > 1 && (k == 0 || k + 2 == n);
+                layers.push(if outer {
+                    StackLayer {
+                        name: "Prepreg".into(),
+                        kind: StackKind::Prepreg,
+                        thickness: mm(prepreg),
+                        er: 4.2,
+                    }
+                } else {
+                    StackLayer {
+                        name: "Core".into(),
+                        kind: StackKind::Core,
+                        thickness: mm(core),
+                        er: 4.5,
+                    }
+                });
+            }
+        }
+        layers.push(mask("Bottom Solder Mask"));
+        Stackup { layers, profiles: Vec::new() }
+    }
+
+    /// The whole stack's thickness, mm.
+    pub fn thickness(&self) -> f64 {
+        self.layers.iter().map(|l| l.thickness.mm()).sum()
+    }
+}
+
+impl Board {
+    /// The stack-up, as given or the standard one for this board.
+    pub fn stack(&self) -> Stackup {
+        self.stackup
+            .clone()
+            .unwrap_or_else(|| Stackup::standard(self.copper_layers, self.thickness.mm()))
+    }
 }
 
 /// What a case is made of, for its strength and how it passes heat.
@@ -459,6 +622,9 @@ impl Board {
             graphics: Vec::new(),
             rules: Rules::default(),
             enclosure: None,
+            net_colours: BTreeMap::new(),
+            stackup: None,
+            teardrops: None,
         }
     }
 

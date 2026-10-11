@@ -27,6 +27,10 @@ pub enum Rule {
     OutsideBoard,
     HoleToHole,
     CourtyardOverlap,
+    /// A net's routed length outside its class's limits.
+    Length,
+    /// Silkscreen printed over a pad, where it can't stick and spoils soldering.
+    SilkOverPad,
     Unconnected,
     Outline,
     Unplaced,
@@ -37,7 +41,9 @@ pub enum Rule {
 impl Rule {
     pub fn severity(self) -> Severity {
         match self {
-            Rule::CourtyardOverlap | Rule::Unplaced | Rule::Orphan => Severity::Warning,
+            Rule::CourtyardOverlap | Rule::Unplaced | Rule::Orphan | Rule::SilkOverPad => {
+                Severity::Warning
+            }
             _ => Severity::Error,
         }
     }
@@ -53,6 +59,8 @@ impl Rule {
             Rule::OutsideBoard => "Outside the board",
             Rule::HoleToHole => "Holes too close",
             Rule::CourtyardOverlap => "Courtyards overlap",
+            Rule::Length => "Net length",
+            Rule::SilkOverPad => "Silkscreen over a pad",
             Rule::Unconnected => "Unconnected items",
             Rule::Outline => "Board outline",
             Rule::Unplaced => "Part not on the board",
@@ -132,6 +140,7 @@ pub fn describe(layout: &Layout, item: Item) -> String {
         }
         Item::Track(k) => format!("track on {}", layout.board.tracks[k].layer.name()),
         Item::Via(_) => "via".into(),
+        Item::Teardrop(_) => "teardrop".into(),
         Item::Fill(z, _) => {
             format!("zone {} on {}", layout.board.zones[z].net, layout.board.zones[z].layer.name())
         }
@@ -430,8 +439,62 @@ pub fn check(layout: &Layout) -> Checked {
         }
     }
 
+    // Silkscreen over pads: each silk line, by part, against every pad on its side.
+    for k in 0..layout.parts.len() {
+        for g in layout.graphics(k) {
+            let (layer, a, b, w) = match &g {
+                Graphic::Line { layer, a, b, width } => (*layer, p(*a), p(*b), width.mm()),
+                _ => continue,
+            };
+            let cu = match layer {
+                Layer::FSilk => Layer::FCu,
+                Layer::BSilk => Layer::BCu,
+                _ => continue,
+            };
+            let line = vec![vec![geometry::capsule(a, b, w)]];
+            if let Some(pad) = layout.pads.iter().find(|pad| {
+                pad.layers.contains(&cu)
+                    && geometry::overlaps(&line, &vec![vec![geometry::pad(pad, 0.0)]])
+            }) {
+                flag(
+                    Rule::SilkOverPad,
+                    format!(
+                        "{}'s silkscreen crosses pad {} of {}",
+                        layout.parts[k].reference, pad.number, layout.parts[pad.part].reference
+                    ),
+                    Some([(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0]),
+                );
+            }
+        }
+    }
+
     // Routing.
     let connectivity = connect::analyze(&copper);
+    for net in &layout.nets {
+        if connectivity.ratsnest.iter().any(|(n, ..)| n == net) {
+            continue;
+        }
+        let length = crate::nets::routed_length(board, net);
+        if let (Some(order), Some(class)) =
+            (crate::nets::against_limits(board, net, length), rules.class(net))
+        {
+            let limit = match order {
+                std::cmp::Ordering::Less => format!(
+                    "shorter than its {} minimum",
+                    mm(class.min_length.map_or(0.0, |l| l.mm()))
+                ),
+                _ => format!(
+                    "longer than its {} maximum",
+                    mm(class.max_length.map_or(0.0, |l| l.mm()))
+                ),
+            };
+            flag(
+                Rule::Length,
+                format!("{net} is routed {}, {limit} (class {})", mm(length), class.name),
+                None,
+            );
+        }
+    }
     for (net, a, b) in &connectivity.ratsnest {
         flag(
             Rule::Unconnected,

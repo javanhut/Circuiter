@@ -135,6 +135,16 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Alt+Up", "Up a level"),
     ("Ctrl+N, Ctrl+S, Ctrl+O", "New cell, save, open project"),
     ("Esc", "Cancel, or stop a simulation"),
+    ("PCB: X", "Route; Ctrl+click finishes the connection automatically"),
+    (
+        "PCB: Shift+R, Shift+Space, Space",
+        "Routing mode (walkaround, stop, ignore); corner style (45°, 90°, any); flip the corner",
+    ),
+    ("PCB: 3, V", "Cycle track width; drop a via"),
+    ("PCB: PgUp/PgDn, Ctrl+Shift+wheel", "Change copper layer (with a via while routing)"),
+    ("PCB: Shift+S, F5", "Single-layer view; net colours"),
+    ("PCB: R, F, L", "Turn, flip to the other side, lock the selected part"),
+    ("PCB: Ctrl+M", "Measure"),
 ];
 
 /// A modal dialog.
@@ -547,6 +557,13 @@ impl CircuiterApp {
         if args.results.as_deref() == Some("none") {
             app.show_bottom = false;
         }
+        // Under the board: the rules check, nets, net classes or the stack-up.
+        app.pcb.bottom_tab = match args.results.as_deref() {
+            Some("nets") => 1,
+            Some("classes") => 2,
+            Some("stackup") => 3,
+            _ => 0,
+        };
         if let Some(tab) = args.results.as_deref() {
             app.bottom_tab = match tab {
                 "thermal" => 1,
@@ -885,7 +902,8 @@ impl CircuiterApp {
         if keys.open {
             self.guarded(ctx, Pending::OpenDialog);
         }
-        if keys.reload {
+        // In the board view F5 shows net colours, as in Altium.
+        if keys.reload && !self.show_pcb {
             self.guarded(ctx, Pending::Reload);
         }
         if keys.op {

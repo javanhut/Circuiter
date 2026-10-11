@@ -41,7 +41,7 @@ desc = "Run cargo test for repo"
 run = ["cargo test"]
 
 
-[command.run]
+[commands.run]
 desc = "Run the debug mode run"
 run = ["cargo run"]
 
@@ -50,7 +50,7 @@ run = ["cargo run"]
 desc = "builds the release version"
 run = ["cargo build --release"]
 
-[command.install]
+[commands.install]
 desc = "Installs Circuiter from release build"
 escalate = true
 run = ["mv /target/release/circuiter ~/.local/bin/"]

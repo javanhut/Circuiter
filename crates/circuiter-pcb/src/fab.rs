@@ -256,6 +256,9 @@ fn copper(layout: &Layout, fills: &[ZoneFill], layer: Layer, index: usize) -> Ou
             }
         }
     }
+    for t in crate::teardrops::shapes(layout).iter().filter(|t| t.layer == layer) {
+        g.region(&t.outline, true);
+    }
     for t in layout.board.tracks.iter().filter(|t| t.layer == layer) {
         let attrs = [("N", field(&t.net))];
         g.attributes(&attrs);

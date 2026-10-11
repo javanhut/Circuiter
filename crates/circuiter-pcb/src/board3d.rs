@@ -89,6 +89,9 @@ fn side(layout: &Layout, fills: &[ZoneFill], top: bool, t: f32, out: &mut Mesh) 
             }
         }
     }
+    for t in crate::teardrops::shapes(layout).iter().filter(|t| t.layer == cu) {
+        out.append(extrude(&ring(&t.outline), c0, c1 - 0.005, MASK_OVER_COPPER));
+    }
     for tr in layout.board.tracks.iter().filter(|tr| tr.layer == cu) {
         out.append(extrude(&ring(&geometry::track(tr, 0.0)), c0, c1 - 0.005, MASK_OVER_COPPER));
     }

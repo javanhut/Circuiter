@@ -745,3 +745,77 @@ fn inner_layers_route_and_plot() {
     let inner = files.iter().find(|f| f.name == "four-In1_Cu.gbr").unwrap();
     assert!(inner.contents.contains("%TF.FileFunction,Copper,L2,Inr*%"));
 }
+
+/// Teardrops widen the routed joints without breaking a rule; stitching vias join the
+/// ground pours through the board wherever one fits.
+#[test]
+fn teardrops_and_stitching() {
+    use circuiter_model::board::Teardrops;
+    let (design, top, mut b) = routed();
+    b.teardrops = Some(Teardrops::default());
+    let layout = Layout::new(&design, &top, &b).unwrap();
+    let drops = circuiter_pcb::teardrops::shapes(&layout);
+    assert!(drops.len() >= 4, "{}", drops.len());
+    let checked = drc::check(&layout);
+    assert!(checked.violations.is_empty(), "{:#?}", checked.violations);
+    // Ground poured on the back too, then stitched.
+    b.zones.push(Zone::new(
+        Layer::BCu,
+        "GND",
+        vec![pt(0.0, 0.0), pt(40.0, 0.0), pt(40.0, 30.0), pt(0.0, 30.0)],
+    ));
+    let layout = Layout::new(&design, &top, &b).unwrap();
+    let fills = circuiter_pcb::zones::fill(&layout);
+    let vias = circuiter_pcb::teardrops::stitch(&layout, &fills, "GND", 4.0);
+    assert!(vias.len() >= 10, "{}", vias.len());
+    b.vias.extend(vias);
+    let checked = drc::check(&Layout::new(&design, &top, &b).unwrap());
+    assert!(checked.violations.is_empty(), "{:#?}", checked.violations);
+}
+
+/// Optimising placement shortens the connections and keeps the parts apart and on the
+/// board.
+#[test]
+fn placement_is_optimised() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/analog_lab");
+    let project = circuiter_model::Project::load(&dir).unwrap();
+    let design = Design::for_project(&project, circuiter_stdlib::library()).unwrap();
+    let top = CellId::new("analog_lab", "blinker");
+    let mut b = circuiter_pcb::sync::new_board(&design, &top).unwrap();
+    let (before, after) = circuiter_pcb::sync::optimize(&design, &top, &mut b).unwrap();
+    assert!(after < before * 0.95, "{before} → {after}");
+    let checked = drc::check(&Layout::new(&design, &top, &b).unwrap());
+    let problems: Vec<_> =
+        checked.violations.iter().filter(|v| v.rule != Rule::Unconnected).collect();
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
+/// The Engineering Change Order lists what the schematic asks, and only what's chosen
+/// is done.
+#[test]
+fn engineering_change_orders() {
+    use circuiter_pcb::sync::{Change, apply, changes};
+    let (design, top) = design();
+    let mut b = board();
+    b.footprints.retain(|f| f.path != "R2");
+    b.footprints.push(Placed {
+        path: "R9".into(),
+        at: pt(30.0, 25.0),
+        rotation: 0.0,
+        back: false,
+        locked: false,
+    });
+    let layout = Layout::new(&design, &top, &b).unwrap();
+    b.tracks.push(track(&layout, "gone", [5.0, 25.0], [10.0, 25.0], Layer::FCu));
+    let found = changes(&design, &top, &b).unwrap();
+    assert_eq!(
+        found,
+        vec![Change::Add("R2".into()), Change::Remove("R9".into()), Change::Unroute("gone".into())]
+    );
+    apply(&design, &top, &mut b, &[Change::Add("R2".into())]).unwrap();
+    assert!(b.placed("R2").is_some() && b.placed("R9").is_some() && !b.tracks.is_empty());
+    apply(&design, &top, &mut b, &[Change::Remove("R9".into()), Change::Unroute("gone".into())])
+        .unwrap();
+    assert!(b.placed("R9").is_none() && b.tracks.is_empty());
+    assert!(changes(&design, &top, &b).unwrap().is_empty());
+}

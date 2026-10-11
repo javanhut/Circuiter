@@ -78,6 +78,9 @@ pub fn plot(layout: &Layout, fills: &[ZoneFill], connectivity: Option<&Connectiv
                 let _ = writeln!(s, r#"<path fill-rule="evenodd" d="{}"/>"#, path(piece));
             }
         }
+        for t in crate::teardrops::shapes(layout).iter().filter(|t| t.layer == layer) {
+            let _ = writeln!(s, r#"<path d="{}"/>"#, path(std::slice::from_ref(&t.outline)));
+        }
         for t in board.tracks.iter().filter(|t| t.layer == layer) {
             let _ = writeln!(s, r#"<path d="{}"/>"#, path(&[geometry::track(t, 0.0)]));
         }

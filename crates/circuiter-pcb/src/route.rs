@@ -32,6 +32,12 @@ pub struct Options {
     pub nets: Option<BTreeSet<String>>,
     /// Give up on a connection after this many search steps.
     pub limit: usize,
+    /// Only horizontal and vertical steps (90° corners).
+    pub orthogonal: bool,
+    /// Corners at any angle: paths pulled straight from corner to corner.
+    pub any_angle: bool,
+    /// Whether a path may change layer.
+    pub vias: bool,
 }
 
 impl Default for Options {
@@ -43,6 +49,9 @@ impl Default for Options {
             against: 0.4,
             nets: None,
             limit: 3_000_000,
+            orthogonal: false,
+            any_angle: false,
+            vias: true,
         }
     }
 }
@@ -259,14 +268,227 @@ fn layers_at(
     out.into_iter().collect()
 }
 
+/// A board ready to route on: its grid built once, then connection after connection
+/// found and added to it. The interactive router keeps one while the board is
+/// unchanged, so a track can walk around obstacles as the pointer moves.
+pub struct Router {
+    grid: Grid,
+    search: Search,
+    ids: BTreeMap<String, i32>,
+    layers: Vec<Layer>,
+    track_reach: f64,
+    via_reach: f64,
+    via_hole_reach: f64,
+    rules: circuiter_model::board::Rules,
+}
+
+impl std::fmt::Debug for Router {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Router({}×{}×{} at {} mm)",
+            self.grid.nx, self.grid.ny, self.grid.layers, self.grid.pitch
+        )
+    }
+}
+
+impl Router {
+    /// The grid for the board of `layout`, at `pitch`.
+    pub fn new(layout: &Layout, pitch: f64) -> Option<Router> {
+        let board = &layout.board;
+        let rules = &board.rules;
+        let layers = board.copper();
+        let outline: Vec<P> = board.outline.iter().map(|q| p(*q)).collect();
+        let (lo, hi) = geometry::bounds(&vec![vec![outline.clone()]])?;
+        let pitch = pitch.max(0.02);
+        let slack = pitch * 0.71;
+        let clearance = std::iter::once(rules.clearance.mm())
+            .chain(rules.classes.iter().map(|c| c.clearance.mm()))
+            .fold(0.0, f64::max);
+        let widest = std::iter::once(rules.track_width.mm())
+            .chain(rules.classes.iter().map(|c| c.track_width.mm()))
+            .fold(0.0, f64::max);
+        let via_r = std::iter::once(rules.via_diameter.mm())
+            .chain(rules.classes.iter().map(|c| c.via_diameter.mm()))
+            .fold(0.0, f64::max)
+            / 2.0;
+        let track_reach = clearance + widest / 2.0 + slack;
+        let via_reach = clearance + via_r + slack;
+        let via_hole_reach = via_reach.max(via_r + rules.hole_to_hole.mm() + slack);
+        let nx = ((hi[0] - lo[0]) / pitch).ceil() as usize + 1;
+        let ny = ((hi[1] - lo[1]) / pitch).ceil() as usize + 1;
+        let nl = layers.len();
+        let mut grid = Grid {
+            x0: lo[0],
+            y0: lo[1],
+            pitch,
+            nx,
+            ny,
+            layers: nl,
+            track: vec![FREE; nl * nx * ny],
+            via: vec![FREE; nl * nx * ny],
+        };
+        // The edge: nothing outside the board or within its clearance of the edge.
+        let edge = rules.edge_clearance.mm();
+        let n = outline.len();
+        for y in 0..ny {
+            for x in 0..nx {
+                let c = grid.centre(x, y);
+                let mut inside = false;
+                for k in 0..n {
+                    let (a, b) = (outline[k], outline[(k + 1) % n]);
+                    if (a[1] > c[1]) != (b[1] > c[1])
+                        && c[0] < a[0] + (c[1] - a[1]) * (b[0] - a[0]) / (b[1] - a[1])
+                    {
+                        inside = !inside;
+                    }
+                }
+                let to_edge = (0..n)
+                    .map(|k| geometry::segment_distance(outline[k], outline[(k + 1) % n], c, c))
+                    .fold(f64::MAX, f64::min);
+                for l in 0..nl {
+                    let i = grid.index(l, x, y);
+                    if !inside || to_edge < edge + widest / 2.0 + slack {
+                        grid.track[i] = BLOCKED;
+                    }
+                    if !inside || to_edge < edge + via_r + slack {
+                        grid.via[i] = BLOCKED;
+                    }
+                }
+            }
+        }
+        let mut r = Router {
+            grid,
+            search: Search::new(nl * nx * ny * 9),
+            ids: BTreeMap::new(),
+            layers: layers.clone(),
+            track_reach,
+            via_reach,
+            via_hole_reach,
+            rules: rules.clone(),
+        };
+        // Everything already on the board.
+        for pad in &layout.pads {
+            let net = pad.net.as_deref().map_or(BLOCKED, |n| r.id(n));
+            let prim = pad_prim(pad);
+            let on: Vec<usize> = pad.layers.iter().filter_map(|l| r.layer_index(*l)).collect();
+            for l in on {
+                r.grid.mark(false, l, &prim, track_reach, net);
+                r.grid.mark(true, l, &prim, via_reach, net);
+            }
+            // A hole keeps everything clear on every layer.
+            if let Some(d) = pad.drill() {
+                let hole = Prim::Disc(pad.center, d / 2.0);
+                for l in 0..nl {
+                    r.grid.mark(false, l, &hole, track_reach, net);
+                    r.grid.mark(true, l, &hole, via_hole_reach, net);
+                }
+            }
+        }
+        r.add(&board.tracks, &board.vias);
+        Some(r)
+    }
+
+    fn id(&mut self, net: &str) -> i32 {
+        let next = self.ids.len() as i32;
+        *self.ids.entry(net.to_owned()).or_insert(next)
+    }
+
+    fn layer_index(&self, l: Layer) -> Option<usize> {
+        self.layers.iter().position(|x| *x == l)
+    }
+
+    /// Marks tracks and vias on the grid, so later routes keep clear of them.
+    pub fn add(&mut self, tracks: &[Track], vias: &[Via]) {
+        for t in tracks {
+            let net = self.id(&t.net);
+            if let Some(l) = self.layer_index(t.layer) {
+                let prim = Prim::Seg(p(t.a), p(t.b), t.width.mm() / 2.0);
+                self.grid.mark(false, l, &prim, self.track_reach, net);
+                self.grid.mark(true, l, &prim, self.via_reach, net);
+            }
+        }
+        for v in vias {
+            let net = self.id(&v.net);
+            let prim = Prim::Disc(p(v.at), v.diameter.mm() / 2.0);
+            for l in 0..self.grid.layers {
+                self.grid.mark(false, l, &prim, self.track_reach, net);
+                self.grid.mark(true, l, &prim, self.via_hole_reach, net);
+            }
+        }
+    }
+
+    /// Whether a track of `net` on `layer` from `a` to `b` stays clear of other nets'
+    /// copper (as the grid sees it).
+    pub fn clear(&mut self, net: &str, layer: Layer, a: P, b: P) -> bool {
+        let nid = self.id(net);
+        self.layer_index(layer).is_some_and(|l| clear_line(&self.grid, l, a, b, nid))
+    }
+
+    /// How far along `path` (on `layer`) a track of `net` gets before it would run into
+    /// something: the path cut short there (KiCad and Altium's "stop at first obstacle").
+    pub fn until_blocked(&mut self, net: &str, layer: Layer, path: &[P]) -> Vec<P> {
+        let nid = self.id(net);
+        let Some(l) = self.layer_index(layer) else { return path.to_vec() };
+        let mut out = vec![path[0]];
+        for w in path.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            let len = (b[0] - a[0]).hypot(b[1] - a[1]);
+            let n = (len / (self.grid.pitch / 3.0)).ceil().max(1.0) as usize;
+            let mut last = a;
+            for k in 1..=n {
+                let t = k as f64 / n as f64;
+                let q = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+                let (x, y) = self.grid.cell(q);
+                if !self.grid.passable(false, self.grid.index(l, x, y), nid) {
+                    if (last[0] - a[0]).hypot(last[1] - a[1]) > 1e-9 {
+                        out.push(last);
+                    }
+                    return out;
+                }
+                last = q;
+            }
+            out.push(b);
+        }
+        out
+    }
+
+    /// A path for `net` from `a` (on layers `la`) to `b` (on `lb`): tracks and vias, or
+    /// `None` if there's no way through within the search's limit.
+    #[allow(clippy::too_many_arguments)]
+    pub fn connect(
+        &mut self,
+        net: &str,
+        a: P,
+        la: &[Layer],
+        b: P,
+        lb: &[Layer],
+        width: f64,
+        opts: &Options,
+    ) -> Option<(Vec<Track>, Vec<Via>)> {
+        let nid = self.id(net);
+        let la: Vec<usize> = la.iter().filter_map(|l| self.layer_index(*l)).collect();
+        let lb: Vec<usize> = lb.iter().filter_map(|l| self.layer_index(*l)).collect();
+        let (via_d, via_drill) = self.rules.via_for(net);
+        let path = find(&self.grid, &mut self.search, opts, nid, (a, &la), (b, &lb))?;
+        Some(draw(
+            &self.grid,
+            &path,
+            a,
+            b,
+            nid,
+            net,
+            width,
+            &self.layers,
+            (via_d, via_drill),
+            (opts.orthogonal, opts.any_angle),
+        ))
+    }
+}
+
 /// Routes the board's ratsnest (or the nets `opts` names).
 pub fn autoroute(layout: &Layout, opts: &Options) -> Routed {
-    let board = &layout.board;
-    let rules = &board.rules;
-    let layers = board.copper();
-    let outline: Vec<P> = board.outline.iter().map(|q| p(*q)).collect();
     let mut out = Routed::default();
-    let Some((lo, hi)) = geometry::bounds(&vec![vec![outline.clone()]]) else { return out };
     let fills = zones::fill(layout);
     let copper = connect::copper(layout, &fills);
     let conn = connect::analyze(&copper);
@@ -283,107 +505,8 @@ pub fn autoroute(layout: &Layout, opts: &Options) -> Routed {
         let d = |c: &(String, P, P)| (c.1[0] - c.2[0]).hypot(c.1[1] - c.2[1]);
         d(a).total_cmp(&d(b))
     });
-    // Nets as numbers.
-    let mut ids: BTreeMap<String, i32> = BTreeMap::new();
-    let id = |n: &str, ids: &mut BTreeMap<String, i32>| {
-        let next = ids.len() as i32;
-        *ids.entry(n.to_owned()).or_insert(next)
-    };
-    let pitch = opts.pitch.max(0.02);
-    let slack = pitch * 0.71;
-    let clearance = std::iter::once(rules.clearance.mm())
-        .chain(rules.classes.iter().map(|c| c.clearance.mm()))
-        .fold(0.0, f64::max);
-    let widest = todo.iter().map(|(n, ..)| rules.track_width_for(n).mm()).fold(0.0, f64::max);
-    let via_r = todo.iter().map(|(n, ..)| rules.via_for(n).0.mm()).fold(0.0, f64::max) / 2.0;
-    let track_reach = clearance + widest / 2.0 + slack;
-    let via_reach = clearance + via_r + slack;
-    let nx = ((hi[0] - lo[0]) / pitch).ceil() as usize + 1;
-    let ny = ((hi[1] - lo[1]) / pitch).ceil() as usize + 1;
-    let nl = layers.len();
-    let mut grid = Grid {
-        x0: lo[0],
-        y0: lo[1],
-        pitch,
-        nx,
-        ny,
-        layers: nl,
-        track: vec![FREE; nl * nx * ny],
-        via: vec![FREE; nl * nx * ny],
-    };
-    // The edge: nothing outside the board or within its clearance of the edge.
-    let edge = rules.edge_clearance.mm();
-    let n = outline.len();
-    for y in 0..ny {
-        for x in 0..nx {
-            let c = grid.centre(x, y);
-            let inside = {
-                let mut odd = false;
-                for k in 0..n {
-                    let (a, b) = (outline[k], outline[(k + 1) % n]);
-                    if (a[1] > c[1]) != (b[1] > c[1])
-                        && c[0] < a[0] + (c[1] - a[1]) * (b[0] - a[0]) / (b[1] - a[1])
-                    {
-                        odd = !odd;
-                    }
-                }
-                odd
-            };
-            let to_edge = (0..n)
-                .map(|k| geometry::segment_distance(outline[k], outline[(k + 1) % n], c, c))
-                .fold(f64::MAX, f64::min);
-            for l in 0..nl {
-                let i = grid.index(l, x, y);
-                if !inside || to_edge < edge + widest / 2.0 + slack {
-                    grid.track[i] = BLOCKED;
-                }
-                if !inside || to_edge < edge + via_r + slack {
-                    grid.via[i] = BLOCKED;
-                }
-            }
-        }
-    }
-    // Everything already on the board.
-    let layer_index = |l: Layer| layers.iter().position(|x| *x == l);
-    for pad in &layout.pads {
-        let net = pad.net.as_deref().map_or(BLOCKED, |n| id(n, &mut ids));
-        let prim = pad_prim(pad);
-        for l in pad.layers.iter().filter_map(|l| layer_index(*l)) {
-            grid.mark(false, l, &prim, track_reach, net);
-            grid.mark(true, l, &prim, via_reach, net);
-        }
-        // A hole keeps everything clear on every layer.
-        if let Some(d) = pad.drill() {
-            let hole = Prim::Disc(pad.center, d / 2.0);
-            for l in 0..nl {
-                grid.mark(false, l, &hole, track_reach, net);
-                grid.mark(
-                    true,
-                    l,
-                    &hole,
-                    via_reach.max(via_r + rules.hole_to_hole.mm() + slack),
-                    net,
-                );
-            }
-        }
-    }
-    for t in &board.tracks {
-        let net = id(&t.net, &mut ids);
-        if let Some(l) = layer_index(t.layer) {
-            let prim = Prim::Seg(p(t.a), p(t.b), t.width.mm() / 2.0);
-            grid.mark(false, l, &prim, track_reach, net);
-            grid.mark(true, l, &prim, via_reach, net);
-        }
-    }
-    for v in &board.vias {
-        let net = id(&v.net, &mut ids);
-        let prim = Prim::Disc(p(v.at), v.diameter.mm() / 2.0);
-        for l in 0..nl {
-            grid.mark(false, l, &prim, track_reach, net);
-            grid.mark(true, l, &prim, via_reach.max(via_r + rules.hole_to_hole.mm() + slack), net);
-        }
-    }
-    let mut search = Search::new(nl * nx * ny * 9);
+    let Some(mut router) = Router::new(layout, opts.pitch) else { return out };
+    let layers = layout.board.copper();
     let mut failed = Vec::new();
     for pass in 0..2 {
         let list = if pass == 0 { std::mem::take(&mut todo) } else { std::mem::take(&mut failed) };
@@ -394,40 +517,12 @@ pub fn autoroute(layout: &Layout, opts: &Options) -> Routed {
             o.against *= 0.25;
         }
         for (net, a, b) in list {
-            let nid = id(&net, &mut ids);
-            let width = rules.track_width_for(&net).mm();
-            let (via_d, via_drill) = rules.via_for(&net);
-            let la: Vec<usize> = layers_at(layout, &fills, a, &net, &layers)
-                .into_iter()
-                .filter_map(layer_index)
-                .collect();
-            let lb: Vec<usize> = layers_at(layout, &fills, b, &net, &layers)
-                .into_iter()
-                .filter_map(layer_index)
-                .collect();
-            match find(&grid, &mut search, &o, nid, (a, &la), (b, &lb)) {
-                Some(path) => {
-                    let (tracks, vias) =
-                        draw(&grid, &path, a, b, nid, &net, width, &layers, (via_d, via_drill));
-                    for t in &tracks {
-                        let l = layer_index(t.layer).expect("a board layer");
-                        let prim = Prim::Seg(p(t.a), p(t.b), width / 2.0);
-                        grid.mark(false, l, &prim, track_reach, nid);
-                        grid.mark(true, l, &prim, via_reach, nid);
-                    }
-                    for v in &vias {
-                        let prim = Prim::Disc(p(v.at), v.diameter.mm() / 2.0);
-                        for l in 0..nl {
-                            grid.mark(false, l, &prim, track_reach, nid);
-                            grid.mark(
-                                true,
-                                l,
-                                &prim,
-                                via_reach.max(via_r + rules.hole_to_hole.mm() + slack),
-                                nid,
-                            );
-                        }
-                    }
+            let width = layout.board.rules.track_width_for(&net).mm();
+            let la = layers_at(layout, &fills, a, &net, &layers);
+            let lb = layers_at(layout, &fills, b, &net, &layers);
+            match router.connect(&net, a, &la, b, &lb, width, &o) {
+                Some((tracks, vias)) => {
+                    router.add(&tracks, &vias);
                     out.tracks.extend(tracks);
                     out.vias.extend(vias);
                     out.done += 1;
@@ -438,6 +533,11 @@ pub fn autoroute(layout: &Layout, opts: &Options) -> Routed {
         }
     }
     out
+}
+
+/// The copper layers there's copper of `net` at `q` on, for a route to start or end.
+pub fn layers_of(layout: &Layout, q: P, net: &str) -> Vec<Layer> {
+    layers_at(layout, &[], q, net, &layout.board.copper())
 }
 
 /// One cell on one layer.
@@ -511,6 +611,9 @@ fn find(
             };
         // Along the layer.
         for (d, (dx, dy)) in DIRS.iter().enumerate() {
+            if o.orthogonal && d % 2 == 1 {
+                continue;
+            }
             let (x2, y2) = (x as i32 + dx, y as i32 + dy);
             if x2 < 0 || y2 < 0 || x2 >= nx as i32 || y2 >= ny as i32 {
                 continue;
@@ -542,7 +645,7 @@ fn find(
             relax(c2 * 9 + d, g + step + bend + against, &mut open, s, h(x2, y2));
         }
         // Through a via to another layer.
-        if grid.layers > 1 {
+        if grid.layers > 1 && o.vias {
             let clear = (0..grid.layers).all(|k| grid.passable(true, grid.index(k, x, y), nid));
             if clear {
                 for l2 in (0..grid.layers).filter(|&k| k != l) {
@@ -568,6 +671,7 @@ fn draw(
     width: f64,
     layers: &[Layer],
     (via_d, via_drill): (Length, Length),
+    (orthogonal, any_angle): (bool, bool),
 ) -> (Vec<Track>, Vec<Via>) {
     let mut tracks = Vec::new();
     let mut vias = Vec::new();
@@ -595,7 +699,7 @@ fn draw(
     let last = runs.len().saturating_sub(1);
     for (k, (l, mut pts)) in runs.into_iter().enumerate() {
         pts.dedup();
-        let mut pts = taut(grid, &pts, l, nid);
+        let mut pts = taut(grid, &pts, l, nid, (orthogonal, any_angle));
         // Join the exact pad (or track end) to the grid at each end.
         if k == 0 {
             pts.insert(0, a);
@@ -629,20 +733,27 @@ fn clear_line(grid: &Grid, l: usize, a: P, b: P, nid: i32) -> bool {
 }
 
 /// Fewest corners: from each corner, straight on to the furthest point along the path
-/// that can be reached at a multiple of 45° through clear cells.
-fn taut(grid: &Grid, pts: &[P], l: usize, nid: i32) -> Vec<P> {
+/// that can be reached through clear cells at an allowed angle (multiples of 45°, of
+/// 90°, or any).
+fn taut(
+    grid: &Grid,
+    pts: &[P],
+    l: usize,
+    nid: i32,
+    (orthogonal, any_angle): (bool, bool),
+) -> Vec<P> {
     if pts.len() <= 2 {
         return pts.to_vec();
     }
-    let angled = |a: P, b: P| {
+    let allowed = |a: P, b: P| {
         let (dx, dy) = ((b[0] - a[0]).abs(), (b[1] - a[1]).abs());
-        dx < 1e-9 || dy < 1e-9 || (dx - dy).abs() < 1e-9
+        any_angle || dx < 1e-9 || dy < 1e-9 || (!orthogonal && (dx - dy).abs() < 1e-9)
     };
     let mut out = vec![pts[0]];
     let mut i = 0;
     while i < pts.len() - 1 {
         let mut j = pts.len() - 1;
-        while j > i + 1 && !(angled(pts[i], pts[j]) && clear_line(grid, l, pts[i], pts[j], nid)) {
+        while j > i + 1 && !(allowed(pts[i], pts[j]) && clear_line(grid, l, pts[i], pts[j], nid)) {
             j -= 1;
         }
         out.push(pts[j]);

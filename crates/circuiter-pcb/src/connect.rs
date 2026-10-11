@@ -16,6 +16,8 @@ pub enum Item {
     Via(usize),
     /// A zone's fill: zone index, piece.
     Fill(usize, usize),
+    /// A teardrop, by its place in [`crate::teardrops::shapes`].
+    Teardrop(usize),
 }
 
 #[derive(Debug, Clone)]
@@ -68,6 +70,10 @@ pub fn copper(layout: &Layout, fills: &[ZoneFill]) -> Vec<Copper> {
             vec![vec![geometry::via(v, 0.0)]],
             vec![p(v.at)],
         );
+    }
+    for (k, t) in crate::teardrops::shapes(layout).into_iter().enumerate() {
+        let anchors = vec![t.outline[0]];
+        push(Item::Teardrop(k), Some(t.net), vec![t.layer], vec![vec![t.outline]], anchors);
     }
     for f in fills {
         for (j, piece) in f.shapes.iter().enumerate() {
