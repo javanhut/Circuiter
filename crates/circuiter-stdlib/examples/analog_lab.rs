@@ -391,51 +391,19 @@ fn case_lid() -> CellDef {
     lid
 }
 
-/// The blinker's board: parts placed, each connection a plain two-leg track where one
-/// fits within the design rules (the rest left on the ratsnest to route by hand), a
-/// ground pour on the back, and a vented case.
+/// The blinker's board: parts placed, a ground pour on the back, every connection
+/// autorouted, in a vented case.
 fn blinker_board(design: &Design) -> circuiter_model::board::Board {
-    use circuiter_model::board::{Layer, Track, Zone};
-    use circuiter_model::geom::Length;
-    use circuiter_pcb::layout::{Layout, point};
+    use circuiter_model::board::{Layer, Zone};
+    use circuiter_pcb::layout::Layout;
     let id = circuiter_model::CellId::new(PROJECT, "blinker");
     let mut board = circuiter_pcb::sync::new_board(design, &id).expect("a board");
     let o = board.outline.clone();
     board.zones.push(Zone::new(Layer::BCu, "GND", o));
-    loop {
-        let layout = Layout::new(design, &id, &board).expect("laid out");
-        let checked = circuiter_pcb::drc::check(&layout);
-        let unrouted = checked.connectivity.unrouted();
-        let mut better = None;
-        'search: for (net, a, b) in &checked.connectivity.ratsnest {
-            for layer in [Layer::FCu, Layer::BCu] {
-                for corner in [[b[0], a[1]], [a[0], b[1]]] {
-                    let mut trial = board.clone();
-                    for (p, q) in [(*a, corner), (corner, *b)] {
-                        if p != q {
-                            trial.tracks.push(Track {
-                                layer,
-                                a: point(p),
-                                b: point(q),
-                                width: Length::from_mm(0.3),
-                                net: net.clone(),
-                            });
-                        }
-                    }
-                    let l = Layout::new(design, &id, &trial).expect("laid out");
-                    let c = circuiter_pcb::drc::check(&l);
-                    if c.errors() == 0 && c.connectivity.unrouted() < unrouted {
-                        better = Some(trial);
-                        break 'search;
-                    }
-                }
-            }
-        }
-        match better {
-            Some(b) => board = b,
-            None => break,
-        }
-    }
+    let layout = Layout::new(design, &id, &board).expect("laid out");
+    let routed = circuiter_pcb::route::autoroute(&layout, &Default::default());
+    board.tracks.extend(routed.tracks);
+    board.vias.extend(routed.vias);
     board.enclosure = Some(circuiter_model::board::Enclosure { vents: true, ..Default::default() });
     board
 }

@@ -11,7 +11,7 @@ use circuiter_model::geom::Length;
 use circuiter_model::{CellId, Design};
 use circuiter_pcb::drc::{self, Checked, Severity};
 use circuiter_pcb::geometry::{self, Contour};
-use circuiter_pcb::layout::{Layout, P, PadAt, p, point};
+use circuiter_pcb::layout::{Layout, P, PadAt, Place, p, point};
 use circuiter_pcb::{fab, font, sync};
 use circuiter_scene::Pt;
 use eframe::egui::{self, Color32, Pos2, RichText, Sense, Stroke};
@@ -35,7 +35,14 @@ pub fn layer_colour(layer: Layer) -> Color32 {
         Layer::FCu => Color32::from_rgb(200, 52, 52),
         Layer::BCu => Color32::from_rgb(77, 127, 196),
         Layer::In(1) => Color32::from_rgb(127, 200, 127),
-        Layer::In(_) => Color32::from_rgb(206, 125, 44),
+        Layer::In(2) => Color32::from_rgb(206, 125, 44),
+        Layer::In(3) => Color32::from_rgb(180, 110, 220),
+        Layer::In(_) => Color32::from_rgb(80, 200, 200),
+        Layer::FSilk => SILK_FRONT,
+        Layer::BSilk => SILK_BACK,
+        Layer::FCrtYd | Layer::BCrtYd => Color32::from_rgb(255, 38, 226),
+        Layer::FFab | Layer::BFab => Color32::from_rgb(175, 175, 175),
+        Layer::EdgeCuts => EDGE,
         _ => Color32::GRAY,
     }
 }
@@ -68,7 +75,7 @@ pub enum PcbTool {
 pub fn hint(tool: &PcbTool) -> &'static str {
     match tool {
         PcbTool::Select => {
-            "Click to select · drag a part to move it · R turn · F flip to the other side · L lock · Del delete · X route · wheel zoom · right-drag pan"
+            "Click to select · drag a part (its tracks follow), a track (it slides square to itself), a corner or a via · R turn · F flip · L lock · Del delete · X route · Autoroute in the toolbar · PgUp/PgDn layer"
         }
         PcbTool::Route { points, .. } if points.is_empty() => {
             "Click a pad, track or via to start a track of its net · Esc to stop"
@@ -154,20 +161,85 @@ impl Analysis {
 }
 
 /// Which layers and markings show.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Visible {
-    pub front: bool,
-    pub back: bool,
+    /// Layers turned off.
+    pub hidden: std::collections::BTreeSet<Layer>,
     pub zones: bool,
-    pub silk: bool,
     pub ratsnest: bool,
     pub drc: bool,
+    /// Other copper layers faded right down, so the one being worked on stands out.
+    pub high_contrast: bool,
+}
+
+impl Visible {
+    pub fn shows(&self, l: Layer) -> bool {
+        !self.hidden.contains(&l)
+    }
+
+    pub fn toggle(&mut self, l: Layer) {
+        if !self.hidden.remove(&l) {
+            self.hidden.insert(l);
+        }
+    }
 }
 
 impl Default for Visible {
     fn default() -> Self {
-        Visible { front: true, back: true, zones: true, silk: true, ratsnest: true, drc: true }
+        Visible {
+            hidden: [Layer::FCrtYd, Layer::BCrtYd, Layer::FFab, Layer::BFab].into_iter().collect(),
+            zones: true,
+            ratsnest: true,
+            drc: true,
+            high_contrast: false,
+        }
     }
+}
+
+/// What's being dragged with the select tool.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Drag {
+    Footprint(String),
+    /// A track's segment, moved square to itself.
+    Segment(usize),
+    /// A corner where tracks meet, on a layer.
+    Corner(Layer, P),
+    Via(usize),
+}
+
+/// The layers a board has, for the Layers panel: copper, then the others.
+pub const OTHER_LAYERS: &[(Layer, &str)] = &[
+    (Layer::FSilk, "F.Silkscreen"),
+    (Layer::BSilk, "B.Silkscreen"),
+    (Layer::FCrtYd, "F.Courtyard"),
+    (Layer::BCrtYd, "B.Courtyard"),
+    (Layer::FFab, "F.Fab"),
+    (Layer::BFab, "B.Fab"),
+    (Layer::EdgeCuts, "Edge.Cuts"),
+];
+
+/// `board` with `drag` (from `from` to `to`) done to it: what a drag shows as it goes
+/// and leaves when let go. Moves snap to `grid`.
+pub fn apply_drag(board: &Board, layout: &Layout, drag: &Drag, from: P, to: P, grid: f64) -> Board {
+    let mut b = board.clone();
+    let snap = |v: f64| (v / grid).round() * grid;
+    let delta = [snap(to[0] - from[0]), snap(to[1] - from[1])];
+    match drag {
+        Drag::Footprint(path) => {
+            if let Some(f) = board.placed(path) {
+                let at = p(f.at);
+                let mut moved = f.clone();
+                moved.at = point([snap(at[0] + delta[0]), snap(at[1] + delta[1])]);
+                circuiter_pcb::edit::move_footprint(&mut b, layout, path, moved);
+            }
+        }
+        Drag::Segment(k) => circuiter_pcb::edit::drag_segment(&mut b, *k, delta),
+        Drag::Corner(layer, at) => {
+            circuiter_pcb::edit::move_corner(&mut b, *layer, *at, [snap(to[0]), snap(to[1])])
+        }
+        Drag::Via(k) => circuiter_pcb::edit::move_via(&mut b, *k, [snap(to[0]), snap(to[1])]),
+    }
+    b
 }
 
 /// The board editor's state.
@@ -178,9 +250,14 @@ pub struct PcbView {
     /// The copper layer being worked on.
     pub layer: Layer,
     pub selected: Option<Pick>,
-    /// A footprint being dragged: where from and to.
-    drag: Option<(String, P, P)>,
+    /// What's being dragged, where from and to, and the board as it'll be.
+    drag: Option<(Drag, P, P)>,
+    preview: Option<Board>,
     pub visible: Visible,
+    /// The Layers panel beside the board.
+    pub show_layers: bool,
+    /// A layer picked (in the panel) while routing: a via takes the track there.
+    pending_layer: Option<Layer>,
     pub grid: f64,
     /// The net new pours are of.
     pub zone_net: String,
@@ -202,7 +279,10 @@ impl Default for PcbView {
             layer: Layer::FCu,
             selected: None,
             drag: None,
+            preview: None,
             visible: Visible::default(),
+            show_layers: true,
+            pending_layer: None,
             grid: 0.635,
             zone_net: String::new(),
             diagonal_first: false,
@@ -453,9 +533,20 @@ impl CircuiterApp {
         let editable = ws.editable();
         self.pcb_toolbar(ui);
         let p = style::palette(ui);
+        let has_board = self.pcb.analysis.as_ref().is_some_and(|a| a.layout.is_ok());
+        if has_board && self.pcb.show_layers {
+            egui::Panel::left("pcb-layers")
+                .resizable(true)
+                .default_size(200.0)
+                .frame(egui::Frame::new().fill(p.panel).inner_margin(egui::Margin::same(8)))
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false; 2])
+                        .show(ui, |ui| self.pcb_layers(ui))
+                });
+        }
         let rect = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
-        let has_board = self.pcb.analysis.as_ref().is_some_and(|a| a.layout.is_ok());
         if !has_board {
             ui.painter().rect_filled(rect, 0.0, BACKGROUND);
             let reason = self
@@ -502,6 +593,232 @@ impl CircuiterApp {
         }
         self.pcb_interact(ui, rect, &response);
         self.pcb_paint(ui, rect);
+    }
+
+    /// The Layers panel: every layer with its colour, shown or hidden, and the copper
+    /// layer being worked on.
+    fn pcb_layers(&mut self, ui: &mut egui::Ui) {
+        let p = style::palette(ui);
+        let Some(layout) = self.pcb.layout() else { return };
+        let copper = layout.board.copper();
+        let count = layout.board.copper_layers;
+        let editable = self.workspace.as_ref().is_some_and(|ws| ws.editable());
+        let mut set_count = None;
+        let view = &mut self.pcb;
+        ui.label(RichText::new(format!("{}  Layers", icon::STACK)).strong().size(15.0));
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Copper").color(p.weak));
+            ui.add_enabled_ui(editable, |ui| {
+                egui::ComboBox::from_id_salt("copper-count")
+                    .selected_text(format!("{count} layers"))
+                    .show_ui(ui, |ui| {
+                        for n in [2u8, 4, 6] {
+                            if ui.selectable_label(n == count, format!("{n} layers")).clicked()
+                                && n != count
+                            {
+                                set_count = Some(n);
+                            }
+                        }
+                    });
+            });
+        });
+        // A row: its colour, an eye, its name (click to work on it).
+        let row =
+            |ui: &mut egui::Ui, l: Layer, name: &str, view: &mut PcbView, copper: bool| -> bool {
+                let mut pick = false;
+                ui.horizontal(|ui| {
+                    let shown = view.visible.shows(l);
+                    let eye = if shown { icon::EYE } else { icon::EYE_SLASH };
+                    if ui
+                        .add(
+                            egui::Button::new(RichText::new(eye).color(if shown {
+                                p.text
+                            } else {
+                                p.weak
+                            }))
+                            .frame(false),
+                        )
+                        .on_hover_text(if shown { "Hide" } else { "Show" })
+                        .clicked()
+                    {
+                        view.visible.toggle(l);
+                    }
+                    let (r, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
+                    ui.painter().rect_filled(r, 2.0, layer_colour(l));
+                    let active = copper && view.layer == l;
+                    let text = RichText::new(name).color(if shown { p.text } else { p.weak });
+                    let text = if active { text.strong() } else { text };
+                    if copper {
+                        if ui
+                            .selectable_label(active, text)
+                            .on_hover_text("Work on this layer: routing, pours")
+                            .clicked()
+                        {
+                            pick = true;
+                        }
+                    } else {
+                        ui.label(text);
+                    }
+                });
+                pick
+            };
+        for &l in &copper {
+            let name = match l {
+                Layer::FCu => "F.Cu  (front)".to_owned(),
+                Layer::BCu => "B.Cu  (back)".to_owned(),
+                other => other.name(),
+            };
+            if row(ui, l, &name, view, true) && view.layer != l {
+                let routing =
+                    matches!(&view.tool, PcbTool::Route { points, .. } if !points.is_empty());
+                if routing {
+                    view.pending_layer = Some(l);
+                } else {
+                    view.layer = l;
+                }
+                view.visible.hidden.remove(&l);
+            }
+        }
+        ui.separator();
+        for &(l, name) in OTHER_LAYERS {
+            row(ui, l, name, view, false);
+        }
+        ui.separator();
+        ui.checkbox(&mut view.visible.zones, "Copper pours");
+        ui.checkbox(&mut view.visible.ratsnest, "Ratsnest");
+        ui.checkbox(&mut view.visible.drc, "Rule markers");
+        ui.checkbox(&mut view.visible.high_contrast, "Dim other layers");
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new("Click a copper layer to route on it; while routing, clicking another drops a via to it. PgUp/PgDn step through the layers; V drops a via and goes to the other side.")
+                .small()
+                .color(p.weak),
+        );
+        if let Some(n) = set_count {
+            let Some(ws) = &mut self.workspace else { return };
+            let done = ws.edit_board(|_, _, b| {
+                let b = b.as_mut().ok_or("no board")?;
+                let gone: Vec<Layer> = b
+                    .copper()
+                    .into_iter()
+                    .filter(|l| matches!(l, Layer::In(k) if *k + 2 > n))
+                    .collect();
+                if b.tracks.iter().any(|t| gone.contains(&t.layer))
+                    || b.zones.iter().any(|z| gone.contains(&z.layer))
+                {
+                    return Err(
+                        "tracks or pours are on the inner layers that would go: remove them first"
+                            .into(),
+                    );
+                }
+                b.copper_layers = n;
+                Ok(())
+            });
+            match done {
+                Ok(()) => {
+                    if !self
+                        .pcb
+                        .layout()
+                        .is_some_and(|l| l.board.copper().contains(&self.pcb.layer))
+                    {
+                        self.pcb.layer = Layer::FCu;
+                    }
+                }
+                Err(e) => self.error = Some(e),
+            }
+        }
+    }
+
+    /// Routes the ratsnest automatically: of `nets`, or everything.
+    pub(super) fn pcb_autoroute(&mut self, nets: Option<std::collections::BTreeSet<String>>) {
+        let Some(layout) = self.pcb.layout().cloned() else { return };
+        let opts = circuiter_pcb::route::Options { nets, ..Default::default() };
+        let routed = circuiter_pcb::route::autoroute(&layout, &opts);
+        if routed.done == 0 && routed.failed.is_empty() {
+            self.pcb.note = Some("Nothing to route: every connection is made".into());
+            return;
+        }
+        let Some(ws) = &mut self.workspace else { return };
+        let (tracks, vias) = (routed.tracks.clone(), routed.vias.clone());
+        let done = ws.edit_board(|_, _, b| {
+            let b = b.as_mut().ok_or("no board")?;
+            b.tracks.extend(tracks);
+            b.vias.extend(vias);
+            Ok(())
+        });
+        if let Err(e) = done {
+            self.error = Some(e);
+            return;
+        }
+        self.pcb.note = Some(if routed.failed.is_empty() {
+            format!("Routed {} connection(s)", routed.done)
+        } else {
+            let nets: std::collections::BTreeSet<&str> =
+                routed.failed.iter().map(|f| f.0.as_str()).collect();
+            format!(
+                "Routed {}; {} left on the ratsnest (no way through for {}): move parts apart or route them by hand",
+                routed.done,
+                routed.failed.len(),
+                nets.into_iter().collect::<Vec<_>>().join(", ")
+            )
+        });
+    }
+
+    /// The nets the selection is on: a track's, a via's, a part's pads'.
+    fn pcb_selected_nets(&self) -> Option<std::collections::BTreeSet<String>> {
+        let layout = self.pcb.layout()?;
+        let nets: std::collections::BTreeSet<String> = match self.pcb.selected.as_ref()? {
+            Pick::Track(k) => {
+                layout.board.tracks.get(*k).map(|t| t.net.clone()).into_iter().collect()
+            }
+            Pick::Via(k) => layout.board.vias.get(*k).map(|v| v.net.clone()).into_iter().collect(),
+            Pick::Zone(k) => {
+                layout.board.zones.get(*k).map(|z| z.net.clone()).into_iter().collect()
+            }
+            Pick::Footprint(path) => {
+                let k = layout.part(path)?;
+                layout.pads_of(k).filter_map(|pad| pad.net.clone()).collect()
+            }
+        };
+        (!nets.is_empty()).then_some(nets)
+    }
+
+    /// Edits the board with tracks: tidy them, or take a net's (or all) off.
+    fn pcb_tracks(&mut self, action: &str) {
+        let Some(layout) = self.pcb.layout().cloned() else { return };
+        let nets = self.pcb_selected_nets();
+        let Some(ws) = &mut self.workspace else { return };
+        let mut note = String::new();
+        let done = ws.edit_board(|_, _, b| {
+            let b = b.as_mut().ok_or("no board")?;
+            match action {
+                "clean" => {
+                    let n = circuiter_pcb::edit::clean_up(b, &layout);
+                    note = if n == 0 {
+                        "The tracks are already tidy".into()
+                    } else {
+                        format!("Tidied {n} track segment(s)")
+                    };
+                }
+                "unroute-net" => {
+                    for n in nets.iter().flatten() {
+                        circuiter_pcb::edit::unroute(b, Some(n));
+                    }
+                    note = "Tracks taken off".into();
+                }
+                _ => {
+                    circuiter_pcb::edit::unroute(b, None);
+                    note = "Every track and via taken off".into();
+                }
+            }
+            Ok(())
+        });
+        match done {
+            Ok(()) => self.pcb.note = Some(note),
+            Err(e) => self.error = Some(e),
+        }
+        self.pcb.selected = None;
     }
 
     /// Makes the cell a board from its schematic, every part placed.
@@ -600,6 +917,8 @@ impl CircuiterApp {
         let has_board = self.pcb.analysis.as_ref().is_some_and(|a| a.layout.is_ok());
         let nets: Vec<String> =
             self.pcb.layout().map(|l| l.nets.iter().cloned().collect()).unwrap_or_default();
+        let copper: Vec<Layer> = self.pcb.layout().map(|l| l.board.copper()).unwrap_or_default();
+        let has_selection = self.pcb_selected_nets().is_some();
         egui::Frame::new().fill(p.panel).inner_margin(egui::Margin::symmetric(10, 4)).show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 let view = &mut self.pcb;
@@ -611,7 +930,7 @@ impl CircuiterApp {
                 let tool = |ui: &mut egui::Ui, glyph: &str, name: &str, tip: &str| {
                     style::icon_button(ui, glyph, tip, editable && has_board, current == name).clicked()
                 };
-                if tool(ui, icon::CURSOR, "Select", "Select and move  (Esc)\nR turn · F flip · L lock · Del delete") {
+                if tool(ui, icon::CURSOR, "Select", "Select and move  (Esc)\nDrag parts, tracks, corners and vias · R turn · F flip · L lock · Del delete") {
                     view.tool = PcbTool::Select;
                 }
                 if tool(ui, icon::PATH, "Route", "Route tracks  (X)\nClick a pad to start, click to add corners, click a pad of the same net to finish.\nV: via and change layer · /: corner style · Backspace: last leg · Esc: stop") {
@@ -624,11 +943,27 @@ impl CircuiterApp {
                     view.tool = PcbTool::Outline { points: Vec::new() };
                 }
                 ui.separator();
-                let mut layer = usize::from(view.layer == Layer::BCu);
-                if let Some(l) = style::segmented(ui, &[("F.Cu", true), ("B.Cu", true)], layer) {
-                    layer = l;
-                    view.layer = if layer == 0 { Layer::FCu } else { Layer::BCu };
+                if style::icon_button(ui, icon::STACK, "Layers panel: show, hide and pick layers", true, view.show_layers).clicked() {
+                    view.show_layers = !view.show_layers;
                 }
+                let (r, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), Sense::hover());
+                ui.painter().rect_filled(r, 2.0, layer_colour(view.layer));
+                egui::ComboBox::from_id_salt("active-layer")
+                    .selected_text(view.layer.name())
+                    .show_ui(ui, |ui| {
+                        for &l in &copper {
+                            if ui.selectable_label(view.layer == l, l.name()).clicked() {
+                                let routing = matches!(&view.tool, PcbTool::Route { points, .. } if !points.is_empty());
+                                if routing {
+                                    view.pending_layer = Some(l);
+                                } else {
+                                    view.layer = l;
+                                }
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text("The layer being worked on  (PgUp / PgDn)");
                 if matches!(view.tool, PcbTool::Zone { .. }) {
                     if view.zone_net.is_empty() || !nets.contains(&view.zone_net) {
                         view.zone_net = nets.iter().find(|n| n.eq_ignore_ascii_case("gnd") || *n == "0").or(nets.first()).cloned().unwrap_or_default();
@@ -645,14 +980,29 @@ impl CircuiterApp {
                     }
                 });
                 ui.separator();
-                let v = &mut view.visible;
-                ui.menu_button(format!("{}  Layers", icon::STACK), |ui| {
-                    ui.checkbox(&mut v.front, "Front copper (F.Cu)");
-                    ui.checkbox(&mut v.back, "Back copper (B.Cu)");
-                    ui.checkbox(&mut v.zones, "Copper pours");
-                    ui.checkbox(&mut v.silk, "Silkscreen");
-                    ui.checkbox(&mut v.ratsnest, "Ratsnest");
-                    ui.checkbox(&mut v.drc, "Design rule markers");
+                let can = editable && has_board;
+                ui.menu_button(format!("{}  Autoroute", icon::FLOW_ARROW), |ui| {
+                    if ui.add_enabled(can, egui::Button::new("Route All")).on_hover_text("Turn every ratsnest line into tracks: shortest first, at 45°, with vias where it must change layer").clicked() {
+                        action = Some("route-all");
+                        ui.close();
+                    }
+                    if ui.add_enabled(can && has_selection, egui::Button::new("Route the Selection's Nets")).on_hover_text("Select a part, track or via first").clicked() {
+                        action = Some("route-net");
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.add_enabled(can, egui::Button::new("Clean Up Tracks")).on_hover_text("Join segments in a line, take off stubs and duplicates").clicked() {
+                        action = Some("clean");
+                        ui.close();
+                    }
+                    if ui.add_enabled(can && has_selection, egui::Button::new("Unroute the Selection's Nets")).clicked() {
+                        action = Some("unroute-net");
+                        ui.close();
+                    }
+                    if ui.add_enabled(can, egui::Button::new("Unroute All")).clicked() {
+                        action = Some("unroute-all");
+                        ui.close();
+                    }
                 });
                 ui.separator();
                 if ui.add_enabled(editable && has_board, egui::Button::new(format!("{}  Update from Schematic", icon::ARROWS_CLOCKWISE)))
@@ -673,6 +1023,14 @@ impl CircuiterApp {
             });
         });
         match action {
+            Some("route-all") => self.pcb_autoroute(None),
+            Some("route-net") => {
+                let nets = self.pcb_selected_nets();
+                if nets.is_some() {
+                    self.pcb_autoroute(nets);
+                }
+            }
+            Some(a @ ("clean" | "unroute-net" | "unroute-all")) => self.pcb_tracks(a),
             Some("update") => self.pcb_update_from_schematic(),
             Some("fab") => self.pcb_export(),
             Some("3d") => {
@@ -795,14 +1153,36 @@ impl CircuiterApp {
                     let origin =
                         ui.input(|i| i.pointer.press_origin()).or(response.interact_pointer_pos());
                     if let Some(from) = origin.map(world) {
-                        let mut grabbed = None;
-                        if let Some(Pick::Footprint(path)) = pick(&layout, from, tolerance, layer) {
-                            if !layout.board.placed(&path).is_some_and(|f| f.locked) {
-                                grabbed = Some(path.clone());
+                        let picked = pick(&layout, from, tolerance, layer);
+                        let drag = match &picked {
+                            Some(Pick::Footprint(path)) => {
+                                (!layout.board.placed(path).is_some_and(|f| f.locked))
+                                    .then(|| Drag::Footprint(path.clone()))
                             }
-                            self.pcb.selected = Some(Pick::Footprint(path));
+                            Some(Pick::Track(k)) => {
+                                let t = &layout.board.tracks[*k];
+                                // Near an end that isn't on a pad: drag the corner.
+                                let grab = (t.width.mm()).max(tolerance * 2.0);
+                                let end = [p(t.a), p(t.b)]
+                                    .into_iter()
+                                    .find(|e| (e[0] - from[0]).hypot(e[1] - from[1]) < grab);
+                                let on_pad = |e: P| {
+                                    layout.pads.iter().any(|pd| {
+                                        (pd.center[0] - e[0]).hypot(pd.center[1] - e[1]) < 1e-6
+                                    })
+                                };
+                                match end {
+                                    Some(e) if !on_pad(e) => Some(Drag::Corner(t.layer, e)),
+                                    _ => Some(Drag::Segment(*k)),
+                                }
+                            }
+                            Some(Pick::Via(k)) => Some(Drag::Via(*k)),
+                            _ => None,
+                        };
+                        if picked.is_some() {
+                            self.pcb.selected = picked;
                         }
-                        self.pcb.drag = grabbed.map(|g| (g, from, from));
+                        self.pcb.drag = drag.map(|d| (d, from, from));
                     }
                 }
                 if let (Some(drag), Some(to)) =
@@ -810,22 +1190,17 @@ impl CircuiterApp {
                 {
                     drag.2 = to;
                 }
+                self.pcb.preview = self.pcb.drag.as_ref().map(|(d, from, to)| {
+                    apply_drag(&layout.board, &layout, d, *from, *to, self.pcb.grid)
+                });
                 if response.drag_stopped() {
-                    if let Some((path, from, to)) = self.pcb.drag.take() {
+                    self.pcb.preview = None;
+                    if let Some((d, from, to)) = self.pcb.drag.take() {
                         let grid = self.pcb.grid;
                         if (to[0] - from[0]).hypot(to[1] - from[1]) > 1e-6 {
+                            let layout = layout.clone();
                             edit = Some(Box::new(move |b: &mut Board| {
-                                let f = b
-                                    .footprints
-                                    .iter_mut()
-                                    .find(|f| f.path == path)
-                                    .ok_or("gone")?;
-                                let at = p(f.at);
-                                let moved = [at[0] + to[0] - from[0], at[1] + to[1] - from[1]];
-                                f.at = point([
-                                    (moved[0] / grid).round() * grid,
-                                    (moved[1] / grid).round() * grid,
-                                ]);
+                                *b = apply_drag(b, &layout, &d, from, to, grid);
                                 Ok(())
                             }));
                         }
@@ -842,16 +1217,13 @@ impl CircuiterApp {
                             (toggle(egui::Key::R), toggle(egui::Key::F), toggle(egui::Key::L));
                         let del = keys(egui::Key::Delete);
                         if r || f || l || del {
+                            let layout = layout.clone();
                             edit = Some(Box::new(move |b: &mut Board| {
                                 if del {
                                     b.footprints.retain(|x| x.path != path);
                                     return Ok(());
                                 }
-                                let fp = b
-                                    .footprints
-                                    .iter_mut()
-                                    .find(|x| x.path == path)
-                                    .ok_or("gone")?;
+                                let mut fp = b.placed(&path).ok_or("gone")?.clone();
                                 if l {
                                     fp.locked = !fp.locked;
                                 } else if fp.locked {
@@ -864,6 +1236,8 @@ impl CircuiterApp {
                                 if f {
                                     fp.back = !fp.back;
                                 }
+                                // Its tracks come with it.
+                                circuiter_pcb::edit::move_footprint(b, &layout, &path, fp);
                                 Ok(())
                             }));
                             if del {
@@ -903,6 +1277,19 @@ impl CircuiterApp {
                 if keys(egui::Key::Slash) {
                     self.pcb.diagonal_first = !self.pcb.diagonal_first;
                 }
+                // Another layer picked mid-route: a via where the track has got to.
+                if let (Some(next), Some(&head)) = (self.pcb.pending_layer.take(), points.last()) {
+                    if next != layer {
+                        let (diameter, drill) = layout.board.rules.via_for(&net);
+                        let via = Via { at: point(head), diameter, drill, net: net.clone() };
+                        self.pcb.layer = next;
+                        self.pcb.note = Some(format!("Via: routing {net} on {}", next.name()));
+                        edit = Some(Box::new(move |b: &mut Board| {
+                            b.vias.push(via);
+                            Ok(())
+                        }));
+                    }
+                }
                 if keys(egui::Key::Escape) {
                     self.pcb.tool = if points.is_empty() {
                         PcbTool::Select
@@ -934,7 +1321,10 @@ impl CircuiterApp {
                 } else if let Some(to) = at {
                     let from = *points.last().expect("started");
                     let legs = posture(from, to, self.pcb.diagonal_first);
-                    let via = keys(egui::Key::V);
+                    // V goes to the other side.
+                    let target = keys(egui::Key::V)
+                        .then(|| if layer == Layer::FCu { Layer::BCu } else { Layer::FCu });
+                    let via = target.is_some();
                     let back = keys(egui::Key::Backspace);
                     if back {
                         // Take off the last leg laid.
@@ -987,8 +1377,7 @@ impl CircuiterApp {
                         });
                         let mut pts = points.clone();
                         pts.extend(legs.iter().skip(1));
-                        if via {
-                            let other = if layer == Layer::FCu { Layer::BCu } else { Layer::FCu };
+                        if let Some(other) = target {
                             self.pcb.layer = other;
                             self.pcb.note = Some(format!("Via: routing {net} on {}", other.name()));
                         }
@@ -1054,12 +1443,29 @@ impl CircuiterApp {
         {
             self.pcb.tool = PcbTool::Route { net: String::new(), width: 0.0, points: Vec::new() };
         }
-        // Page Up / Down change layer, as in KiCad.
-        if keys(egui::Key::PageUp) {
-            self.pcb.layer = Layer::FCu;
+        // Page Up / Down step through the copper layers, as in KiCad; while routing,
+        // with a via.
+        let copper = layout.board.copper();
+        let step = if keys(egui::Key::PageUp) {
+            -1
+        } else if keys(egui::Key::PageDown) {
+            1
+        } else {
+            0
+        };
+        if step != 0 {
+            let k = copper.iter().position(|l| *l == self.pcb.layer).unwrap_or(0) as i32;
+            let next = copper[(k + step).clamp(0, copper.len() as i32 - 1) as usize];
+            let routing =
+                matches!(&self.pcb.tool, PcbTool::Route { points, .. } if !points.is_empty());
+            if routing {
+                self.pcb.pending_layer = Some(next);
+            } else {
+                self.pcb.layer = next;
+            }
         }
-        if keys(egui::Key::PageDown) {
-            self.pcb.layer = Layer::BCu;
+        if !copper.contains(&self.pcb.layer) {
+            self.pcb.layer = Layer::FCu;
         }
         if let Some(f) = edit {
             let Some(ws) = &mut self.workspace else { return };
@@ -1101,31 +1507,42 @@ impl CircuiterApp {
                 y += g;
             }
         }
-        let dragged = view
-            .drag
-            .as_ref()
-            .map(|(path, from, to)| (layout.part(path), [to[0] - from[0], to[1] - from[1]]));
-        let shift = |part: usize, q: P| match dragged {
-            Some((Some(k), off)) if k == part => [q[0] + off[0], q[1] + off[1]],
-            _ => q,
-        };
-        let net_hi = match &view.selected {
-            Some(Pick::Track(k)) => board.tracks.get(*k).map(|t| t.net.clone()),
-            Some(Pick::Via(k)) => board.vias.get(*k).map(|v| v.net.clone()),
+        // A part being dragged: its pads and markings shown where it'll land.
+        let dragged = match (&view.drag, &view.preview) {
+            (Some((Drag::Footprint(path), _, _)), Some(preview)) => {
+                layout.part(path).and_then(|k| {
+                    let (old, new) = (board.placed(path)?, preview.placed(path)?);
+                    Some((k, Place::of(old), Place::of(new)))
+                })
+            }
             _ => None,
         };
-        let mut layers = vec![Layer::BCu, Layer::FCu];
-        if view.layer == Layer::BCu {
-            layers.reverse();
+        let shift = |part: usize, q: P| match dragged {
+            Some((k, old, new)) if k == part => new.apply(old.unapply(q)),
+            _ => q,
+        };
+        // Tracks and vias as they are, or as the drag leaves them.
+        let routed = view.preview.as_ref().unwrap_or(board);
+        let net_hi = match &view.selected {
+            Some(Pick::Track(k)) => routed.tracks.get(*k).map(|t| t.net.clone()),
+            Some(Pick::Via(k)) => routed.vias.get(*k).map(|v| v.net.clone()),
+            _ => None,
+        };
+        // Bottom to top, the layer being worked on last.
+        let mut layers = board.copper();
+        layers.reverse();
+        if let Some(k) = layers.iter().position(|l| *l == view.layer) {
+            let active = layers.remove(k);
+            layers.push(active);
         }
+        let dim = if view.visible.high_contrast { 0.18 } else { 0.45 };
         for layer in layers {
-            let shown = if layer == Layer::FCu { view.visible.front } else { view.visible.back };
-            if !shown {
+            if !view.visible.shows(layer) {
                 continue;
             }
             let active = layer == view.layer;
             let base = layer_colour(layer);
-            let colour = if active { base } else { base.gamma_multiply(0.45) };
+            let colour = if active { base } else { base.gamma_multiply(dim) };
             if view.visible.zones {
                 for (l, pts, idx) in &analysis.fills {
                     if *l == layer {
@@ -1133,7 +1550,7 @@ impl CircuiterApp {
                     }
                 }
             }
-            for (k, t) in board.tracks.iter().enumerate().filter(|(_, t)| t.layer == layer) {
+            for (k, t) in routed.tracks.iter().enumerate().filter(|(_, t)| t.layer == layer) {
                 let hi = view.selected == Some(Pick::Track(k))
                     || net_hi.as_deref() == Some(t.net.as_str());
                 d.stroke(
@@ -1151,7 +1568,7 @@ impl CircuiterApp {
                 d.convex(&c, if hi { colour.gamma_multiply(1.4).to_opaque() } else { colour });
             }
         }
-        for (k, v) in board.vias.iter().enumerate() {
+        for (k, v) in routed.vias.iter().enumerate() {
             d.disc(
                 p(v.at),
                 v.diameter.mm() / 2.0,
@@ -1164,30 +1581,31 @@ impl CircuiterApp {
                 d.disc(shift(pad.part, pad.center), dr / 2.0, HOLE);
             }
         }
-        // Zone outlines, hatched at their edge as KiCad draws them.
+        // Zone outlines.
         for (k, z) in board.zones.iter().enumerate() {
+            if !view.visible.shows(z.layer) {
+                continue;
+            }
             let pts: Vec<P> = z.outline.iter().map(|q| p(*q)).collect();
             let c =
                 if view.selected == Some(Pick::Zone(k)) { SELECTED } else { layer_colour(z.layer) };
             d.outline(&pts, Stroke::new(1.0, c));
         }
-        // Silkscreen.
-        if view.visible.silk {
-            for (k, part) in layout.parts.iter().enumerate() {
-                if part.place.is_none() {
-                    continue;
-                }
-                for g in layout.graphics(k) {
-                    paint_graphic(&d, &g, &|q| shift(k, q));
-                }
+        // Silkscreen, courtyards and fabrication drawings, as shown.
+        for (k, part) in layout.parts.iter().enumerate() {
+            if part.place.is_none() {
+                continue;
             }
-            for g in &board.graphics {
-                paint_graphic(&d, g, &|q| q);
+            for g in layout.graphics(k) {
+                paint_graphic(&d, &g, &|q| shift(k, q), &view.visible);
             }
+        }
+        for g in &board.graphics {
+            paint_graphic(&d, g, &|q| q, &view.visible);
         }
         // The edge.
         let edge: Vec<P> = board.outline.iter().map(|q| p(*q)).collect();
-        if edge.len() >= 2 {
+        if edge.len() >= 2 && view.visible.shows(Layer::EdgeCuts) {
             d.outline(&edge, Stroke::new(1.5, EDGE));
         }
         // The selected part's box.
@@ -1308,13 +1726,26 @@ impl CircuiterApp {
     }
 }
 
-/// A silkscreen drawing.
-fn paint_graphic(d: &Draw<'_>, g: &circuiter_model::board::Graphic, shift: &dyn Fn(P) -> P) {
+/// A drawing on a silkscreen, courtyard or fabrication layer, if that layer shows.
+fn paint_graphic(
+    d: &Draw<'_>,
+    g: &circuiter_model::board::Graphic,
+    shift: &dyn Fn(P) -> P,
+    visible: &Visible,
+) {
     use circuiter_model::board::Graphic as G;
-    let colour = |l: Layer| match l {
-        Layer::FSilk => Some(SILK_FRONT),
-        Layer::BSilk => Some(SILK_BACK),
-        _ => None,
+    let colour = |l: Layer| {
+        let drawn = matches!(
+            l,
+            Layer::FSilk
+                | Layer::BSilk
+                | Layer::FCrtYd
+                | Layer::BCrtYd
+                | Layer::FFab
+                | Layer::BFab
+                | Layer::EdgeCuts
+        );
+        (drawn && visible.shows(l)).then(|| layer_colour(l))
     };
     match g {
         G::Line { layer, a, b, width } => {

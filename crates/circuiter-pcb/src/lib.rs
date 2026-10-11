@@ -5,6 +5,7 @@
 pub mod board3d;
 pub mod connect;
 pub mod drc;
+pub mod edit;
 pub mod enclosure;
 pub mod fab;
 pub mod font;
@@ -12,6 +13,7 @@ pub mod footprints;
 pub mod geometry;
 pub mod kicad;
 pub mod layout;
+pub mod route;
 pub mod svg;
 pub mod sync;
 pub mod zones;

@@ -409,6 +409,11 @@ impl CircuiterApp {
     }
 
     #[cfg(test)]
+    pub fn pcb_view_mut(&mut self) -> &mut pcb::PcbView {
+        &mut self.pcb
+    }
+
+    #[cfg(test)]
     pub fn canvas_view(&self) -> Option<egui::Rect> {
         self.canvas.view
     }

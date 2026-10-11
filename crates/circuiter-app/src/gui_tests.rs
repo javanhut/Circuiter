@@ -760,3 +760,91 @@ fn a_board_is_made_routed_and_rearranged() {
     let undone = board(&h).placed("U1").unwrap().clone();
     assert!(!undone.back && undone.rotation == 90.0, "undo takes back the flip only");
 }
+
+/// Autoroute from the toolbar, then rearrange: drag a routed segment and it slides
+/// with its neighbours following, still connected; pick a layer in the Layers panel.
+#[test]
+fn boards_autoroute_and_tracks_rearrange() {
+    let tmp = example_copy("analog_lab");
+    let args = Args {
+        project: Some(tmp.path().to_owned()),
+        cell: Some("blinker".into()),
+        theme: None,
+        view: Some("pcb".into()),
+        select: None,
+        simulate: None,
+        heat: false,
+        program: None,
+        live: false,
+        results: None,
+        screenshot: None,
+    };
+    let mut h = Harness::builder()
+        .with_size(Vec2::new(1600.0, 1000.0))
+        .build_eframe(move |cc| CircuiterApp::new(cc, args));
+    h.run_steps(4);
+    let checked = |h: &Harness<'_, CircuiterApp>| {
+        h.state()
+            .pcb_view()
+            .analysis
+            .as_ref()
+            .and_then(|a| a.checked.as_ref())
+            .map(|c| (c.connectivity.unrouted(), c.errors()))
+            .expect("checked")
+    };
+    // Take the example's tracks off, then route it again.
+    h.get_by_label(&format!("{}  Autoroute", crate::style::icon::FLOW_ARROW)).click();
+    h.run_steps(2);
+    h.get_by_label("Unroute All").click();
+    h.run_steps(4);
+    assert!(board(&h).tracks.is_empty());
+    let (before, _) = checked(&h);
+    assert!(before > 0, "connections to route");
+    h.get_by_label(&format!("{}  Autoroute", crate::style::icon::FLOW_ARROW)).click();
+    h.run_steps(2);
+    h.get_by_label("Route All").click();
+    h.run_steps(4);
+    let (unrouted, errors) = checked(&h);
+    assert_eq!((unrouted, errors), (0, 0), "{:?}", h.state().pcb_view().note);
+
+    // A long straight routed segment: drag it square to itself.
+    let b = board(&h);
+    let k = b
+        .tracks
+        .iter()
+        .position(|t| {
+            let (a, c) = ([t.a.x.mm(), t.a.y.mm()], [t.b.x.mm(), t.b.y.mm()]);
+            let long = (a[0] - c[0]).hypot(a[1] - c[1]) > 2.0;
+            ((a[0] - c[0]).abs() < 1e-6 || (a[1] - c[1]).abs() < 1e-6) && long
+        })
+        .expect("a straight segment");
+    let t = b.tracks[k].clone();
+    let vertical = (t.a.x.mm() - t.b.x.mm()).abs() < 1e-6;
+    let mid = [(t.a.x.mm() + t.b.x.mm()) / 2.0, (t.a.y.mm() + t.b.y.mm()) / 2.0];
+    let shift = if vertical { [1.27, 0.0] } else { [0.0, 1.27] };
+    let layer = t.layer;
+    // Work on its layer, so it's picked before anything on the other.
+    h.state_mut().pcb_view_mut().layer = layer;
+    h.run_steps(2);
+    let (from, to) = (on_board(&h, mid), on_board(&h, [mid[0] + shift[0], mid[1] + shift[1]]));
+    drag(&mut h, from, to);
+    let after = board(&h);
+    let moved = after.tracks.iter().any(|t| {
+        if vertical {
+            (t.a.x.mm() - mid[0] - 1.27).abs() < 0.01 && (t.b.x.mm() - mid[0] - 1.27).abs() < 0.01
+        } else {
+            (t.a.y.mm() - mid[1] - 1.27).abs() < 0.01 && (t.b.y.mm() - mid[1] - 1.27).abs() < 0.01
+        }
+    });
+    assert!(moved, "the segment moved across");
+    let (unrouted, _) = checked(&h);
+    assert_eq!(unrouted, 0, "still connected");
+
+    // The Layers panel: click B.Cu to work on it.
+    h.get_by_label("B.Cu  (back)").click();
+    h.run_steps(2);
+    assert_eq!(h.state().pcb_view().layer, circuiter_model::board::Layer::BCu);
+    h.get_by_label("F.Cu  (front)").click();
+    h.run_steps(2);
+    assert_eq!(h.state().pcb_view().layer, circuiter_model::board::Layer::FCu);
+}

@@ -614,3 +614,134 @@ fn a_case_is_made_to_fit_the_board() {
     let vented = enclosure::thermal(&made, &Enclosure { vents: true, ..e.clone() }).0;
     assert!(vented < r);
 }
+
+/// The autorouter routes what's unrouted without breaking a rule.
+#[test]
+fn the_autorouter_routes_cleanly() {
+    use circuiter_pcb::route::{Options, autoroute};
+    let (design, top) = design();
+    let mut b = board();
+    let layout = Layout::new(&design, &top, &b).unwrap();
+    let routed = autoroute(&layout, &Options { pitch: 0.2, ..Options::default() });
+    assert!(routed.failed.is_empty(), "{:?}", routed.failed);
+    assert_eq!(routed.done, 3);
+    b.tracks.extend(routed.tracks.clone());
+    b.vias.extend(routed.vias.clone());
+    let checked = drc::check(&Layout::new(&design, &top, &b).unwrap());
+    assert!(checked.violations.is_empty(), "{:#?}", checked.violations);
+    // Every track is at 0°, 45° or 90° except the short joins onto pads.
+    for t in &routed.tracks {
+        let (dx, dy) = ((t.b.x.mm() - t.a.x.mm()).abs(), (t.b.y.mm() - t.a.y.mm()).abs());
+        let square = dx < 1e-6 || dy < 1e-6 || (dx - dy).abs() < 1e-6;
+        assert!(square || dx.hypot(dy) < 0.3, "{t:?}");
+    }
+}
+
+/// The analog lab's circuits all route on boards of their own.
+#[test]
+fn example_circuits_route() {
+    use circuiter_pcb::route::{Options, autoroute};
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/analog_lab");
+    let project = circuiter_model::Project::load(&dir).unwrap();
+    let design = Design::for_project(&project, circuiter_stdlib::library()).unwrap();
+    for cell in ["blinker", "amplifier", "light_switch"] {
+        let top = CellId::new("analog_lab", cell);
+        let mut b = circuiter_pcb::sync::new_board(&design, &top).unwrap();
+        let layout = Layout::new(&design, &top, &b).unwrap();
+        let routed = autoroute(&layout, &Options { pitch: 0.25, ..Options::default() });
+        b.tracks.extend(routed.tracks);
+        b.vias.extend(routed.vias);
+        let checked = drc::check(&Layout::new(&design, &top, &b).unwrap());
+        let errors: Vec<_> = checked
+            .violations
+            .iter()
+            .filter(|v| v.severity() == drc::Severity::Error && v.rule != Rule::Unconnected)
+            .collect();
+        assert!(errors.is_empty(), "{cell}: {errors:#?}");
+        assert_eq!(checked.connectivity.unrouted(), routed.failed.len(), "{cell}");
+        assert!(routed.failed.is_empty(), "{cell}: {:?}", routed.failed);
+    }
+}
+
+#[test]
+#[ignore]
+fn plot_routed_blinker() {
+    use circuiter_pcb::route::{Options, autoroute};
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/analog_lab");
+    let project = circuiter_model::Project::load(&dir).unwrap();
+    let design = Design::for_project(&project, circuiter_stdlib::library()).unwrap();
+    let cell = std::env::var("CELL").unwrap_or("blinker".into());
+    let top = CellId::new("analog_lab", &cell);
+    let mut b = circuiter_pcb::sync::new_board(&design, &top).unwrap();
+    let layout = Layout::new(&design, &top, &b).unwrap();
+    let t = std::time::Instant::now();
+    let routed = autoroute(&layout, &Options::default());
+    eprintln!("{:?} done {} failed {}", t.elapsed(), routed.done, routed.failed.len());
+    b.tracks.extend(routed.tracks);
+    b.vias.extend(routed.vias);
+    let layout = Layout::new(&design, &top, &b).unwrap();
+    let checked = drc::check(&layout);
+    std::fs::write(
+        std::env::var("OUT").unwrap(),
+        circuiter_pcb::svg::plot(&layout, &checked.fills, Some(&checked.connectivity)),
+    )
+    .unwrap();
+}
+
+/// Tracks stay on a part's pads when it moves or turns, and clean-up takes off
+/// leftovers without unrouting anything.
+#[test]
+fn tracks_follow_parts_and_tidy_up() {
+    use circuiter_pcb::edit;
+    use circuiter_pcb::route::{Options, autoroute};
+    let (design, top) = design();
+    let mut b = board();
+    let layout = Layout::new(&design, &top, &b).unwrap();
+    let routed = autoroute(&layout, &Options { pitch: 0.2, ..Options::default() });
+    b.tracks.extend(routed.tracks);
+    b.vias.extend(routed.vias);
+    let layout = Layout::new(&design, &top, &b).unwrap();
+    let mut r2 = b.placed("R2").unwrap().clone();
+    r2.at = pt(22.0, 24.0);
+    r2.rotation = 180.0;
+    edit::move_footprint(&mut b, &layout, "R2", r2);
+    let checked = drc::check(&Layout::new(&design, &top, &b).unwrap());
+    assert_eq!(checked.connectivity.unrouted(), 0, "still connected: {:#?}", checked.violations);
+
+    // A duplicate, a stub and a track split in two are tidied.
+    let layout = Layout::new(&design, &top, &b).unwrap();
+    let n = b.tracks.len();
+    b.tracks.push(b.tracks[0].clone());
+    b.tracks.push(track(&layout, "mid", [30.0, 28.0], [35.0, 28.0], Layer::FCu));
+    let removed = edit::clean_up(&mut b, &layout);
+    assert!(removed >= 2, "{removed}");
+    assert!(b.tracks.len() <= n);
+    let checked = drc::check(&Layout::new(&design, &top, &b).unwrap());
+    assert_eq!(checked.connectivity.unrouted(), 0);
+}
+
+/// A four-layer board routes on its inner layers too, and each gets a Gerber.
+#[test]
+fn inner_layers_route_and_plot() {
+    use circuiter_pcb::route::{Options, autoroute};
+    let (design, top) = design();
+    let mut b = board();
+    b.copper_layers = 4;
+    let layout = Layout::new(&design, &top, &b).unwrap();
+    let routed = autoroute(
+        &layout,
+        &Options { pitch: 0.2, via_cost: 2.0, against: 3.0, ..Options::default() },
+    );
+    assert!(routed.failed.is_empty());
+    b.tracks.extend(routed.tracks.clone());
+    b.vias.extend(routed.vias.clone());
+    let layout = Layout::new(&design, &top, &b).unwrap();
+    let checked = drc::check(&layout);
+    assert!(checked.violations.is_empty(), "{:#?}", checked.violations);
+    let files = circuiter_pcb::fab::outputs(&layout, &checked.fills, "four");
+    for name in ["four-F_Cu.gbr", "four-In1_Cu.gbr", "four-In2_Cu.gbr", "four-B_Cu.gbr"] {
+        assert!(files.iter().any(|f| f.name == name), "{name}");
+    }
+    let inner = files.iter().find(|f| f.name == "four-In1_Cu.gbr").unwrap();
+    assert!(inner.contents.contains("%TF.FileFunction,Copper,L2,Inr*%"));
+}

@@ -54,7 +54,7 @@ alone), an electronics bench to run live (a supply to turn, switches, a button, 
 a counter, multimeters and an oscilloscope), and an analog lab of everyday circuits: an
 op-amp amplifier, a 555 blinker, a mains power supply with a 7805, a light switch, a
 motor driver and a relay driver. The blinker is laid out on a board (PCB view) with a
-ground pour and the easy connections routed, in a vented case (3D view).
+ground pour and every connection autorouted, in a vented case (3D view).
 
 ```sh
 cargo run --release -p circuiter-app -- examples/analog_lab --cell blinker --view pcb
@@ -187,9 +187,12 @@ active one on top.
 
 | Action | How |
 |---|---|
-| Move a part | Drag it (snaps to the grid). `R` turns it 90°, `F` flips it to the back, `L` locks it, `Delete` takes it off |
-| Route | `X` (or the route tool), click a pad, then click to lay each corner: tracks run at 0°, 45° and 90° (`/` swaps which leg comes first), at the net's width, and a track that would come too close to other copper shows red with its clearance outline. Click a pad, track or via of the same net to finish. `V` drops a via and carries on on the other layer; `Backspace` takes back the last leg; `Esc` stops |
-| Layers | F.Cu / B.Cu in the toolbar, or `Page Up` / `Page Down`; Layers shows or hides each copper layer, pours, silkscreen, ratsnest and rule markers |
+| Move a part | Drag it (snaps to the grid); the tracks on its pads come with it. `R` turns it 90°, `F` flips it to the back (tracks follow both), `L` locks it, `Delete` takes it off |
+| Rearrange tracks | Drag a track: it slides square to itself and the tracks either side stretch to meet it at their own angles (a new leg joins it to a pad). Drag a corner where tracks meet, or a via, and the tracks there follow. `Delete` removes the piece selected |
+| Autoroute | Autoroute → Route All turns every ratsnest line into tracks: shortest first, at 0°, 45° and 90°, keeping each net's clearance, across every copper layer with vias where it must change side (the front prefers to run across, the back up and down), each path pulled as straight as it can go. Route the Selection's Nets does only the nets of the selected part, track or via. Whatever can't get through stays on the ratsnest, named |
+| Tidy up | Autoroute → Clean Up Tracks joins segments in a line and takes off stubs and duplicates; Unroute takes a net's tracks off, or all of them |
+| Route | `X` (or the route tool), click a pad, then click to lay each corner: tracks run at 0°, 45° and 90° (`/` swaps which leg comes first), at the net's width, and a track that would come too close to other copper shows red with its clearance outline. Click a pad, track or via of the same net to finish. `V` drops a via and carries on on the other side; picking another layer (panel, toolbar, `Page Up`/`Page Down`) mid-route drops a via and carries on on that one, inner layers included; `Backspace` takes back the last leg; `Esc` stops |
+| Layers | The Layers panel beside the board lists every layer in its colour: click a copper layer to work on it, the eye to show or hide any layer (silkscreen, courtyards, fab drawings, the edge), and choose 2, 4 or 6 copper layers. Pours, ratsnest and rule markers switch on and off there too, and Dim other layers fades everything but the layer in hand. `Page Up` / `Page Down` step through the copper layers |
 | Copper pour | The zone tool, pick its net (GND by default), click its corners, double-click to finish. It fills to the board's edge, keeps the clearance from other nets, joins its own pads through thermal spokes and drops islands; select it to set priority, pad connection, relief gap and spoke width |
 | Board shape | Width and height in Properties, the outline tool to draw any shape, or Import Outline… from a DXF or SVG drawing |
 | Rules | Properties → Design rules: clearance, track width, via size, the board house's minimums, edge clearance, hole spacing |
