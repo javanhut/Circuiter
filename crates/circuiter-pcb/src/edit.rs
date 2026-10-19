@@ -622,6 +622,198 @@ pub fn unroute(board: &mut Board, net: Option<&str>) {
     board.vias.retain(|v| net.is_some_and(|n| v.net != n));
 }
 
+/// How far a track of `net`, `width` wide, along `path` on `layer` is from breaking the
+/// clearance to other nets' pads, tracks and vias: negative when it does.
+pub fn margin(layout: &Layout, net: &str, path: &[P], width: f64, layer: Layer) -> f64 {
+    use crate::geometry::{self, segment_distance};
+    let rules = &layout.board.rules;
+    let need = |other: &str| rules.clearance_for(net).mm().max(rules.clearance_for(other).mm());
+    let mut worst = f64::INFINITY;
+    for seg in path.windows(2) {
+        let (a, b) = (seg[0], seg[1]);
+        let lo = [a[0].min(b[0]) - 5.0, a[1].min(b[1]) - 5.0];
+        let hi = [a[0].max(b[0]) + 5.0, a[1].max(b[1]) + 5.0];
+        let close = |c: P| c[0] >= lo[0] && c[0] <= hi[0] && c[1] >= lo[1] && c[1] <= hi[1];
+        for pad in layout.pads.iter().filter(|pd| {
+            pd.layers.contains(&layer) && pd.net.as_deref() != Some(net) && close(pd.center)
+        }) {
+            let c = geometry::pad(pad, 0.0);
+            let d = (0..c.len())
+                .map(|k| segment_distance(a, b, c[k], c[(k + 1) % c.len()]))
+                .fold(f64::INFINITY, f64::min);
+            let d = if inside(&c, a) || inside(&c, b) { 0.0 } else { d };
+            worst = worst.min(d - width / 2.0 - need(pad.net.as_deref().unwrap_or("")));
+        }
+        for t in layout.board.tracks.iter().filter(|t| t.layer == layer && t.net != net) {
+            let d = segment_distance(a, b, p(t.a), p(t.b)) - width / 2.0 - t.width.mm() / 2.0;
+            worst = worst.min(d - need(&t.net));
+        }
+        for v in layout.board.vias.iter().filter(|v| v.net != net) {
+            let d = segment_distance(a, b, p(v.at), p(v.at)) - width / 2.0 - v.diameter.mm() / 2.0;
+            worst = worst.min(d - need(&v.net));
+        }
+    }
+    worst
+}
+
+/// Whether `q` is inside the closed outline `poly`.
+fn inside(poly: &[P], q: P) -> bool {
+    let mut odd = false;
+    for i in 0..poly.len() {
+        let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
+        if (a[1] > q[1]) != (b[1] > q[1])
+            && q[0] < a[0] + (q[1] - a[1]) * (b[0] - a[0]) / (b[1] - a[1])
+        {
+            odd = !odd;
+        }
+    }
+    odd
+}
+
+/// As [`drag_segment`], except that an end joined to nothing (no pad, via or other
+/// track) simply moves, rather than being left joined by a new leg.
+fn push_segment(board: &mut Board, layout: &Layout, k: usize, delta: P) {
+    let count = board.tracks.len();
+    drag_segment(board, k, delta);
+    let layer = board.tracks[k].layer;
+    let joined = |b: &Board, at: P, leg: usize| {
+        layout
+            .pads
+            .iter()
+            .any(|pd| pd.layers.contains(&layer) && inside(&crate::geometry::pad(pd, 0.0), at))
+            || b.vias.iter().any(|v| near(p(v.at), at))
+            || b.tracks.iter().enumerate().any(|(j, t)| {
+                j != k && j != leg && t.layer == layer && (near(p(t.a), at) || near(p(t.b), at))
+            })
+    };
+    for leg in (count..board.tracks.len()).rev() {
+        if !joined(board, p(board.tracks[leg].a), leg) {
+            board.tracks.remove(leg);
+        }
+    }
+}
+
+/// Rounds of shoving: a track pushed may push the next, so many deep.
+const SHOVE_ROUNDS: usize = 12;
+
+/// Push and shove, as pcbnew's router does: other nets' tracks on `layer` in the way of
+/// a new track of `net` along `path` are pushed aside, square to themselves, just far
+/// enough to keep their clearance, their neighbours stretching to follow (as
+/// [`drag_segment`] moves them); a track pushed pushes those it then runs into. The
+/// board with the tracks moved, or `None` when they can't make room: the new track
+/// crosses one, something that can't move (a pad, a via, the edge) is in the way, or
+/// the pushing doesn't settle.
+pub fn shove(layout: &Layout, net: &str, path: &[P], width: f64, layer: Layer) -> Option<Board> {
+    // ponytail: whole segments move, not just the stretch beside the obstacle; a bump
+    // of the part in the way (pcbnew's) would disturb less on long tracks.
+    let rules = &layout.board.rules;
+    let mut b = layout.board.clone();
+    let mut pushers: Vec<(P, P, f64, String)> =
+        path.windows(2).map(|w| (w[0], w[1], width, net.to_owned())).collect();
+    let mut moved = std::collections::BTreeSet::new();
+    for _ in 0..SHOVE_ROUNDS {
+        let before = b.tracks.clone();
+        for (pa, pb, pw, pnet) in &pushers {
+            for k in 0..b.tracks.len() {
+                let t = &b.tracks[k];
+                // Pushed once, a track stays put: what it pushes can't push it back.
+                if t.layer != layer || t.net == *pnet || t.net == net || moved.contains(&k) {
+                    continue;
+                }
+                let need = rules.clearance_for(pnet).mm().max(rules.clearance_for(&t.net).mm())
+                    + pw / 2.0
+                    + t.width.mm() / 2.0;
+                let (ta, tb) = (p(t.a), p(t.b));
+                if crate::geometry::segment_distance(*pa, *pb, ta, tb) >= need - EPS {
+                    continue;
+                }
+                let len = (tb[0] - ta[0]).hypot(tb[1] - ta[1]);
+                if len < EPS {
+                    continue;
+                }
+                let (u, n) = (
+                    [(tb[0] - ta[0]) / len, (tb[1] - ta[1]) / len],
+                    [-(tb[1] - ta[1]) / len, (tb[0] - ta[0]) / len],
+                );
+                // The pusher where it runs beside the track (within `need` of its ends),
+                // as offsets square to the track.
+                let along = |q: P| (q[0] - ta[0]) * u[0] + (q[1] - ta[1]) * u[1];
+                let across = |q: P| (q[0] - ta[0]) * n[0] + (q[1] - ta[1]) * n[1];
+                let (s0, s1) = (along(*pa), along(*pb));
+                let (lo, hi) = (-need, len + need);
+                let clip = |s: f64| {
+                    let f = if (s1 - s0).abs() < EPS { 0.0 } else { (s - s0) / (s1 - s0) };
+                    [pa[0] + (pb[0] - pa[0]) * f, pa[1] + (pb[1] - pa[1]) * f]
+                };
+                let (from, to) = (s0.min(s1).max(lo), s0.max(s1).min(hi));
+                if from > to {
+                    continue;
+                }
+                let ends = [clip(from), clip(to)];
+                let offs = ends.map(across);
+                // Crossing it: no side to push it to.
+                if offs[0].abs() > EPS
+                    && offs[1].abs() > EPS
+                    && offs[0].signum() != offs[1].signum()
+                {
+                    return None;
+                }
+                let side = if offs[0] + offs[1] >= 0.0 { 1.0 } else { -1.0 };
+                let room = offs.iter().map(|o| o * side).fold(f64::INFINITY, f64::min);
+                let shift = -side * (need - room + 1e-4);
+                push_segment(&mut b, layout, k, [n[0] * shift, n[1] * shift]);
+            }
+        }
+        // Whatever moved pushes next.
+        let now: Vec<usize> =
+            (0..b.tracks.len()).filter(|k| before.get(*k) != Some(&b.tracks[*k])).collect();
+        moved.extend(now.iter().copied());
+        pushers = now
+            .iter()
+            .map(|&k| {
+                let t = &b.tracks[k];
+                (p(t.a), p(t.b), t.width.mm(), t.net.clone())
+            })
+            .collect();
+        if pushers.is_empty() {
+            break;
+        }
+    }
+    if !pushers.is_empty() {
+        return None;
+    }
+    // What was pushed must still keep clear of everything, and on the board.
+    let mut after = layout.clone();
+    after.board = b;
+    if margin(&after, net, path, width, layer) < -1e-6 {
+        return None;
+    }
+    let shape = crate::zones::board_shape(&after);
+    let edges: Vec<(P, P)> = shape
+        .iter()
+        .flatten()
+        .flat_map(|r| (0..r.len()).map(move |k| (r[k], r[(k + 1) % r.len()])))
+        .collect();
+    let on_board =
+        |q: P| shape.iter().any(|s| inside(&s[0], q) && !s[1..].iter().any(|h| inside(h, q)));
+    for &k in &moved {
+        let t = &after.board.tracks[k];
+        let seg = [p(t.a), p(t.b)];
+        let w = t.width.mm();
+        if margin(&after, &t.net, &seg, w, t.layer) < -1e-6 {
+            return None;
+        }
+        let to_edge = edges
+            .iter()
+            .map(|&(a, b)| crate::geometry::segment_distance(seg[0], seg[1], a, b))
+            .fold(f64::INFINITY, f64::min);
+        if !seg.iter().all(|q| on_board(*q)) || to_edge < rules.edge_clearance.mm() + w / 2.0 {
+            return None;
+        }
+    }
+    Some(after.board)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

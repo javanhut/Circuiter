@@ -251,6 +251,8 @@ impl Default for Visible {
 /// What the interactive router does about obstacles, as Altium's conflict modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouteMode {
+    /// Pushes other nets' tracks aside to make room; around what can't be pushed.
+    Shove,
     /// Finds a way round what's in the way.
     Walkaround,
     /// Stops short of the first thing in the way.
@@ -262,6 +264,7 @@ pub enum RouteMode {
 impl RouteMode {
     pub fn name(self) -> &'static str {
         match self {
+            RouteMode::Shove => "Push and shove",
             RouteMode::Walkaround => "Walkaround",
             RouteMode::Stop => "Stop at obstacle",
             RouteMode::Ignore => "Ignore obstacles",
@@ -270,9 +273,10 @@ impl RouteMode {
 
     fn next(self) -> RouteMode {
         match self {
+            RouteMode::Shove => RouteMode::Walkaround,
             RouteMode::Walkaround => RouteMode::Stop,
             RouteMode::Stop => RouteMode::Ignore,
-            RouteMode::Ignore => RouteMode::Walkaround,
+            RouteMode::Ignore => RouteMode::Shove,
         }
     }
 }
@@ -459,6 +463,10 @@ fn edge_near(board: &Board, at: P, tolerance: f64) -> Option<usize> {
     })
 }
 
+/// A route worked out: what it was asked (as a key), the path and whether it's blocked,
+/// and the board with tracks shoved aside for it.
+type RouteCache = (String, (Vec<P>, bool), Option<Board>);
+
 /// A panel made up: its size and how many copies, or why it can't be.
 type PanelMade = Result<((f64, f64), usize), String>;
 
@@ -543,7 +551,10 @@ pub struct PcbView {
     /// Tracks laid in the route under way (kept by loop removal).
     route_laid: Vec<Track>,
     /// The last route worked out, and what it was worked out for.
-    route_cache: Option<(String, (Vec<P>, bool))>,
+    route_cache: Option<RouteCache>,
+    /// Pushing and shoving: the board with other nets' tracks moved aside for the route
+    /// shown.
+    pub shoved: Option<Board>,
     /// Only the layer being worked on shows (Shift+S).
     pub single_layer: bool,
     /// Net colours shown on the routing (F5).
@@ -599,12 +610,13 @@ impl Default for PcbView {
             visible: Visible::default(),
             show_layers: true,
             pending_layer: None,
-            mode: RouteMode::Walkaround,
+            mode: RouteMode::Shove,
             corner: Corner::Diagonal,
             router: None,
             route_preview: None,
             route_laid: Vec::new(),
             route_cache: None,
+            shoved: None,
             single_layer: false,
             net_colours: false,
             highlight: None,
@@ -672,13 +684,15 @@ impl PcbView {
             self.diagonal_first,
             self.analysis.as_ref().map(|a| a.revision)
         );
-        if let Some((k, found)) = &self.route_cache {
+        if let Some((k, found, shoved)) = &self.route_cache {
             if *k == key {
+                self.shoved = shoved.clone();
                 return found.clone();
             }
         }
+        self.shoved = None;
         let found = self.route_uncached(net, width, layer, from, to);
-        self.route_cache = Some((key, found.clone()));
+        self.route_cache = Some((key, found.clone(), self.shoved.clone()));
         found
     }
 
@@ -705,10 +719,18 @@ impl PcbView {
                 let short = (end[0] - to[0]).hypot(end[1] - to[1]) > 1e-6;
                 (cut, short)
             }
-            RouteMode::Walkaround => {
-                // Straight if nothing's in the way; else around it.
+            RouteMode::Shove | RouteMode::Walkaround => {
+                // Straight if nothing's in the way; else pushing it aside; else around it.
                 if route_margin(&layout, net, &straight, width, layer) >= -1e-6 {
                     return (straight, false);
+                }
+                if mode == RouteMode::Shove {
+                    if let Some(b) =
+                        circuiter_pcb::edit::shove(&layout, net, &straight, width, layer)
+                    {
+                        self.shoved = Some(b);
+                        return (straight, false);
+                    }
                 }
                 let opts = RouteOptions {
                     vias: false,
@@ -878,37 +900,7 @@ fn copper_at(layout: &Layout, at: P, tolerance: f64, layer: Layer) -> Option<(Op
 /// The closest a route of `net`, `width` wide along `path` on `layer`, comes to copper
 /// of other nets, less the clearance it needs: negative where it breaks the rule.
 fn route_margin(layout: &Layout, net: &str, path: &[P], width: f64, layer: Layer) -> f64 {
-    let rules = &layout.board.rules;
-    let need = |other: &str| rules.clearance_for(net).mm().max(rules.clearance_for(other).mm());
-    let mut worst = f64::INFINITY;
-    for seg in path.windows(2) {
-        let (a, b) = (seg[0], seg[1]);
-        let lo = [a[0].min(b[0]) - 5.0, a[1].min(b[1]) - 5.0];
-        let hi = [a[0].max(b[0]) + 5.0, a[1].max(b[1]) + 5.0];
-        let near = |c: P| c[0] >= lo[0] && c[0] <= hi[0] && c[1] >= lo[1] && c[1] <= hi[1];
-        for pad in layout.pads.iter().filter(|pd| {
-            pd.layers.contains(&layer) && pd.net.as_deref() != Some(net) && near(pd.center)
-        }) {
-            let c = geometry::pad(pad, 0.0);
-            let d = (0..c.len())
-                .map(|k| geometry::segment_distance(a, b, c[k], c[(k + 1) % c.len()]))
-                .fold(f64::INFINITY, f64::min);
-            let d = if inside(&c, a) || inside(&c, b) { 0.0 } else { d };
-            worst = worst.min(d - width / 2.0 - need(pad.net.as_deref().unwrap_or("")));
-        }
-        for t in layout.board.tracks.iter().filter(|t| t.layer == layer && t.net != net) {
-            let d =
-                geometry::segment_distance(a, b, p(t.a), p(t.b)) - width / 2.0 - t.width.mm() / 2.0;
-            worst = worst.min(d - need(&t.net));
-        }
-        for v in layout.board.vias.iter().filter(|v| v.net != net) {
-            let d = geometry::segment_distance(a, b, p(v.at), p(v.at))
-                - width / 2.0
-                - v.diameter.mm() / 2.0;
-            worst = worst.min(d - need(&v.net));
-        }
-    }
-    worst
+    circuiter_pcb::edit::margin(layout, net, path, width, layer)
 }
 
 /// Draws board millimetres on screen.
@@ -1848,7 +1840,7 @@ impl CircuiterApp {
                 if tool(ui, icon::CURSOR, "Select", "Select and move  (Esc)\nDrag parts, tracks, corners and vias · R turn · F flip · L lock · Del delete") {
                     view.tool = PcbTool::Select;
                 }
-                if tool(ui, icon::PATH, "Route", "Route tracks  (X)\nClick a pad to start, click to add corners, click a pad of the same net to finish; Ctrl+click finishes it automatically.\nShift+R: walkaround / stop at obstacle / ignore · Shift+Space: 45° / 90° / any-angle corners · Space: flip the corner · 3: track width · V: via · Backspace: last leg · Esc: stop") {
+                if tool(ui, icon::PATH, "Route", "Route tracks  (X)\nClick a pad to start, click to add corners, click a pad of the same net to finish; Ctrl+click finishes it automatically.\nShift+R: push and shove / walkaround / stop at obstacle / ignore · Shift+Space: 45° / 90° / any-angle corners · Space: flip the corner · 3: track width · V: via · Backspace: last leg · Esc: stop") {
                     view.tool = PcbTool::Route { net: String::new(), width: 0.0, points: Vec::new() };
                 }
                 if tool(ui, icon::POLYGON, "Zone", "Copper pour: click its corners, double-click to finish") {
@@ -2472,6 +2464,8 @@ impl CircuiterApp {
                 }
             }
             PcbTool::Route { net, width, points } => {
+                // Shoved tracks show only while a route is being drawn; set again below.
+                self.pcb.preview = None;
                 let at = hover.map(|h| match copper_at(&layout, h, tolerance, layer) {
                     Some((Some(n), q)) if n == net => q,
                     _ => self.pcb.snap(h),
@@ -2575,6 +2569,9 @@ impl CircuiterApp {
                     let from = *points.last().expect("started");
                     let (path, blocked) = self.pcb.route_to(&net, width, layer, from, to);
                     self.pcb.route_preview = Some((path.clone(), blocked));
+                    // Tracks pushed aside show where they'll go.
+                    self.pcb.preview = self.pcb.shoved.clone();
+                    let shoved = self.pcb.shoved.clone();
                     let end = *path.last().expect("a start");
                     // V goes to the other side.
                     let target = keys(egui::Key::V)
@@ -2655,7 +2652,11 @@ impl CircuiterApp {
                         };
                         let layout = layout.clone();
                         let net = net.clone();
+                        self.pcb.preview = None;
                         edit = Some(Box::new(move |b: &mut Board| {
+                            if let Some(moved) = shoved {
+                                b.tracks = moved.tracks;
+                            }
                             b.tracks.extend(tracks);
                             b.vias.extend(new_via);
                             // Loop removal: a new way between two points replaces the old.
@@ -4705,6 +4706,15 @@ mod tests {
         );
         let end = *path.last().unwrap();
         assert!((end[0] - b[0]).hypot(end[1] - b[1]) < 1e-6, "it gets there");
+        // Push and shove: the straight route with tracks moved aside, or else around.
+        view.mode = RouteMode::Shove;
+        let (path, stuck) = view.route_to(&net, width, Layer::FCu, a, b);
+        assert!(!stuck, "shoving or walking round finds a way");
+        let mut after = layout.clone();
+        if let Some(moved) = &view.shoved {
+            after.board = moved.clone();
+        }
+        assert!(route_margin(&after, &net, &path, width, Layer::FCu) >= -1e-6, "{path:?}");
         view.mode = RouteMode::Stop;
         let (cut, short) = view.route_to(&net, width, Layer::FCu, a, b);
         assert!(short);

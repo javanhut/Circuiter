@@ -1278,3 +1278,31 @@ fn arcs_and_cutouts_shape_the_board() {
         circuiter_pcb::board3d::build(&design, &Layout::new(&design, &top, &solid).unwrap(), &[]);
     assert!(built.board.triangles() > plain.board.triangles());
 }
+
+/// Push and shove: a new track beside another net's pushes it aside just far enough,
+/// the track it then runs into goes too, and a new track crossing one can't shove it.
+#[test]
+fn new_tracks_shove_others_aside() {
+    use circuiter_pcb::edit::{margin, shove};
+    let (design, top) = design();
+    let mut b = board();
+    let layout = Layout::new(&design, &top, &b).unwrap();
+    // `mid` runs across at y = 15, `GND` 0.5 mm under it.
+    b.tracks.push(track(&layout, "mid", [10.0, 15.0], [30.0, 15.0], Layer::FCu));
+    b.tracks.push(track(&layout, "GND", [10.0, 15.5], [30.0, 15.5], Layer::FCu));
+    let layout = Layout::new(&design, &top, &b).unwrap();
+    // `vin` along just above `mid`.
+    let path = [[12.0, 14.8], [28.0, 14.8]];
+    assert!(margin(&layout, "vin", &path, 0.25, Layer::FCu) < 0.0);
+    let pushed = shove(&layout, "vin", &path, 0.25, Layer::FCu).expect("room to push");
+    let (mid, gnd) = (&pushed.tracks[0], &pushed.tracks[1]);
+    assert!(mid.a.y.mm() > 15.0 && (mid.a.y.mm() - mid.b.y.mm()).abs() < 1e-9, "{mid:?}");
+    assert!(gnd.a.y.mm() > 15.5, "GND pushed on by mid: {gnd:?}");
+    let mut after = layout.clone();
+    after.board = pushed;
+    assert!(margin(&after, "vin", &path, 0.25, Layer::FCu) >= -1e-6);
+    let seg = [[10.0, after.board.tracks[0].a.y.mm()], [30.0, after.board.tracks[0].b.y.mm()]];
+    assert!(margin(&after, "mid", &seg, 0.25, Layer::FCu) >= -1e-6);
+    // Straight across `mid`: nothing to shove it to.
+    assert!(shove(&layout, "vin", &[[20.0, 12.0], [20.0, 18.0]], 0.25, Layer::FCu).is_none());
+}

@@ -470,9 +470,9 @@ impl CircuiterApp {
                 ui.set_height(38.0);
                 ui.add_space(8.0);
                 let has_schematic = ws.has_schematic();
-                // Each workspace's own views.
-                match (self.show_pcb, self.show_3d, self.simulating) {
-                    (false, false, false) => {
+                // The schematic workspace's views; the others have their own bars.
+                if !(self.show_pcb || self.show_3d || self.simulating) {
+                    {
                         let active = match (self.show_netlist, ws.mode) {
                             (true, _) => 2,
                             (false, Mode::Schematic) => 0,
@@ -499,15 +499,6 @@ impl CircuiterApp {
                             _ => {}
                         }
                     }
-                    (false, true, _) if has_schematic => {
-                        let views = [("Part body", true), ("Board", true)];
-                        if let Some(k) =
-                            style::segmented(ui, &views, usize::from(self.viewer3d.board))
-                        {
-                            self.viewer3d.board = k == 1;
-                        }
-                    }
-                    _ => {}
                 }
                 // Where in the hierarchy, when inside a part.
                 if ws.levels.len() > 1 {

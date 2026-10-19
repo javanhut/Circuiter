@@ -23,6 +23,23 @@ pub struct BodyEditor {
     pub pad: Pad,
 }
 
+impl BodyEditor {
+    /// A feature drawn from a sketch is open and the sketch is to have most of the view.
+    pub fn sketching(&self) -> bool {
+        let feature = self.selected.and_then(|k| self.draft.as_ref()?.1.features.get(k));
+        !self.pad.narrow
+            && feature.is_some_and(|f| {
+                matches!(
+                    f.shape,
+                    Shape::Extrude { .. }
+                        | Shape::Revolve { .. }
+                        | Shape::Sweep { .. }
+                        | Shape::Loft { .. }
+                )
+            })
+    }
+}
+
 const COLORS: &[&str] = &[
     "grey",
     "black",
@@ -219,6 +236,7 @@ impl CircuiterApp {
                 ed.selected = None;
             }
         }
+        let sketching = ed.sketching();
         let (_, draft, _) = ed.draft.as_mut().expect("set");
         let mut commit = false;
         let symbol = ws.current_def().and_then(|d| d.symbol.clone());
@@ -346,8 +364,13 @@ impl CircuiterApp {
                 }
             });
         } else {
-            // With a feature open, the list scrolls on its own so the editor stays in view.
-            let list_height = if ed.selected.is_some() { 230.0 } else { f32::INFINITY };
+            // With a feature open, the list scrolls on its own so the editor stays in view;
+            // a few rows of it while sketching, so the drawing has the room.
+            let list_height = match (sketching, ed.selected.is_some()) {
+                (true, _) => 110.0,
+                (false, true) => 230.0,
+                (false, false) => f32::INFINITY,
+            };
             egui::ScrollArea::vertical().id_salt("features").max_height(list_height).show(
                 ui,
                 |ui| {
@@ -570,7 +593,7 @@ fn feature_editor(
             chamfer: pad.chamfer,
             distance: pad.distance,
             sides: pad.sides,
-            tall: pad.tall,
+            narrow: pad.narrow,
             ..Pad::default()
         };
         pad.target = Some((k, slot));
@@ -902,7 +925,9 @@ pub struct Pad {
     chamfer: f64,
     distance: f64,
     sides: usize,
-    tall: bool,
+    /// The sketch kept small beside the feature list, rather than given most of the
+    /// view.
+    pub narrow: bool,
     /// A dimension waiting for its value.
     pending: Option<Constraint>,
     dragging: Option<usize>,
@@ -934,7 +959,7 @@ impl Default for Pad {
             chamfer: 1.0,
             distance: 2.0,
             sides: 6,
-            tall: false,
+            narrow: false,
             pending: None,
             dragging: None,
             history: None,
@@ -1367,7 +1392,10 @@ fn sketch_editor(
         if ui.small_button(icon::CORNERS_OUT).on_hover_text("Fit the view (Z)").clicked() {
             pad.view = None;
         }
-        ui.toggle_value(&mut pad.tall, "Tall").on_hover_text("A taller drawing area");
+        let label = if pad.narrow { format!("{}  Wide", icon::ARROWS_OUT) } else { format!("{}  Narrow", icon::ARROWS_IN) };
+        if ui.button(label).on_hover_text("Give the sketch most of the view, or keep it beside the 3D model").clicked() {
+            pad.narrow = !pad.narrow;
+        }
     });
     // The tool's settings.
     ui.horizontal(|ui| {
@@ -1396,7 +1424,9 @@ fn sketch_editor(
     };
     let loops = sk::loops(d, &g);
     // The view: kept between frames, fitted when first shown.
-    let size = egui::vec2(ui.available_width().max(200.0), if pad.tall { 520.0 } else { 300.0 });
+    // Wide, the drawing reaches the bottom of the panel, leaving room for the command line.
+    let tall = (ui.clip_rect().bottom() - ui.cursor().top() - 110.0).max(360.0);
+    let size = egui::vec2(ui.available_width().max(200.0), if pad.narrow { 300.0 } else { tall });
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
     let (mid, scale) = *pad.view.get_or_insert_with(|| {
         let mut lo = [f64::MAX; 2];

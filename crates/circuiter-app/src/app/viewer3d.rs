@@ -530,9 +530,17 @@ impl CircuiterApp {
             self.export_stl(&scene);
         }
         if !scene.sheet {
-            egui::Panel::left("body-panel")
+            // Sketching, the drawing gets most of the room, the model beside it; each
+            // width is kept for next time.
+            let sketching = self.viewer3d.editor.sketching();
+            let (id, width) = if sketching {
+                ("body-panel-sketch", ui.available_width() * 0.62)
+            } else {
+                ("body-panel", 380.0)
+            };
+            egui::Panel::left(id)
                 .resizable(true)
-                .default_size(380.0)
+                .default_size(width)
                 .frame(egui::Frame::new().fill(p.panel).inner_margin(egui::Margin::same(10)))
                 .show(ui, |ui| {
                     egui::ScrollArea::vertical()

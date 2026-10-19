@@ -200,7 +200,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("PCB: X", "Route; Ctrl+click finishes the connection automatically"),
     (
         "PCB: Shift+R, Shift+Space, Space",
-        "Routing mode (walkaround, stop, ignore); corner style (45°, 90°, any); flip the corner",
+        "Routing mode (push and shove, walkaround, stop, ignore); corner style (45°, 90°, any); flip the corner",
     ),
     ("PCB: 3, V", "Cycle track width; drop a via"),
     ("PCB: PgUp/PgDn, Ctrl+Shift+wheel", "Change copper layer (with a via while routing)"),
