@@ -104,7 +104,7 @@ pub fn stitch(layout: &Layout, fills: &[ZoneFill], net: &str, spacing: f64) -> V
     let (dia, drill) = rules.via_for(net);
     let (r, hole) = (dia.mm() / 2.0, drill.mm() / 2.0);
     let need = rules.clearance_for(net).mm();
-    let outline: Vec<P> = board.outline.iter().map(|q| p(*q)).collect();
+    let outline: Vec<P> = board.edge().iter().map(|q| p(*q)).collect();
     let Some((lo, hi)) = geometry::bounds(&vec![vec![outline.clone()]]) else { return Vec::new() };
     let pours: Vec<&ZoneFill> = fills.iter().filter(|f| f.net == net).collect();
     if pours.is_empty() || spacing <= 0.0 {

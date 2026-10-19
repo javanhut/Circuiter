@@ -298,7 +298,7 @@ impl Router {
         let board = &layout.board;
         let rules = &board.rules;
         let layers = board.copper();
-        let outline: Vec<P> = board.outline.iter().map(|q| p(*q)).collect();
+        let outline: Vec<P> = board.edge().iter().map(|q| p(*q)).collect();
         let (lo, hi) = geometry::bounds(&vec![vec![outline.clone()]])?;
         let pitch = pitch.max(0.02);
         let slack = pitch * 0.71;
@@ -329,22 +329,26 @@ impl Router {
             via: vec![FREE; nl * nx * ny],
         };
         // The edge: nothing outside the board or within its clearance of the edge.
+        // Cutouts are edges too: inside one is off the board.
         let edge = rules.edge_clearance.mm();
-        let n = outline.len();
+        let edges: Vec<(P, P)> = std::iter::once(outline.clone())
+            .chain(crate::zones::cutouts(board))
+            .flat_map(|r| (0..r.len()).map(move |k| (r[k], r[(k + 1) % r.len()])))
+            .collect();
         for y in 0..ny {
             for x in 0..nx {
                 let c = grid.centre(x, y);
                 let mut inside = false;
-                for k in 0..n {
-                    let (a, b) = (outline[k], outline[(k + 1) % n]);
+                for &(a, b) in &edges {
                     if (a[1] > c[1]) != (b[1] > c[1])
                         && c[0] < a[0] + (c[1] - a[1]) * (b[0] - a[0]) / (b[1] - a[1])
                     {
                         inside = !inside;
                     }
                 }
-                let to_edge = (0..n)
-                    .map(|k| geometry::segment_distance(outline[k], outline[(k + 1) % n], c, c))
+                let to_edge = edges
+                    .iter()
+                    .map(|&(a, b)| geometry::segment_distance(a, b, c, c))
                     .fold(f64::MAX, f64::min);
                 for l in 0..nl {
                     let i = grid.index(l, x, y);

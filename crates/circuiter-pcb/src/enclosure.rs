@@ -76,7 +76,7 @@ fn part_bounds(built: &Board3d) -> Vec<(&str, V3, V3)> {
 pub fn make(layout: &Layout, built: &Board3d, e: &Enclosure) -> Result<Made, String> {
     let board = &layout.board;
     let t = board.thickness.mm();
-    let outline: Vec<P> = board.outline.iter().map(|q| p(*q)).collect();
+    let outline: Vec<P> = board.edge().iter().map(|q| p(*q)).collect();
     if outline.len() < 3 {
         return Err("the board needs an outline first".into());
     }
@@ -307,7 +307,7 @@ pub fn fit(layout: &Layout, built: &Board3d, case: &[&Mesh], lid_top: Option<f32
         }
     }
     let t = layout.board.thickness.mm() as f32;
-    let corners = layout.board.outline.iter().flat_map(|q| {
+    let corners = layout.board.edge().into_iter().flat_map(|q| {
         let (x, y) = (q.x.mm() as f32, -(q.y.mm() as f32));
         [[x, y, -0.01], [x, y, -t + 0.01]]
     });

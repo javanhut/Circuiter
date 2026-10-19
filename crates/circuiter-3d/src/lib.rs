@@ -12,6 +12,7 @@ pub mod csg;
 pub mod import2d;
 pub mod math;
 pub mod packages;
+pub mod sketch;
 pub mod solid;
 
 use math::{Mat4, V3, cross, normalize, sub};
@@ -545,11 +546,11 @@ pub fn extrude_holes(
             m.indices.extend([i[0], i[1], i[2], i[0], i[2], i[3]]);
         }
     };
-    walls(&orient_ccw(outer));
-    for h in holes.iter().filter(|h| h.len() >= 3) {
-        let mut h = orient_ccw(h);
-        h.reverse();
-        walls(&h);
+    let rings: Vec<Vec<(f32, f32)>> = std::iter::once(outer.to_vec())
+        .chain(holes.iter().filter(|h| h.len() >= 3).cloned())
+        .collect();
+    for r in orient_nested(&rings) {
+        walls(&r);
     }
     let (poly, tris) = triangulate_holes(outer, holes);
     for (z, up) in [(z1, true), (z0, false)] {
@@ -567,6 +568,365 @@ pub fn extrude_holes(
         }
     }
     m
+}
+
+/// Whether `p` lies inside `ring` (by crossings, so either orientation).
+pub fn inside(ring: &[(f32, f32)], p: (f32, f32)) -> bool {
+    let n = ring.len();
+    let mut odd = false;
+    for k in 0..n {
+        let (a, b) = (ring[k], ring[(k + 1) % n]);
+        if (a.1 > p.1) != (b.1 > p.1) && p.0 < a.0 + (b.0 - a.0) * (p.1 - a.1) / (b.1 - a.1) {
+            odd = !odd;
+        }
+    }
+    odd
+}
+
+/// Each outline turned counter-clockwise where it bounds solid and clockwise where it
+/// bounds a hole: by how many of the others enclose it.
+pub fn orient_nested(rings: &[Vec<(f32, f32)>]) -> Vec<Vec<(f32, f32)>> {
+    rings
+        .iter()
+        .enumerate()
+        .map(|(k, r)| {
+            let depth = rings
+                .iter()
+                .enumerate()
+                .filter(|(j, o)| *j != k && o.len() >= 3 && inside(o, r[0]))
+                .count();
+            let mut r = orient_ccw(r);
+            if depth % 2 == 1 {
+                r.reverse();
+            }
+            r
+        })
+        .collect()
+}
+
+/// `ring` moved `d` to its left (inwards for a counter-clockwise outline), each corner
+/// along the bisector of its sides so the sides stay parallel. Good while `d` is small
+/// beside the outline's features; it doesn't untangle what crosses itself.
+pub fn inset(ring: &[(f32, f32)], d: f32) -> Vec<(f32, f32)> {
+    let n = ring.len();
+    let dir = |a: (f32, f32), b: (f32, f32)| {
+        let (x, y) = (b.0 - a.0, b.1 - a.1);
+        let l = (x * x + y * y).sqrt();
+        (l > 1e-7).then(|| (x / l, y / l))
+    };
+    (0..n)
+        .map(|k| {
+            let p = ring[k];
+            // The nearest neighbours that aren't in the same place.
+            let before = (1..n).find_map(|j| dir(ring[(k + n - j) % n], p));
+            let after = (1..n).find_map(|j| dir(p, ring[(k + j) % n]));
+            let (Some(e1), Some(e2)) = (before, after) else { return p };
+            let (n1, n2) = ((-e1.1, e1.0), (-e2.1, e2.0));
+            let (mx, my) = (n1.0 + n2.0, n1.1 + n2.1);
+            let l = (mx * mx + my * my).sqrt();
+            if l < 1e-6 {
+                return (p.0 + n1.0 * d, p.1 + n1.1 * d);
+            }
+            let (mx, my) = (mx / l, my / l);
+            let c = (mx * n1.0 + my * n1.1).max(0.25);
+            (p.0 + mx * d / c, p.1 + my * d / c)
+        })
+        .collect()
+}
+
+/// How an edge where a wall meets a top or bottom is finished.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Edge {
+    Sharp,
+    /// Rounded with this radius.
+    Round(f32),
+    /// Bevelled back this far each way.
+    Bevel(f32),
+}
+
+/// Outlines (holes inside outlines, any orientation) raised from `z0` to `z1`, the
+/// bottom and top edges finished as given: the walls are rings of the outlines inset
+/// step by step round the fillet or bevel.
+pub fn extrude_edged(
+    rings: &[Vec<(f32, f32)>],
+    z0: f32,
+    z1: f32,
+    bottom: Edge,
+    top: Edge,
+    color: Rgba,
+) -> Mesh {
+    let rings: Vec<Vec<(f32, f32)>> = rings.iter().filter(|r| r.len() >= 3).cloned().collect();
+    if rings.is_empty() || z1 <= z0 {
+        return Mesh::default();
+    }
+    let size = |e: Edge| match e {
+        Edge::Sharp => 0.0,
+        Edge::Round(r) | Edge::Bevel(r) => r.max(0.0),
+    };
+    let room = (z1 - z0) / if size(bottom) > 0.0 && size(top) > 0.0 { 2.0 } else { 1.0 };
+    let clamp = |e: Edge| match e {
+        Edge::Round(r) => Edge::Round(r.min(room * 0.999)),
+        Edge::Bevel(r) => Edge::Bevel(r.min(room * 0.999)),
+        Edge::Sharp => Edge::Sharp,
+    };
+    // Rows up the side: (inset, z, the normal's outward and upward parts).
+    let mut rows: Vec<(f32, f32, f32, f32)> = Vec::new();
+    let steps = 8;
+    match clamp(bottom) {
+        Edge::Round(r) if r > 0.0 => {
+            for k in 0..=steps {
+                let a = std::f32::consts::FRAC_PI_2 * k as f32 / steps as f32;
+                rows.push((r - r * a.sin(), z0 + r - r * a.cos(), a.sin(), -a.cos()));
+            }
+        }
+        Edge::Bevel(c) if c > 0.0 => {
+            let h = std::f32::consts::FRAC_1_SQRT_2;
+            rows.extend([(c, z0, h, -h), (0.0, z0 + c, h, -h), (0.0, z0 + c, 1.0, 0.0)]);
+        }
+        _ => rows.push((0.0, z0, 1.0, 0.0)),
+    }
+    match clamp(top) {
+        Edge::Round(r) if r > 0.0 => {
+            for k in 0..=steps {
+                let a = std::f32::consts::FRAC_PI_2 * (1.0 + k as f32 / steps as f32);
+                rows.push((r - r * a.sin(), z1 - r - r * a.cos(), a.sin(), -a.cos()));
+            }
+        }
+        Edge::Bevel(c) if c > 0.0 => {
+            let h = std::f32::consts::FRAC_1_SQRT_2;
+            rows.extend([(0.0, z1 - c, 1.0, 0.0), (0.0, z1 - c, h, h), (c, z1, h, h)]);
+        }
+        _ => rows.push((0.0, z1, 1.0, 0.0)),
+    }
+    let rings = orient_nested(&rings);
+    let mut m = Mesh::default();
+    for ring in &rings {
+        let n = ring.len();
+        // Each side's outward normal, blended with its neighbour's across gentle bends.
+        let side: Vec<V3> = (0..n)
+            .map(|k| {
+                let (a, b) = (ring[k], ring[(k + 1) % n]);
+                normalize([b.1 - a.1, a.0 - b.0, 0.0])
+            })
+            .collect();
+        let blend = |s: V3, other: V3| {
+            if math::dot(s, other) > 0.82 { normalize(math::add(s, other)) } else { s }
+        };
+        let levels: Vec<Vec<(f32, f32)>> = rows.iter().map(|r| inset(ring, r.0)).collect();
+        for i in 0..rows.len() - 1 {
+            let (lo, hi) = (rows[i], rows[i + 1]);
+            if (hi.1 - lo.1).abs() < 1e-7 && (hi.0 - lo.0).abs() < 1e-7 {
+                continue;
+            }
+            let (la, lb) = (&levels[i], &levels[i + 1]);
+            for k in 0..n {
+                let k1 = (k + 1) % n;
+                let na = blend(side[k], side[(k + n - 1) % n]);
+                let nb = blend(side[k], side[k1]);
+                let nrm = |s: V3, row: (f32, f32, f32, f32)| {
+                    normalize([s[0] * row.2, s[1] * row.2, row.3])
+                };
+                let i4 = [
+                    m.push([la[k].0, la[k].1, lo.1], nrm(na, lo), color),
+                    m.push([la[k1].0, la[k1].1, lo.1], nrm(nb, lo), color),
+                    m.push([lb[k1].0, lb[k1].1, hi.1], nrm(nb, hi), color),
+                    m.push([lb[k].0, lb[k].1, hi.1], nrm(na, hi), color),
+                ];
+                m.indices.extend([i4[0], i4[1], i4[2], i4[0], i4[2], i4[3]]);
+            }
+        }
+    }
+    for (row, up) in [(rows[rows.len() - 1], true), (rows[0], false)] {
+        let level: Vec<Vec<(f32, f32)>> = rings.iter().map(|r| inset(r, row.0)).collect();
+        let (pts, tris) = if level.len() == 1 {
+            (level[0].clone(), triangulate(&level[0]))
+        } else {
+            triangulate_holes(&level[0], &level[1..])
+        };
+        let normal = if up { [0.0, 0.0, 1.0] } else { [0.0, 0.0, -1.0] };
+        let base = m.vertices.len() as u32;
+        for p in &pts {
+            m.push([p.0, p.1, row.1], normal, color);
+        }
+        for t in &tris {
+            if up {
+                m.indices.extend([base + t[0], base + t[1], base + t[2]]);
+            } else {
+                m.indices.extend([base + t[0], base + t[2], base + t[1]]);
+            }
+        }
+    }
+    m
+}
+
+/// Turns a closed mesh inside out if its faces point inwards.
+fn outwards(mut m: Mesh) -> Mesh {
+    let v: f32 = m
+        .indices
+        .chunks(3)
+        .map(|t| {
+            let [a, b, c] = [t[0], t[1], t[2]].map(|i| m.vertices[i as usize].pos);
+            math::dot(a, cross(b, c))
+        })
+        .sum();
+    if v < 0.0 {
+        m.indices.chunks_mut(3).for_each(|t| t.swap(1, 2));
+        m.vertices.iter_mut().for_each(|v| v.normal = math::scale(v.normal, -1.0));
+    }
+    m
+}
+
+/// Caps `rings` (in their own plane) with triangles placed by `place`, facing `normal`;
+/// `flip` turns them to face the other way.
+fn cap(
+    m: &mut Mesh,
+    rings: &[Vec<(f32, f32)>],
+    place: &dyn Fn((f32, f32)) -> V3,
+    normal: V3,
+    flip: bool,
+    color: Rgba,
+) {
+    let (pts, tris) = if rings.len() == 1 {
+        let r = orient_ccw(&rings[0]);
+        let t = triangulate(&r);
+        (r, t)
+    } else {
+        triangulate_holes(&rings[0], &rings[1..])
+    };
+    let base = m.vertices.len() as u32;
+    for p in &pts {
+        m.push(place(*p), normal, color);
+    }
+    for t in &tris {
+        if flip {
+            m.indices.extend([base + t[0], base + t[2], base + t[1]]);
+        } else {
+            m.indices.extend([base + t[0], base + t[1], base + t[2]]);
+        }
+    }
+}
+
+/// A solid from outline `a` at z = 0 to outline `b` at `height`. Both are walked from
+/// the corners facing one way, each sampled wherever either has a corner, and the
+/// samples joined in order.
+pub fn loft(a: &[(f32, f32)], b: &[(f32, f32)], height: f32, color: Rgba) -> Mesh {
+    if a.len() < 3 || b.len() < 3 || height.abs() < 1e-6 {
+        return Mesh::default();
+    }
+    let centre = |r: &[(f32, f32)]| {
+        let n = r.len() as f32;
+        (r.iter().map(|p| p.0).sum::<f32>() / n, r.iter().map(|p| p.1).sum::<f32>() / n)
+    };
+    // Each starts at the corner nearest the direction of `a`'s first.
+    let a = orient_ccw(a);
+    let ca = centre(&a);
+    let aim = (a[0].1 - ca.1).atan2(a[0].0 - ca.0);
+    let b = orient_ccw(b);
+    let cb = centre(&b);
+    let off = |p: (f32, f32)| {
+        let d = (p.1 - cb.1).atan2(p.0 - cb.0) - aim;
+        d.sin().atan2(d.cos()).abs()
+    };
+    let start = (0..b.len()).min_by(|&i, &j| off(b[i]).total_cmp(&off(b[j]))).unwrap_or(0);
+    let b: Vec<(f32, f32)> = (0..b.len()).map(|k| b[(start + k) % b.len()]).collect();
+    // Corners by the fraction of the way round.
+    let fractions = |r: &[(f32, f32)]| -> Vec<f32> {
+        let mut acc = vec![0.0];
+        for k in 0..r.len() {
+            let (p, q) = (r[k], r[(k + 1) % r.len()]);
+            acc.push(acc[k] + (q.0 - p.0).hypot(q.1 - p.1));
+        }
+        let total = acc[r.len()].max(1e-9);
+        acc.iter().map(|x| x / total).collect()
+    };
+    let (fa, fb) = (fractions(&a), fractions(&b));
+    let mut ts: Vec<f32> = fa[..a.len()].iter().chain(&fb[..b.len()]).copied().collect();
+    ts.sort_by(f32::total_cmp);
+    ts.dedup_by(|x, y| (*x - *y).abs() < 1e-5);
+    let sample = |r: &[(f32, f32)], f: &[f32], t: f32| {
+        let k = f.partition_point(|x| *x <= t).saturating_sub(1).min(r.len() - 1);
+        let s = ((t - f[k]) / (f[k + 1] - f[k]).max(1e-9)).clamp(0.0, 1.0);
+        let (p, q) = (r[k], r[(k + 1) % r.len()]);
+        (p.0 + (q.0 - p.0) * s, p.1 + (q.1 - p.1) * s)
+    };
+    let ra: Vec<(f32, f32)> = ts.iter().map(|&t| sample(&a, &fa, t)).collect();
+    let rb: Vec<(f32, f32)> = ts.iter().map(|&t| sample(&b, &fb, t)).collect();
+    let mut m = Mesh::default();
+    let n = ra.len();
+    for k in 0..n {
+        let k1 = (k + 1) % n;
+        m.quad(
+            [ra[k].0, ra[k].1, 0.0],
+            [ra[k1].0, ra[k1].1, 0.0],
+            [rb[k1].0, rb[k1].1, height],
+            [rb[k].0, rb[k].1, height],
+            color,
+        );
+    }
+    cap(&mut m, &[a], &|p| [p.0, p.1, 0.0], [0.0, 0.0, -1.0], true, color);
+    cap(&mut m, &[b], &|p| [p.0, p.1, height], [0.0, 0.0, 1.0], false, color);
+    outwards(m)
+}
+
+/// Outlines (holes inside outlines) carried along `path`: at each point the outlines
+/// stand square to the path (mitred at bends), their x across it in its plane and their
+/// y along `up`, which the path's plane must be square to.
+pub fn sweep(rings: &[Vec<(f32, f32)>], path: &[V3], up: V3, color: Rgba) -> Mesh {
+    let mut path: Vec<V3> = path.to_vec();
+    path.dedup_by(|a, b| math::length(sub(*a, *b)) < 1e-6);
+    let rings: Vec<Vec<(f32, f32)>> = rings.iter().filter(|r| r.len() >= 3).cloned().collect();
+    if path.len() < 2 || rings.is_empty() {
+        return Mesh::default();
+    }
+    let closed = path.len() > 3 && math::length(sub(path[0], path[path.len() - 1])) < 1e-4;
+    if closed {
+        path.pop();
+    }
+    let n = path.len();
+    let seg = |k: usize| normalize(sub(path[(k + 1) % n], path[k]));
+    let frames: Vec<(V3, V3, f32)> = (0..n)
+        .map(|k| {
+            let (before, after) = match (k, closed) {
+                (0, false) => (seg(0), seg(0)),
+                (k, false) if k == n - 1 => (seg(k - 1), seg(k - 1)),
+                (k, _) => (seg((k + n - 1) % n), seg(k)),
+            };
+            let t = normalize(math::add(before, after));
+            let across = normalize(cross(up, t));
+            // Stretched across the bend so the walls keep their width.
+            let stretch = 1.0 / math::dot(t, after).max(0.2);
+            (t, across, stretch)
+        })
+        .collect();
+    let place = |k: usize, p: (f32, f32)| {
+        let (_, across, s) = frames[k];
+        math::add(path[k], math::add(math::scale(across, p.0 * s), math::scale(up, p.1)))
+    };
+    let rings = orient_nested(&rings);
+    let mut m = Mesh::default();
+    let spans = if closed { n } else { n - 1 };
+    for ring in &rings {
+        let len = ring.len();
+        for k in 0..spans {
+            let k1 = (k + 1) % n;
+            for j in 0..len {
+                let j1 = (j + 1) % len;
+                m.quad(
+                    place(k, ring[j]),
+                    place(k, ring[j1]),
+                    place(k1, ring[j1]),
+                    place(k1, ring[j]),
+                    color,
+                );
+            }
+        }
+    }
+    if !closed {
+        let back = math::scale(frames[0].0, -1.0);
+        cap(&mut m, &rings, &|p| place(0, p), back, true, color);
+        cap(&mut m, &rings, &|p| place(n - 1, p), frames[n - 1].0, false, color);
+    }
+    outwards(m)
 }
 
 /// A rectangle with rounded corners, counter-clockwise, centred on the origin.

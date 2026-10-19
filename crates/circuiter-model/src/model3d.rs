@@ -47,6 +47,19 @@ pub struct Feature {
     /// Left out of the body (suppressed), but kept.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hidden: bool,
+    /// The profile drawn with lines, arcs and circles under constraints; when there is
+    /// one, an extrusion, revolve, sweep or loft uses it in place of its `sketch`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drawing: Option<Drawing>,
+    /// Rounds the top and bottom edges of a box, cylinder or extrusion by this radius.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub fillet: String,
+    /// Bevels those edges by this distance (when there is no fillet).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub chamfer: String,
+    /// Which of those edges are rounded or bevelled.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub edges: Ends,
 }
 
 impl Feature {
@@ -59,6 +72,10 @@ impl Feature {
             turn: origin(),
             color: String::new(),
             hidden: false,
+            drawing: None,
+            fillet: String::new(),
+            chamfer: String::new(),
+            edges: Ends::Both,
         }
     }
 }
@@ -125,6 +142,103 @@ pub enum Shape {
         of: String,
         axis: Axis,
     },
+    /// The sketch carried along `path`, drawn in the XZ plane (its x across, its y up):
+    /// the sketch stands square to the path, its origin on it, its y along Y.
+    Sweep {
+        sketch: Sketch,
+        path: Drawing,
+    },
+    /// From the sketch at z = 0 to `to` at `height`, the two outlines joined round.
+    Loft {
+        sketch: Sketch,
+        to: Drawing,
+        height: String,
+    },
+    /// The inside of feature `of` (a box, cylinder, cone, sphere, extrusion or
+    /// revolve), leaving walls `thickness` thick, open at an end or closed; cut, it
+    /// hollows `of` out.
+    Shell {
+        of: String,
+        thickness: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        open: Option<Ends>,
+    },
+}
+
+/// The ends of a shape standing on z = 0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Ends {
+    #[default]
+    Both,
+    Top,
+    Bottom,
+}
+
+/// A sketch drawn as in a 2D CAD program: points, the lines, arcs and circles between
+/// them, and the constraints and dimensions that hold them. Its closed outlines make the
+/// profile (inner ones are holes); lines that lead nowhere, and guides, are left out.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Drawing {
+    /// Each point's x and y, expressions in millimetres. Constraints move the points
+    /// given as plain numbers; the others stay where they are.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub points: Vec<[String; 2]>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub curves: Vec<Curve>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub constraints: Vec<Constraint>,
+}
+
+/// One curve of a drawing, between its points (by index).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Curve {
+    Line(usize, usize),
+    /// A construction line: it guides mirrors and constraints but isn't drawn into the
+    /// outline.
+    Guide(usize, usize),
+    /// Counter-clockwise about `center` from `from` to `to`, at `from`'s distance (a
+    /// whole circle when they are the same point).
+    Arc {
+        center: usize,
+        from: usize,
+        to: usize,
+    },
+    Circle {
+        center: usize,
+        radius: String,
+    },
+}
+
+/// What holds a drawing's points and curves (by index). Dimensions are expressions, in
+/// millimetres or degrees, that may name the cell's parameters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Constraint {
+    /// Two points in one place.
+    Coincident(usize, usize),
+    /// A point on a curve.
+    OnCurve(usize, usize),
+    Horizontal(usize),
+    Vertical(usize),
+    Parallel(usize, usize),
+    Perpendicular(usize, usize),
+    /// A line and an arc or circle, or two arcs or circles, touching without crossing.
+    Tangent(usize, usize),
+    /// Two lines of one length, or two arcs or circles of one radius.
+    Equal(usize, usize),
+    /// A point that stays where it is.
+    Fixed(usize),
+    /// A line's length.
+    Length(usize, String),
+    /// Between two points.
+    Distance(usize, usize, String),
+    /// Across from one point to another.
+    DistanceX(usize, usize, String),
+    /// Up from one point to another.
+    DistanceY(usize, usize, String),
+    /// An arc's or circle's.
+    Radius(usize, String),
+    /// From one line to another, counter-clockwise, in degrees.
+    Angle(usize, usize, String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -200,7 +314,8 @@ impl Sketch {
     }
 }
 
-fn fmt(v: f64) -> String {
+/// A number as a field holds it: up to four decimals, no trailing zeros.
+pub fn fmt(v: f64) -> String {
     let s = format!("{:.4}", v);
     let s = s.trim_end_matches('0').trim_end_matches('.');
     if s == "-0" { "0".into() } else { s.to_owned() }
@@ -252,5 +367,26 @@ mod tests {
         assert_eq!(Sketch::rectangle(10.0, 4.0).points[0], SketchPoint::new(-5.0, -2.0));
         assert_eq!(fmt(-0.00001), "0");
         assert_eq!(fmt(2.54), "2.54");
+        for word in ["drawing", "fillet", "chamfer", "edges"] {
+            assert!(!text.contains(word), "{text}");
+        }
+        // A drawn profile with constraints, rounded edges, and a shell.
+        let mut plate =
+            Feature::new("Plate", Shape::Extrude { sketch: Sketch::default(), height: "2".into() });
+        plate.drawing = Some(Drawing {
+            points: vec![["0".into(), "0".into()], ["w".into(), "0".into()]],
+            curves: vec![Curve::Line(0, 1)],
+            constraints: vec![Constraint::Horizontal(0), Constraint::Length(0, "w".into())],
+        });
+        plate.fillet = "1".into();
+        plate.edges = Ends::Top;
+        let shell = Feature::new(
+            "Shell",
+            Shape::Shell { of: "Plate".into(), thickness: "1".into(), open: Some(Ends::Top) },
+        );
+        let m = Model3d { features: vec![plate, shell], ..Model3d::default() };
+        let text = ron::to_string(&m).unwrap();
+        assert!(text.contains("Line(0,1)") && text.contains("edges:Top"), "{text}");
+        assert_eq!(ron::from_str::<Model3d>(&text).unwrap(), m);
     }
 }

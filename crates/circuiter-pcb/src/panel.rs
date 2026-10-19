@@ -85,7 +85,7 @@ fn inside(c: &[P], q: P) -> bool {
 /// Makes `layout` up into `panel`.
 pub fn panelize(layout: &Layout, fills: &[ZoneFill], panel: &Panel) -> Result<Panelized, String> {
     let board = &layout.board;
-    let outline: Contour = board.outline.iter().map(|q| p(*q)).collect();
+    let outline: Contour = board.edge().iter().map(|q| p(*q)).collect();
     if outline.len() < 3 {
         return Err("the board needs an outline".into());
     }
@@ -212,7 +212,15 @@ pub fn panelize(layout: &Layout, fills: &[ZoneFill], panel: &Panel) -> Result<Pa
     let mut pieces: Shapes = rail_shapes.iter().map(|c| vec![c.clone()]).collect();
     pieces.extend(placed.iter().map(|c| vec![geometry::ccw(c.clone())]));
     pieces.extend(tabs.into_iter().map(|c| vec![geometry::ccw(c)]));
-    let substrate = geometry::merge(pieces);
+    let cut: Shapes = copies
+        .iter()
+        .flat_map(|o| {
+            crate::zones::cutouts(board).into_iter().map(move |c| {
+                vec![c.iter().map(|q| [q[0] + o[0], q[1] + o[1]]).collect::<Contour>()]
+            })
+        })
+        .collect();
+    let substrate = geometry::difference(&geometry::merge(pieces), &cut);
     if substrate.len() != 1 {
         return Err(format!(
             "the panel falls apart into {} pieces: the copies need rails or neighbours to hold them",
@@ -237,6 +245,7 @@ pub fn panelize(layout: &Layout, fills: &[ZoneFill], panel: &Panel) -> Result<Pa
     let mut out = layout.clone();
     let b = &mut out.board;
     b.outline = substrate[0][0].iter().map(|q| point(*q)).collect();
+    b.bulges.clear();
     b.footprints.clear();
     b.tracks.clear();
     b.vias.clear();

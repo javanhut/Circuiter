@@ -204,7 +204,7 @@ fn trim(v: f64) -> String {
 }
 
 fn outline(layout: &Layout) -> (Vec<P>, P, P) {
-    let pts: Vec<P> = layout.board.outline.iter().map(|q| p(*q)).collect();
+    let pts: Vec<P> = layout.board.edge().iter().map(|q| p(*q)).collect();
     let (lo, hi) =
         crate::geometry::bounds(&vec![vec![pts.clone()]]).unwrap_or(([0.0, 0.0], [10.0, 10.0]));
     (pts, lo, hi)

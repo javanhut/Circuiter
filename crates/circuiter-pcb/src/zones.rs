@@ -22,11 +22,18 @@ pub struct ZoneFill {
 
 /// The board's outline as a shape.
 pub fn board_shape(layout: &Layout) -> Shapes {
-    let outline: Vec<_> = layout.board.outline.iter().map(|q| p(*q)).collect();
+    let outline: Vec<_> = layout.board.edge().iter().map(|q| p(*q)).collect();
     if outline.len() < 3 {
         return Vec::new();
     }
-    vec![vec![geometry::ccw(outline)]]
+    let board = vec![vec![geometry::ccw(outline)]];
+    let cutouts: Shapes = cutouts(&layout.board).into_iter().map(|c| vec![c]).collect();
+    if cutouts.is_empty() { board } else { geometry::difference(&board, &cutouts) }
+}
+
+/// The holes cut through the board, counter-clockwise, in millimetres.
+pub fn cutouts(board: &circuiter_model::board::Board) -> Vec<geometry::Contour> {
+    board.cutouts().iter().map(|c| geometry::ccw(c.iter().map(|q| p(*q)).collect())).collect()
 }
 
 /// Four spokes from a pad's centre, along its axes, `width` wide, reaching `reach`

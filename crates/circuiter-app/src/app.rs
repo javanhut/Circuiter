@@ -86,6 +86,68 @@ pub struct CircuiterApp {
     live_speed: Option<f64>,
     /// A part dragged in from the library is being previewed on the sheet.
     drop_preview: bool,
+    /// The Simulation workspace was chosen (the sheet, with the bench around it).
+    simulating: bool,
+    /// The workspace whose panels are showing, and each workspace's panels while
+    /// another is in front.
+    space: Space,
+    spaces: [Panels; 4],
+    /// A simulation or live run was going last frame.
+    was_running: bool,
+}
+
+/// The workspaces: places of their own for each part of the job, swapped between at
+/// the top of the window, each with its own panels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Space {
+    /// Drawing the circuit: the sheet, its parts and symbols.
+    Schematic,
+    /// Laying out the board.
+    Pcb,
+    /// Modelling parts and seeing the product in 3D.
+    Model,
+    /// Running the circuit: analyses, the bench, results.
+    Simulation,
+}
+
+impl Space {
+    pub const ALL: [Space; 4] = [Space::Schematic, Space::Pcb, Space::Model, Space::Simulation];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Space::Schematic => "Schematic",
+            Space::Pcb => "PCB",
+            Space::Model => "3D",
+            Space::Simulation => "Simulation",
+        }
+    }
+
+    fn index(self) -> usize {
+        Space::ALL.iter().position(|s| *s == self).expect("listed")
+    }
+}
+
+/// What a workspace's panels show.
+#[derive(Debug, Clone, Copy)]
+struct Panels {
+    left_tab: usize,
+    right_tab: usize,
+    bottom_tab: usize,
+    show_bottom: bool,
+}
+
+impl Panels {
+    /// How each workspace starts: the simulation's on its own panel with waveforms
+    /// below, the schematic with its problems, the 3D view with nothing below.
+    fn first(space: Space) -> Panels {
+        let p = Panels { left_tab: 0, right_tab: 0, bottom_tab: 0, show_bottom: true };
+        match space {
+            Space::Schematic => Panels { bottom_tab: 2, show_bottom: false, ..p },
+            Space::Pcb => p,
+            Space::Model => Panels { show_bottom: false, ..p },
+            Space::Simulation => Panels { right_tab: 1, ..p },
+        }
+    }
 }
 
 /// The parts on the quick-parts strip, with their shortcut keys if any.
@@ -461,6 +523,10 @@ impl CircuiterApp {
             show_netlist: false,
             show_3d: false,
             show_pcb: false,
+            simulating: false,
+            space: Space::Schematic,
+            spaces: Space::ALL.map(Panels::first),
+            was_running: false,
             pcb: pcb::PcbView::default(),
             viewer3d: viewer3d::Viewer3d::default(),
             netlist: None,
@@ -573,6 +639,13 @@ impl CircuiterApp {
                 _ => 0,
             };
         }
+        // Opened running: the Simulation workspace, with the panels asked for.
+        app.simulating = args.simulate.is_some() || args.live;
+        app.was_running = app.simulating;
+        if args.results.is_none() && app.simulating {
+            app.show_bottom = true;
+        }
+        app.space = app.current_space();
         app
     }
 
@@ -3551,6 +3624,7 @@ impl eframe::App for CircuiterApp {
         self.shortcuts(&ctx);
         self.live_frame(&ctx);
         self.update_title(&ctx);
+        self.sync_space();
         if let Some(ws) = &self.workspace {
             // Project cells' symbols change as they are edited; std's never do.
             if ws.revision != self.icons_revision {
@@ -3574,24 +3648,27 @@ impl eframe::App for CircuiterApp {
         }
         if self.workspace.is_some() {
             let panel = egui::Frame::new().fill(p.panel);
-            egui::Panel::left("explorer").resizable(true).default_size(270.0).frame(panel).show(
-                ui,
-                |ui| {
+            let space = self.space.name();
+            egui::Panel::left(format!("explorer-{space}"))
+                .resizable(true)
+                .default_size(270.0)
+                .frame(panel)
+                .show(ui, |ui| {
                     // Panels keep their size whatever their contents.
                     ui.expand_to_include_rect(ui.max_rect());
                     self.explorer(ui)
-                },
-            );
-            egui::Panel::right("inspector").resizable(true).default_size(360.0).frame(panel).show(
-                ui,
-                |ui| {
+                });
+            egui::Panel::right(format!("inspector-{space}"))
+                .resizable(true)
+                .default_size(360.0)
+                .frame(panel)
+                .show(ui, |ui| {
                     ui.expand_to_include_rect(ui.max_rect());
                     self.right_panel(ui)
-                },
-            );
+                });
             // Results have nothing to show about a 3D body.
             if self.show_bottom && !self.show_3d {
-                egui::Panel::bottom("results")
+                egui::Panel::bottom(format!("results-{space}"))
                     .resizable(true)
                     .default_size(280.0)
                     .frame(panel)
@@ -3726,6 +3803,63 @@ impl eframe::App for CircuiterApp {
 }
 
 impl CircuiterApp {
+    /// The workspace in front, as the views showing make it.
+    pub(super) fn current_space(&self) -> Space {
+        match (self.show_pcb, self.show_3d, self.simulating) {
+            (true, _, _) => Space::Pcb,
+            (_, true, _) => Space::Model,
+            (_, _, true) => Space::Simulation,
+            _ => Space::Schematic,
+        }
+    }
+
+    /// Brings `space` to the front.
+    pub(super) fn set_space(&mut self, space: Space) {
+        (self.show_pcb, self.show_3d, self.simulating) = match space {
+            Space::Schematic => (false, false, false),
+            Space::Pcb => (true, false, false),
+            Space::Model => (false, true, false),
+            Space::Simulation => (false, false, true),
+        };
+        self.show_netlist = false;
+        self.active_code = None;
+        if matches!(space, Space::Schematic | Space::Simulation) {
+            if let Some(ws) = self.workspace.as_mut().filter(|ws| ws.has_schematic()) {
+                if space == Space::Simulation || ws.mode != Mode::Symbol {
+                    ws.set_mode(Mode::Schematic);
+                }
+            }
+        }
+        self.sync_space();
+    }
+
+    /// Swaps the panels when the workspace in front has changed, however it changed;
+    /// a run started on the schematic brings the Simulation workspace forward.
+    fn sync_space(&mut self) {
+        let running = self.workspace.as_ref().is_some_and(|ws| {
+            ws.live.is_some() || ws.sim.as_ref().is_some_and(|s| s.job.is_some())
+        });
+        if running && !self.was_running && self.current_space() == Space::Schematic {
+            self.simulating = true;
+            self.show_netlist = false;
+        }
+        self.was_running = running;
+        let now = self.current_space();
+        if now == self.space {
+            return;
+        }
+        self.spaces[self.space.index()] = Panels {
+            left_tab: self.left_tab,
+            right_tab: self.right_tab,
+            bottom_tab: self.bottom_tab,
+            show_bottom: self.show_bottom,
+        };
+        let p = self.spaces[now.index()];
+        (self.left_tab, self.right_tab, self.bottom_tab, self.show_bottom) =
+            (p.left_tab, p.right_tab, p.bottom_tab, p.show_bottom);
+        self.space = now;
+    }
+
     /// The latest error, over the bottom of the sheet until dismissed.
     fn error_toast(&mut self, ctx: &egui::Context, sheet: egui::Rect) {
         let Some(err) = self.error.clone() else { return };

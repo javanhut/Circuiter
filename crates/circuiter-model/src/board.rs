@@ -370,8 +370,12 @@ pub struct Board {
     /// Copper layers: 2, 4, 6…
     pub copper_layers: u8,
     pub thickness: Length,
-    /// The board's edge, a closed outline.
+    /// The board's edge, a closed outline, by its corners.
     pub outline: Vec<Point>,
+    /// The edges that are arcs: the bulge of the edge from each corner to the next, as
+    /// [`arc_outline`] takes them. Straight when missing or zero.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bulges: Vec<f64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub footprints: Vec<Placed>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -779,6 +783,7 @@ impl Board {
             copper_layers: 2,
             thickness: Length::from_mm(1.6),
             outline: vec![p(0.0, 0.0), p(w, 0.0), p(w, h), p(0.0, h)],
+            bulges: Vec::new(),
             footprints: Vec::new(),
             tracks: Vec::new(),
             vias: Vec::new(),
@@ -815,6 +820,171 @@ impl Board {
         let name = self.variant.as_ref()?;
         self.variants.iter().find(|v| &v.name == name)
     }
+
+    /// The board's edge as a polygon, its arcs cut into short chords.
+    pub fn edge(&self) -> Vec<Point> {
+        arc_outline(&self.outline, &self.bulges)
+    }
+
+    /// The holes cut through the board: closed outlines and circles drawn on Edge.Cuts,
+    /// as polygons.
+    pub fn cutouts(&self) -> Vec<Vec<Point>> {
+        self.graphics
+            .iter()
+            .filter_map(|g| match g {
+                Graphic::Poly { layer: Layer::EdgeCuts, points, .. } if points.len() >= 3 => {
+                    Some(points.clone())
+                }
+                Graphic::Circle { layer: Layer::EdgeCuts, center, radius, .. } => {
+                    let (c, r) = (*center, *radius);
+                    let side = |s: i64| Point::new(c.x + Length(s * r.0), c.y);
+                    Some(arc_outline(&[side(-1), side(1)], &[1.0, 1.0]))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Adds a corner on the edge from corner `k` to the next, at `at` when the edge is
+    /// straight; an arc is split at its middle into two arcs of the same circle.
+    pub fn split_edge(&mut self, k: usize, at: Point) {
+        let n = self.outline.len();
+        if k >= n {
+            return;
+        }
+        self.bulges.resize(n, 0.0);
+        let bulge = self.bulges[k];
+        let (corner, half) = if bulge == 0.0 {
+            (at, 0.0)
+        } else {
+            let (a, b) = (self.outline[k], self.outline[(k + 1) % n]);
+            (arc_middle(a, b, bulge).unwrap_or(at), (bulge.atan() / 2.0).tan())
+        };
+        self.outline.insert(k + 1, corner);
+        self.bulges[k] = half;
+        self.bulges.insert(k + 1, half);
+        self.tidy_bulges();
+    }
+
+    /// Removes corner `k`; the edge left joining its neighbours is straight.
+    pub fn remove_corner(&mut self, k: usize) {
+        let n = self.outline.len();
+        if k >= n || n <= 3 {
+            return;
+        }
+        self.bulges.resize(n, 0.0);
+        self.outline.remove(k);
+        self.bulges.remove(k);
+        let before = (k + n - 2) % (n - 1);
+        self.bulges[before] = 0.0;
+        self.tidy_bulges();
+    }
+
+    /// Rounds each corner between two straight edges to radius `r` (millimetres), as far
+    /// as the edges allow: the corner gives way to two, joined by an arc.
+    pub fn round_corners(&mut self, r: f64) {
+        let n = self.outline.len();
+        if n < 3 || r <= 0.0 {
+            return;
+        }
+        self.bulges.resize(n, 0.0);
+        let xy = |q: Point| [q.x.mm(), q.y.mm()];
+        let mut outline = Vec::with_capacity(2 * n);
+        let mut bulges = Vec::with_capacity(2 * n);
+        for k in 0..n {
+            let before = (k + n - 1) % n;
+            let (a, c, b) =
+                (xy(self.outline[before]), xy(self.outline[k]), xy(self.outline[(k + 1) % n]));
+            let (la, lb) = ((a[0] - c[0]).hypot(a[1] - c[1]), (b[0] - c[0]).hypot(b[1] - c[1]));
+            let straight = self.bulges[before] == 0.0 && self.bulges[k] == 0.0;
+            let (ua, ub) = (
+                [(a[0] - c[0]) / la, (a[1] - c[1]) / la],
+                [(b[0] - c[0]) / lb, (b[1] - c[1]) / lb],
+            );
+            // The angle between the edges at the corner, and how far back the arc starts.
+            let inner = (ua[0] * ub[0] + ua[1] * ub[1]).clamp(-1.0, 1.0).acos();
+            let back = r / (inner / 2.0).tan();
+            if !straight || la == 0.0 || lb == 0.0 || inner > std::f64::consts::PI - 1e-6 {
+                outline.push(self.outline[k]);
+                bulges.push(self.bulges[k]);
+                continue;
+            }
+            // No more than half of either edge, so neighbouring corners can round too.
+            let back = back.min(la / 2.0).min(lb / 2.0);
+            let p = Point::mm(c[0] + ua[0] * back, c[1] + ua[1] * back);
+            let q = Point::mm(c[0] + ub[0] * back, c[1] + ub[1] * back);
+            // The arc bows towards the corner it replaces.
+            let (dx, dy) = (xy(q)[0] - xy(p)[0], xy(q)[1] - xy(p)[1]);
+            let (mx, my) = ((xy(p)[0] + xy(q)[0]) / 2.0, (xy(p)[1] + xy(q)[1]) / 2.0);
+            let side = ((c[0] - mx) * dy - (c[1] - my) * dx).signum();
+            let turn = std::f64::consts::PI - inner;
+            outline.push(p);
+            bulges.push(side * (turn / 4.0).tan());
+            outline.push(q);
+            bulges.push(self.bulges[k]);
+        }
+        self.outline = outline;
+        self.bulges = bulges;
+        self.tidy_bulges();
+    }
+
+    /// Drops the bulges when no edge is an arc, so straight boards save as before.
+    pub fn tidy_bulges(&mut self) {
+        self.bulges.truncate(self.outline.len());
+        if self.bulges.iter().all(|b| *b == 0.0) {
+            self.bulges.clear();
+        }
+    }
+}
+
+/// The point half way along the arc from `a` to `b` of `bulge`.
+pub fn arc_middle(a: Point, b: Point, bulge: f64) -> Option<Point> {
+    let (ax, ay, bx, by) = (a.x.mm(), a.y.mm(), b.x.mm(), b.y.mm());
+    let (dx, dy) = (bx - ax, by - ay);
+    let c = dx.hypot(dy);
+    if c == 0.0 {
+        return None;
+    }
+    let s = bulge * c / 2.0;
+    Some(Point::mm((ax + bx) / 2.0 + dy / c * s, (ay + by) / 2.0 - dx / c * s))
+}
+
+/// A closed outline whose edges may be arcs, as a polygon. `bulges[k]` bows the edge
+/// from corner `k` to the next, as DXF's bulge does: the tangent of a quarter of the
+/// arc's angle, its middle `bulge` × half the chord to the side, positive to the right
+/// on screen (outwards on a board drawn clockwise, as [`Board::new`]'s is); ±1 is a
+/// half circle.
+/// Arcs are cut into chords that stray from them by at most 10 µm, 5° at most apart.
+pub fn arc_outline(corners: &[Point], bulges: &[f64]) -> Vec<Point> {
+    let n = corners.len();
+    let mut out = Vec::with_capacity(n);
+    for k in 0..n {
+        let (a, b) = (corners[k], corners[(k + 1) % n]);
+        out.push(a);
+        let bulge = bulges.get(k).copied().unwrap_or(0.0);
+        let Some(m) = arc_middle(a, b, bulge).filter(|_| bulge != 0.0) else { continue };
+        let (ax, ay, bx, by) = (a.x.mm(), a.y.mm(), b.x.mm(), b.y.mm());
+        let (h, s) = ((bx - ax).hypot(by - ay) / 2.0, bulge * (bx - ax).hypot(by - ay) / 2.0);
+        // The centre lies from the middle back towards the chord, a radius away.
+        let r = (h * h + s * s) / (2.0 * s);
+        let (mx, my) = (m.x.mm(), m.y.mm());
+        let (cx, cy) = ((ax + bx) / 2.0, (ay + by) / 2.0);
+        let (ux, uy) = ((mx - cx) / s, (my - cy) / s);
+        let (ox, oy) = (mx - ux * r, my - uy * r);
+        let start = (ay - oy).atan2(ax - ox);
+        let wrap = |t: f64| {
+            (t + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI
+        };
+        let sweep = 2.0 * wrap((my - oy).atan2(mx - ox) - start);
+        let r = r.abs();
+        let step = (2.0 * (1.0 - 0.01 / r).clamp(-1.0, 1.0).acos()).min(5f64.to_radians());
+        let pieces = (sweep.abs() / step).ceil().max(2.0) as usize;
+        for i in 1..pieces {
+            let t = start + sweep * i as f64 / pieces as f64;
+            out.push(Point::mm(ox + r * t.cos(), oy + r * t.sin()));
+        }
+    }
+    out
 }
 
 fn is_zero(v: &f64) -> bool {
@@ -824,6 +994,53 @@ fn is_zero(v: &f64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn arcs_bow_edges_and_split_on_their_circle() {
+        // A 20 × 10 board whose top edge is a half circle bowing up (−Y).
+        let mut b = Board::new(20.0, 10.0);
+        b.bulges = vec![1.0];
+        let edge = b.edge();
+        let far = edge.iter().map(|q| q.y.mm()).fold(f64::MAX, f64::min);
+        assert!((far + 10.0).abs() < 0.02, "the arc reaches 10 mm above: {far}");
+        for q in &edge[1..edge.len() - 3] {
+            let d = (q.x.mm() - 10.0).hypot(q.y.mm());
+            assert!((d - 10.0).abs() < 1e-6, "on the circle: {d}");
+        }
+        // Splitting it puts a corner at its top, both halves quarter circles.
+        b.split_edge(0, Point::mm(10.0, 0.0));
+        assert_eq!(b.outline[1], Point::mm(10.0, -10.0));
+        let q = 1f64.atan() / 2.0;
+        assert!((b.bulges[0] - q.tan()).abs() < 1e-12 && b.bulges[0] == b.bulges[1]);
+        b.remove_corner(1);
+        assert_eq!(b.outline.len(), 4);
+        assert!(b.bulges.is_empty(), "the joined edge is straight");
+        // Rounded 2 mm: eight corners, the board's area less the corners' bites.
+        let mut r = Board::new(20.0, 10.0);
+        r.round_corners(2.0);
+        assert_eq!(r.outline.len(), 8);
+        let e = r.edge();
+        let area = (0..e.len())
+            .map(|k| {
+                let (a, b) = (e[k], e[(k + 1) % e.len()]);
+                a.x.mm() * b.y.mm() - b.x.mm() * a.y.mm()
+            })
+            .sum::<f64>()
+            .abs()
+            / 2.0;
+        let expect = 200.0 - (4.0 - std::f64::consts::PI) * 4.0;
+        assert!((area - expect).abs() < 0.05, "{area} vs {expect}");
+        // A circle on Edge.Cuts is a round cutout.
+        b.graphics.push(Graphic::Circle {
+            layer: Layer::EdgeCuts,
+            center: Point::mm(5.0, 5.0),
+            radius: Length::from_mm(1.5),
+            width: Length::from_mm(0.1),
+        });
+        let cut = &b.cutouts()[0];
+        assert!(cut.len() > 16);
+        assert!(cut.iter().all(|q| ((q.x.mm() - 5.0).hypot(q.y.mm() - 5.0) - 1.5).abs() < 1e-6));
+    }
 
     #[test]
     fn boards_round_trip_and_name_their_layers() {

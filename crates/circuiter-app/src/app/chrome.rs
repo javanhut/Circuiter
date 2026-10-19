@@ -26,7 +26,14 @@ impl CircuiterApp {
             style::logo(ui, 26.0);
             ui.label(RichText::new("Circuiter").size(19.0).strong().color(p.text));
             ui.add_space(18.0);
-            self.menu_bar(ui);
+            // The menus keep to their own width, leaving room for the workspaces.
+            ui.allocate_ui_with_layout(
+                egui::vec2(430.0, 40.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| self.menu_bar(ui),
+            );
+            ui.add_space(12.0);
+            self.space_switcher(ui);
             style::trailing(ui, |ui| {
                 ui.add_space(10.0);
                 let has_ws = self.workspace.is_some();
@@ -64,6 +71,50 @@ impl CircuiterApp {
                 }
             });
         });
+    }
+
+    /// The workspaces, one tab each: Schematic, PCB, 3D and Simulation.
+    fn space_switcher(&mut self, ui: &mut egui::Ui) {
+        let Some(ws) = &self.workspace else { return };
+        let p = style::palette(ui);
+        let sheet = ws.has_schematic();
+        let now = self.current_space();
+        let mut go = None;
+        for space in Space::ALL {
+            let glyph = match space {
+                Space::Schematic => icon::CIRCUITRY,
+                Space::Pcb => icon::CPU,
+                Space::Model => icon::CUBE,
+                Space::Simulation => icon::WAVE_SINE,
+            };
+            let on = space == now;
+            let enabled = sheet || matches!(space, Space::Schematic | Space::Model);
+            let text = RichText::new(format!("{glyph}  {}", space.name()))
+                .size(14.0)
+                .color(if on { p.text } else { p.weak });
+            let tab = egui::Button::new(if on { text.strong() } else { text })
+                .fill(if on { p.accent.gamma_multiply(0.25) } else { egui::Color32::TRANSPARENT })
+                .stroke(egui::Stroke::new(
+                    1.0,
+                    if on { p.accent.gamma_multiply(0.7) } else { egui::Color32::TRANSPARENT },
+                ))
+                .corner_radius(6)
+                .min_size(egui::vec2(0.0, 28.0));
+            let tip = match space {
+                Space::Schematic => "Schematic workspace: draw the circuit, its parts and symbols",
+                Space::Pcb => "PCB workspace: lay out and route the board",
+                Space::Model => "3D workspace: model parts and see the product in 3D",
+                Space::Simulation => {
+                    "Simulation workspace: run the circuit, the bench and the results"
+                }
+            };
+            if ui.add_enabled(enabled, tab).on_hover_text(tip).clicked() && !on {
+                go = Some(space);
+            }
+        }
+        if let Some(space) = go {
+            self.set_space(space);
+        }
     }
 
     /// File, edit and navigation buttons, and the simulation controls.
@@ -419,40 +470,42 @@ impl CircuiterApp {
                 ui.set_height(38.0);
                 ui.add_space(8.0);
                 let has_schematic = ws.has_schematic();
-                let active = match (self.show_pcb, self.show_3d, self.show_netlist, ws.mode) {
-                    (true, _, _, _) => 2,
-                    (_, true, _, _) => 3,
-                    (_, _, true, _) => 4,
-                    (_, _, false, Mode::Schematic) => 0,
-                    (_, _, false, Mode::Symbol) => 1,
-                };
-                let views = [
-                    ("Schematic", has_schematic),
-                    ("Symbol", true),
-                    ("PCB", has_schematic),
-                    ("3D", true),
-                    ("Netlist", has_schematic),
-                ];
-                match style::segmented(ui, &views, active) {
-                    Some(0) => {
-                        (self.show_netlist, self.show_3d, self.show_pcb) = (false, false, false);
-                        ws.set_mode(Mode::Schematic);
+                // Each workspace's own views.
+                match (self.show_pcb, self.show_3d, self.simulating) {
+                    (false, false, false) => {
+                        let active = match (self.show_netlist, ws.mode) {
+                            (true, _) => 2,
+                            (false, Mode::Schematic) => 0,
+                            (false, Mode::Symbol) => 1,
+                        };
+                        let views = [
+                            ("Schematic", has_schematic),
+                            ("Symbol", true),
+                            ("Netlist", has_schematic),
+                        ];
+                        match style::segmented(ui, &views, active) {
+                            Some(0) => {
+                                self.show_netlist = false;
+                                ws.set_mode(Mode::Schematic);
+                            }
+                            Some(1) => {
+                                self.show_netlist = false;
+                                ws.set_mode(Mode::Symbol);
+                            }
+                            Some(2) => {
+                                ws.set_mode(Mode::Schematic);
+                                self.show_netlist = true;
+                            }
+                            _ => {}
+                        }
                     }
-                    Some(1) => {
-                        (self.show_netlist, self.show_3d, self.show_pcb) = (false, false, false);
-                        ws.set_mode(Mode::Symbol);
-                    }
-                    Some(2) => {
-                        (self.show_netlist, self.show_3d, self.show_pcb) = (false, false, true);
-                    }
-                    Some(3) => {
-                        (self.show_netlist, self.show_3d, self.show_pcb) = (false, true, false);
-                        // From the board, its 3D view shows the board.
-                        self.viewer3d.board = active == 2;
-                    }
-                    Some(4) => {
-                        ws.set_mode(Mode::Schematic);
-                        (self.show_netlist, self.show_3d, self.show_pcb) = (true, false, false);
+                    (false, true, _) if has_schematic => {
+                        let views = [("Part body", true), ("Board", true)];
+                        if let Some(k) =
+                            style::segmented(ui, &views, usize::from(self.viewer3d.board))
+                        {
+                            self.viewer3d.board = k == 1;
+                        }
                     }
                     _ => {}
                 }

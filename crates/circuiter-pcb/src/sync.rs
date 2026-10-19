@@ -185,7 +185,7 @@ fn update_with(
             ],
         ));
     }
-    let outline: Vec<P> = board.outline.iter().map(|q| [q.x.mm(), q.y.mm()]).collect();
+    let outline: Vec<P> = board.edge().iter().map(|q| [q.x.mm(), q.y.mm()]).collect();
     let (blo, bhi) = outline.iter().fold(([f64::MAX; 2], [f64::MIN; 2]), |(lo, hi), q| {
         ([lo[0].min(q[0]), lo[1].min(q[1])], [hi[0].max(q[0]), hi[1].max(q[1])])
     });
@@ -301,7 +301,7 @@ pub fn wire_length(layout: &Layout) -> f64 {
 pub fn optimize(design: &Design, top: &CellId, board: &mut Board) -> Result<(f64, f64), String> {
     let layout = Layout::new(design, top, board)?;
     let before = wire_length(&layout);
-    let outline: Vec<P> = board.outline.iter().map(|q| [q.x.mm(), q.y.mm()]).collect();
+    let outline: Vec<P> = board.edge().iter().map(|q| [q.x.mm(), q.y.mm()]).collect();
     let (blo, bhi) = outline.iter().fold(([f64::MAX; 2], [f64::MIN; 2]), |(lo, hi), q| {
         ([lo[0].min(q[0]), lo[1].min(q[1])], [hi[0].max(q[0]), hi[1].max(q[1])])
     });

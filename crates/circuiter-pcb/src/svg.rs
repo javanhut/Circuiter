@@ -45,7 +45,7 @@ fn polyline(points: &[P]) -> String {
 /// and the ratsnest of what's still to route.
 pub fn plot(layout: &Layout, fills: &[ZoneFill], connectivity: Option<&Connectivity>) -> String {
     let board = &layout.board;
-    let outline: Vec<P> = board.outline.iter().map(|q| p(*q)).collect();
+    let outline: Vec<P> = board.edge().iter().map(|q| p(*q)).collect();
     let (lo, hi) =
         geometry::bounds(&vec![vec![outline.clone()]]).unwrap_or(([0.0, 0.0], [10.0, 10.0]));
     let m = 2.0;
@@ -182,6 +182,14 @@ pub fn plot(layout: &Layout, fills: &[ZoneFill], connectivity: Option<&Connectiv
         polyline(&outline),
         colour(Layer::EdgeCuts)
     );
+    for c in crate::zones::cutouts(board) {
+        let _ = writeln!(
+            s,
+            r##"<polygon points="{}" fill="#000814" stroke="{}" stroke-width="0.15"/>"##,
+            polyline(&c),
+            colour(Layer::EdgeCuts)
+        );
+    }
     if let Some(conn) = connectivity {
         for (_, a, b) in &conn.ratsnest {
             let _ = writeln!(

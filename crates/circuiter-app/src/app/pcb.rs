@@ -6,7 +6,7 @@
 use super::CircuiterApp;
 use crate::canvas::Camera;
 use crate::style::{self, icon};
-use circuiter_model::board::{Board, Layer, PadConnection, Placed, Track, Via, Zone};
+use circuiter_model::board::{Board, Graphic, Layer, PadConnection, Placed, Track, Via, Zone};
 use circuiter_model::geom::Length;
 use circuiter_model::{CellId, Design};
 use circuiter_pcb::drc::{self, Checked, Severity};
@@ -29,6 +29,12 @@ const RATSNEST: Color32 = Color32::from_rgb(230, 230, 230);
 const HOLE: Color32 = Color32::from_rgb(0, 16, 35);
 const VIA: Color32 = Color32::from_rgb(194, 194, 194);
 const SELECTED: Color32 = Color32::WHITE;
+/// The realistic view's colours: green solder mask, copper seen through it, gold
+/// (ENIG) pads and a white legend.
+const MASK: Color32 = Color32::from_rgb(18, 82, 44);
+const MASK_COPPER: Color32 = Color32::from_rgb(44, 128, 62);
+const GOLD: Color32 = Color32::from_rgb(214, 176, 96);
+const LEGEND: Color32 = Color32::from_rgb(240, 240, 232);
 
 /// A copper layer's colour, as KiCad shows it.
 pub fn layer_colour(layer: Layer) -> Color32 {
@@ -79,13 +85,19 @@ pub enum PcbTool {
     Keepout {
         points: Vec<P>,
     },
+    /// A cutout through the board being outlined.
+    Cutout {
+        points: Vec<P>,
+    },
+    /// Placing round holes through the board: mounting holes.
+    Hole,
 }
 
 /// What to do with the tool in hand, for the status bar.
 pub fn hint(tool: &PcbTool) -> &'static str {
     match tool {
         PcbTool::Select => {
-            "Click to select · drag a part (its tracks follow), a track (it slides square to itself), a corner or a via · R turn · F flip · L lock · Del delete · X route · Autoroute in the toolbar · PgUp/PgDn layer"
+            "Click to select · drag the board's corners, or the dot mid-edge to bend it into an arc · double-click its edge to add a corner · drag a part (its tracks follow), a track (it slides square to itself), a corner or a via · R turn · F flip · L lock · Del delete · X route · Autoroute in the toolbar · PgUp/PgDn layer"
         }
         PcbTool::Route { points, .. } if points.is_empty() => {
             "Click a pad, track or via to start a track of its net · Esc to stop"
@@ -105,6 +117,10 @@ pub fn hint(tool: &PcbTool) -> &'static str {
         PcbTool::Measure { .. } => {
             "Click where to measure from, then where to · the distance and its X and Y show · Esc done"
         }
+        PcbTool::Cutout { .. } => {
+            "Click the cutout's corners · double-click or Enter to finish · Esc cancels"
+        }
+        PcbTool::Hole => "Click to drill a hole of the diameter chosen in the toolbar · Esc done",
     }
 }
 
@@ -117,6 +133,8 @@ impl PcbTool {
             PcbTool::Outline { .. } => "Outline",
             PcbTool::Measure { .. } => "Measure",
             PcbTool::Keepout { .. } => "Keepout",
+            PcbTool::Cutout { .. } => "Cutout",
+            PcbTool::Hole => "Hole",
         }
     }
 }
@@ -129,6 +147,10 @@ pub enum Pick {
     Via(usize),
     Zone(usize),
     Keepout(usize),
+    /// A corner of the board's outline.
+    Corner(usize),
+    /// A cutout: a board graphic on Edge.Cuts.
+    Cutout(usize),
 }
 
 /// A board worked out from the design: resolved, poured, checked.
@@ -177,7 +199,7 @@ impl Analysis {
         }
         let face = match &board {
             Some(b) if b.outline.len() >= 3 => {
-                tris(&b.outline.iter().map(|q| p(*q)).collect(), &[])
+                tris(&b.edge().iter().map(|q| p(*q)).collect(), &circuiter_pcb::zones::cutouts(b))
             }
             _ => (Vec::new(), Vec::new()),
         };
@@ -196,6 +218,9 @@ pub struct Visible {
     pub drc: bool,
     /// Other copper layers faded right down, so the one being worked on stands out.
     pub high_contrast: bool,
+    /// The board as it comes from the board house: solder mask over the copper, gold
+    /// pads, white legend; one side, the one being worked on.
+    pub realistic: bool,
 }
 
 impl Visible {
@@ -218,6 +243,7 @@ impl Default for Visible {
             ratsnest: true,
             drc: true,
             high_contrast: false,
+            realistic: false,
         }
     }
 }
@@ -305,6 +331,12 @@ pub enum Drag {
     /// A corner where tracks meet, on a layer.
     Corner(Layer, P),
     Via(usize),
+    /// A corner of the board's outline.
+    EdgeCorner(usize),
+    /// The middle of the outline's edge from a corner: bending it into an arc.
+    Bow(usize),
+    /// A cutout, moved whole.
+    Cutout(usize),
 }
 
 /// The layers a board has, for the Layers panel: copper, then the others.
@@ -348,8 +380,83 @@ pub fn apply_drag(board: &Board, layout: &Layout, drag: &Drag, from: P, to: P, g
             circuiter_pcb::edit::move_corner(&mut b, *layer, *at, [snap(to[0]), snap(to[1])])
         }
         Drag::Via(k) => circuiter_pcb::edit::move_via(&mut b, *k, [snap(to[0]), snap(to[1])]),
+        Drag::EdgeCorner(k) => {
+            if let Some(c) = b.outline.get_mut(*k) {
+                *c = point([snap(to[0]), snap(to[1])]);
+            }
+        }
+        Drag::Bow(k) => {
+            let n = b.outline.len();
+            if *k < n {
+                let (a, c) = (p(b.outline[*k]), p(b.outline[(*k + 1) % n]));
+                let (dx, dy) = (c[0] - a[0], c[1] - a[1]);
+                let chord = dx.hypot(dy);
+                if chord > 0.0 {
+                    // How far the pointer is to the edge's right, over half the chord;
+                    // snapped straight near the chord.
+                    let m = [(a[0] + c[0]) / 2.0, (a[1] + c[1]) / 2.0];
+                    let s = ((to[0] - m[0]) * dy - (to[1] - m[1]) * dx) / chord;
+                    let s = if s.abs() < grid { 0.0 } else { snap(s) };
+                    b.bulges.resize(n, 0.0);
+                    b.bulges[*k] = (2.0 * s / chord).clamp(-8.0, 8.0);
+                    b.tidy_bulges();
+                }
+            }
+        }
+        Drag::Cutout(k) => {
+            let d = point(delta);
+            match b.graphics.get_mut(*k) {
+                Some(Graphic::Poly { points, .. }) => points.iter_mut().for_each(|q| *q = *q + d),
+                Some(Graphic::Circle { center, .. }) => *center = *center + d,
+                _ => {}
+            }
+        }
     }
     b
+}
+
+/// Whether a board graphic is a cutout, as [`Board::cutouts`] takes them.
+fn cutout_graphic(g: &Graphic) -> bool {
+    matches!(g, Graphic::Poly { layer: Layer::EdgeCuts, points, .. } if points.len() >= 3)
+        || matches!(g, Graphic::Circle { layer: Layer::EdgeCuts, .. })
+}
+
+/// The handle of the board's outline at `at`: a corner, or an edge's middle (which
+/// bends it).
+pub fn edge_handle(board: &Board, at: P, tolerance: f64) -> Option<Drag> {
+    let near = |q: P| (q[0] - at[0]).hypot(q[1] - at[1]) <= tolerance * 2.0;
+    if let Some(k) = board.outline.iter().position(|q| near(p(*q))) {
+        return Some(Drag::EdgeCorner(k));
+    }
+    (0..board.outline.len()).find(|&k| near(edge_middle(board, k))).map(Drag::Bow)
+}
+
+/// The middle of the outline's edge from corner `k`, on its arc if it is one.
+pub fn edge_middle(board: &Board, k: usize) -> P {
+    let n = board.outline.len();
+    let (a, b) = (board.outline[k], board.outline[(k + 1) % n]);
+    let bulge = board.bulges.get(k).copied().unwrap_or(0.0);
+    circuiter_model::board::arc_middle(a, b, bulge).map_or_else(
+        || {
+            let (a, b) = (p(a), p(b));
+            [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0]
+        },
+        p,
+    )
+}
+
+/// The outline's edge passing within `tolerance` of `at`, as the corner it starts from.
+fn edge_near(board: &Board, at: P, tolerance: f64) -> Option<usize> {
+    let n = board.outline.len();
+    (0..n).find(|&k| {
+        let ends = [board.outline[k], board.outline[(k + 1) % n]];
+        let bulge = board.bulges.get(k).copied().unwrap_or(0.0);
+        let e: Vec<P> = circuiter_model::board::arc_outline(&ends, &[bulge, 0.0])
+            .iter()
+            .map(|q| p(*q))
+            .collect();
+        e.windows(2).any(|w| geometry::segment_distance(w[0], w[1], at, at) <= tolerance * 1.5)
+    })
 }
 
 /// A panel made up: its size and how many copies, or why it can't be.
@@ -464,6 +571,10 @@ pub struct PcbView {
     /// The panel made up, for the board's revision: its size and copies, or why not.
     panel_made: Option<(u64, PanelMade)>,
     pub grid: f64,
+    /// The diameter of holes the Hole tool drills, in millimetres.
+    pub hole: f64,
+    /// The radius Round Corners gives the board's corners, in millimetres.
+    pub corner_radius: f64,
     /// The net new pours are of.
     pub zone_net: String,
     /// Route corners: diagonal first, then straight (`/` swaps).
@@ -508,6 +619,8 @@ impl Default for PcbView {
             power: None,
             panel_made: None,
             grid: 0.635,
+            hole: 3.2,
+            corner_radius: 3.0,
             zone_net: String::new(),
             diagonal_first: false,
             note: None,
@@ -701,6 +814,21 @@ pub fn pick(layout: &Layout, at: P, tolerance: f64, layer: Layer) -> Option<Pick
     }
     if let Some((_, path)) = best {
         return Some(Pick::Footprint(path.to_owned()));
+    }
+    for (k, g) in board.graphics.iter().enumerate() {
+        let hit = match g {
+            Graphic::Poly { layer: Layer::EdgeCuts, points, .. } => {
+                inside(&points.iter().map(|q| p(*q)).collect::<Vec<_>>(), at)
+            }
+            Graphic::Circle { layer: Layer::EdgeCuts, center, radius, .. } => {
+                let c = p(*center);
+                (c[0] - at[0]).hypot(c[1] - at[1]) <= radius.mm() + tolerance
+            }
+            _ => false,
+        };
+        if hit {
+            return Some(Pick::Cutout(k));
+        }
     }
     if let Some(k) = board
         .keepouts
@@ -1190,7 +1318,7 @@ impl CircuiterApp {
             Pick::Zone(k) => {
                 layout.board.zones.get(*k).map(|z| z.net.clone()).into_iter().collect()
             }
-            Pick::Keepout(_) => Default::default(),
+            Pick::Keepout(_) | Pick::Corner(_) | Pick::Cutout(_) => Default::default(),
             Pick::Footprint(path) => {
                 let k = layout.part(path)?;
                 layout.pads_of(k).filter_map(|pad| pad.net.clone()).collect()
@@ -1732,28 +1860,60 @@ impl CircuiterApp {
                 if tool(ui, icon::PROHIBIT, "Keepout", "Keepout: an area kept clear of tracks, vias, pours or parts; click its corners, double-click to finish") {
                     view.tool = PcbTool::Keepout { points: Vec::new() };
                 }
+                if tool(ui, icon::SELECTION_INVERSE, "Cutout", "Cutout: a hole of any shape through the board; click its corners, double-click to finish") {
+                    view.tool = PcbTool::Cutout { points: Vec::new() };
+                }
+                if tool(ui, icon::CIRCLE_DASHED, "Hole", "Mounting hole: click to drill a round hole through the board") {
+                    view.tool = PcbTool::Hole;
+                }
+                if view.tool == PcbTool::Hole {
+                    ui.add(egui::DragValue::new(&mut view.hole).range(0.3..=50.0).speed(0.1).suffix(" mm"))
+                        .on_hover_text("The hole's diameter: 3.2 mm takes an M3 screw");
+                }
                 ui.separator();
                 if style::icon_button(ui, icon::STACK, "Layers panel: show, hide and pick layers", true, view.show_layers).clicked() {
                     view.show_layers = !view.show_layers;
                 }
-                let (r, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), Sense::hover());
-                ui.painter().rect_filled(r, 2.0, layer_colour(view.layer));
-                egui::ComboBox::from_id_salt("active-layer")
-                    .selected_text(view.layer.name())
-                    .show_ui(ui, |ui| {
-                        for &l in &copper {
-                            if ui.selectable_label(view.layer == l, l.name()).clicked() {
-                                let routing = matches!(&view.tool, PcbTool::Route { points, .. } if !points.is_empty());
-                                if routing {
-                                    view.pending_layer = Some(l);
-                                } else {
-                                    view.layer = l;
-                                }
-                            }
+                // The copper layers, one chip each: click to work on it; while routing,
+                // a via takes the track there.
+                let routing = matches!(&view.tool, PcbTool::Route { points, .. } if !points.is_empty());
+                for &l in &copper {
+                    let on = view.layer == l;
+                    let c = layer_colour(l);
+                    let chip = egui::Button::new(RichText::new(l.name()).color(if on { Color32::BLACK } else { c }).strong())
+                        .fill(if on { c } else { c.gamma_multiply(0.15) })
+                        .stroke(Stroke::new(1.0, c.gamma_multiply(0.8)))
+                        .corner_radius(4);
+                    let tip = if routing {
+                        format!("Drop a via and carry on routing on {}", l.name())
+                    } else {
+                        format!("Work on {}  (PgUp / PgDn)", l.name())
+                    };
+                    if ui.add(chip).on_hover_text(tip).clicked() && !on {
+                        if routing {
+                            view.pending_layer = Some(l);
+                        } else {
+                            view.layer = l;
                         }
-                    })
-                    .response
-                    .on_hover_text("The layer being worked on  (PgUp / PgDn)");
+                        view.visible.hidden.remove(&l);
+                    }
+                }
+                if routing {
+                    let other = if view.layer == Layer::FCu { *copper.last().unwrap_or(&Layer::BCu) } else { Layer::FCu };
+                    if ui.button(format!("{}  Via", icon::ARROWS_DOWN_UP)).on_hover_text(format!("Drop a via here and route on to {}  (V)", other.name())).clicked() {
+                        view.pending_layer = Some(other);
+                    }
+                }
+                // How the other layers show: all, dimmed, or hidden.
+                let isolation = if view.single_layer { 2 } else { usize::from(view.visible.high_contrast) };
+                if let Some(k) = style::segmented(ui, &[("All", true), ("Dim", true), ("Only", true)], isolation) {
+                    view.single_layer = k == 2;
+                    view.visible.high_contrast = k == 1;
+                }
+                ui.label(RichText::new("other layers").small().color(p.weak));
+                if style::icon_button(ui, icon::CIRCUITRY, "Realistic view: solder mask, gold pads and white legend, as the board house makes it", true, view.visible.realistic).clicked() {
+                    view.visible.realistic = !view.visible.realistic;
+                }
                 if matches!(view.tool, PcbTool::Zone { .. }) {
                     if view.zone_net.is_empty() || !nets.contains(&view.zone_net) {
                         view.zone_net = nets.iter().find(|n| n.eq_ignore_ascii_case("gnd") || *n == "0").or(nets.first()).cloned().unwrap_or_default();
@@ -2059,10 +2219,20 @@ impl CircuiterApp {
         let typing = ui.ctx().egui_wants_keyboard_input();
         let keys = |k: egui::Key| !typing && ui.input(|i| i.key_pressed(k));
         let (shift, cmd) = ui.input(|i| (i.modifiers.shift, i.modifiers.command));
+        // Double-clicking the board's edge adds a corner there.
+        let on_edge = (self.pcb.tool == PcbTool::Select && editable && response.double_clicked())
+            .then_some(hover)
+            .flatten()
+            .and_then(|at| {
+                let b = &self.pcb.layout()?.board;
+                let k = edge_near(b, at, tolerance)?;
+                edge_handle(b, at, tolerance).is_none().then_some((k, at))
+            });
         if keys(egui::Key::Home)
             || (response.double_clicked()
                 && self.pcb.tool == PcbTool::Select
-                && self.pcb.selected.is_none())
+                && self.pcb.selected.is_none()
+                && on_edge.is_none())
         {
             self.pcb.camera = None;
         }
@@ -2072,6 +2242,14 @@ impl CircuiterApp {
         let layer = self.pcb.layer;
         let mut edit: Option<BoardEdit> = None;
         let layout = self.pcb.layout().expect("board").clone();
+        if let Some((k, at)) = on_edge {
+            let at = self.pcb.snap(at);
+            edit = Some(Box::new(move |b: &mut Board| {
+                b.split_edge(k, point(at));
+                Ok(())
+            }));
+            self.pcb.selected = Some(Pick::Corner(k + 1));
+        }
         match self.pcb.tool.clone() {
             PcbTool::Select => {
                 if response.drag_started_by(egui::PointerButton::Primary) && !space {
@@ -2079,8 +2257,13 @@ impl CircuiterApp {
                     let origin =
                         ui.input(|i| i.pointer.press_origin()).or(response.interact_pointer_pos());
                     if let Some(from) = origin.map(world) {
-                        let picked = pick(&layout, from, tolerance, layer);
+                        let handle = edge_handle(&layout.board, from, tolerance);
+                        let picked = match &handle {
+                            Some(Drag::EdgeCorner(k)) => Some(Pick::Corner(*k)),
+                            _ => pick(&layout, from, tolerance, layer),
+                        };
                         let drag = match &picked {
+                            _ if handle.is_some() => handle,
                             // One of a group: the group moves.
                             Some(Pick::Footprint(path))
                                 if self.pcb.group.len() > 1 && self.pcb.group.contains(path) =>
@@ -2116,6 +2299,7 @@ impl CircuiterApp {
                                 }
                             }
                             Some(Pick::Via(k)) => Some(Drag::Via(*k)),
+                            Some(Pick::Cutout(k)) => Some(Drag::Cutout(*k)),
                             _ => None,
                         };
                         // Empty board (or a pour): a selection box.
@@ -2182,7 +2366,11 @@ impl CircuiterApp {
                     }
                 }
                 if response.clicked_by(egui::PointerButton::Primary) {
-                    let picked = hover.and_then(|at| pick(&layout, at, tolerance, layer));
+                    let picked =
+                        hover.and_then(|at| match edge_handle(&layout.board, at, tolerance) {
+                            Some(Drag::EdgeCorner(k)) => Some(Pick::Corner(k)),
+                            _ => pick(&layout, at, tolerance, layer),
+                        });
                     // Shift+click adds a part to the group, or takes it out.
                     match (&picked, shift) {
                         (Some(Pick::Footprint(path)), true) => {
@@ -2248,7 +2436,12 @@ impl CircuiterApp {
                         }
                     }
                     Some(
-                        pick @ (Pick::Track(_) | Pick::Via(_) | Pick::Zone(_) | Pick::Keepout(_)),
+                        pick @ (Pick::Track(_)
+                        | Pick::Via(_)
+                        | Pick::Zone(_)
+                        | Pick::Keepout(_)
+                        | Pick::Corner(_)
+                        | Pick::Cutout(_)),
                     ) if keys(egui::Key::Delete) || keys(egui::Key::Backspace) => {
                         self.pcb.selected = None;
                         edit = Some(Box::new(move |b: &mut Board| {
@@ -2258,6 +2451,10 @@ impl CircuiterApp {
                                 Pick::Zone(k) if k < b.zones.len() => drop(b.zones.remove(k)),
                                 Pick::Keepout(k) if k < b.keepouts.len() => {
                                     drop(b.keepouts.remove(k))
+                                }
+                                Pick::Corner(k) => b.remove_corner(k),
+                                Pick::Cutout(k) if k < b.graphics.len() => {
+                                    drop(b.graphics.remove(k))
                                 }
                                 _ => {}
                             }
@@ -2483,19 +2680,40 @@ impl CircuiterApp {
                     }
                 }
             }
+            PcbTool::Hole => {
+                if keys(egui::Key::Escape) {
+                    self.pcb.tool = PcbTool::Select;
+                } else if response.clicked_by(egui::PointerButton::Primary) {
+                    if let Some(h) = hover {
+                        let (at, r) = (point(self.pcb.snap(h)), self.pcb.hole / 2.0);
+                        edit = Some(Box::new(move |b: &mut Board| {
+                            b.graphics.push(Graphic::Circle {
+                                layer: Layer::EdgeCuts,
+                                center: at,
+                                radius: Length::from_mm(r),
+                                width: Length::from_mm(0.1),
+                            });
+                            Ok(())
+                        }));
+                    }
+                }
+            }
             PcbTool::Zone { mut points }
             | PcbTool::Outline { mut points }
-            | PcbTool::Keepout { mut points } => {
+            | PcbTool::Keepout { mut points }
+            | PcbTool::Cutout { mut points } => {
                 let kind = match self.pcb.tool {
                     PcbTool::Zone { .. } => 0,
                     PcbTool::Outline { .. } => 1,
-                    _ => 2,
+                    PcbTool::Keepout { .. } => 2,
+                    _ => 3,
                 };
                 let zone = kind == 0;
                 let make = |points: Vec<P>| match kind {
                     0 => PcbTool::Zone { points },
                     1 => PcbTool::Outline { points },
-                    _ => PcbTool::Keepout { points },
+                    2 => PcbTool::Keepout { points },
+                    _ => PcbTool::Cutout { points },
                 };
                 if keys(egui::Key::Escape) {
                     self.pcb.tool =
@@ -2507,7 +2725,17 @@ impl CircuiterApp {
                     if points.len() >= 3 {
                         let outline: Vec<_> = points.iter().map(|&q| point(q)).collect();
                         let (net, layer) = (self.pcb.zone_net.clone(), self.pcb.layer);
-                        edit = Some(if kind == 2 {
+                        edit = Some(if kind == 3 {
+                            Box::new(move |b: &mut Board| {
+                                b.graphics.push(Graphic::Poly {
+                                    layer: Layer::EdgeCuts,
+                                    points: outline,
+                                    width: Length::from_mm(0.1),
+                                    filled: false,
+                                });
+                                Ok(())
+                            })
+                        } else if kind == 2 {
                             Box::new(move |b: &mut Board| {
                                 b.keepouts.push(circuiter_model::board::Keepout::new(outline));
                                 Ok(())
@@ -2523,6 +2751,7 @@ impl CircuiterApp {
                         } else {
                             Box::new(move |b: &mut Board| {
                                 b.outline = outline;
+                                b.bulges.clear();
                                 Ok(())
                             })
                         });
@@ -2617,7 +2846,11 @@ impl CircuiterApp {
         painter.rect_filled(rect, 0.0, BACKGROUND);
         let d = Draw { painter: &painter, cam, view: rect };
         let board = &layout.board;
-        d.mesh(&analysis.face.0, &analysis.face.1, BOARD_FILL);
+        let real = view.visible.realistic;
+        // Realistic: the side being worked on, front unless it's the back.
+        let front = view.layer != Layer::BCu;
+        let outer = if front { Layer::FCu } else { Layer::BCu };
+        d.mesh(&analysis.face.0, &analysis.face.1, if real { MASK } else { BOARD_FILL });
         // Grid dots, when they're far enough apart to see.
         let step_px = view.grid as f32 * cam.scale;
         if step_px >= 8.0 {
@@ -2679,12 +2912,19 @@ impl CircuiterApp {
         }
         let dim = if view.visible.high_contrast { 0.18 } else { 0.45 };
         for layer in layers {
-            if !view.visible.shows(layer) || (view.single_layer && layer != view.layer) {
+            if real && layer != outer {
+                continue;
+            }
+            if !real && (!view.visible.shows(layer) || (view.single_layer && layer != view.layer)) {
                 continue;
             }
             let active = layer == view.layer;
             let base = layer_colour(layer);
-            let colour = if active { base } else { base.gamma_multiply(dim) };
+            let colour = match (real, active) {
+                (true, _) => MASK_COPPER,
+                (false, true) => base,
+                (false, false) => base.gamma_multiply(dim),
+            };
             if view.visible.zones {
                 for (l, pts, idx) in &analysis.fills {
                     if *l == layer {
@@ -2714,14 +2954,20 @@ impl CircuiterApp {
                     *q = shift(pad.part, *q);
                 }
                 let hi = net_hi.is_some() && pad.net == net_hi;
+                let colour = if real { GOLD } else { colour };
                 d.convex(&c, if hi { colour.gamma_multiply(1.4).to_opaque() } else { colour });
             }
         }
         for (k, v) in routed.vias.iter().enumerate() {
+            // Tented under the mask in the realistic view.
             d.disc(
                 p(v.at),
                 v.diameter.mm() / 2.0,
-                if view.selected == Some(Pick::Via(k)) { SELECTED } else { VIA },
+                match view.selected == Some(Pick::Via(k)) {
+                    true => SELECTED,
+                    false if real => MASK_COPPER,
+                    false => VIA,
+                },
             );
             d.disc(p(v.at), v.drill.mm() / 2.0, HOLE);
         }
@@ -2775,22 +3021,58 @@ impl CircuiterApp {
                 }
             }
         }
-        // Silkscreen, courtyards and fabrication drawings, as shown.
+        // Silkscreen, courtyards and fabrication drawings, as shown; realistic, only
+        // the side's legend and the edge, in white.
+        let realistic_visible;
+        let shown = if real {
+            let silk = if front { Layer::FSilk } else { Layer::BSilk };
+            let mut v = view.visible.clone();
+            v.hidden = OTHER_LAYERS
+                .iter()
+                .map(|(l, _)| *l)
+                .filter(|l| *l != silk && *l != Layer::EdgeCuts)
+                .collect();
+            realistic_visible = v;
+            &realistic_visible
+        } else {
+            &view.visible
+        };
         for (k, part) in layout.parts.iter().enumerate() {
             if part.place.is_none() {
                 continue;
             }
             for g in layout.graphics(k) {
-                paint_graphic(&d, &g, &|q| shift(k, q), &view.visible);
+                paint_graphic(&d, &g, &|q| shift(k, q), shown);
             }
         }
         for g in &board.graphics {
-            paint_graphic(&d, g, &|q| q, &view.visible);
+            paint_graphic(&d, g, &|q| q, shown);
         }
         // The edge.
-        let edge: Vec<P> = board.outline.iter().map(|q| p(*q)).collect();
+        let edge: Vec<P> = board.edge().iter().map(|q| p(*q)).collect();
         if edge.len() >= 2 && view.visible.shows(Layer::EdgeCuts) {
             d.outline(&edge, Stroke::new(1.5, EDGE));
+        }
+        // Its handles, to shape it: squares on the corners, dots mid-edge to bend it.
+        if view.tool == PcbTool::Select && view.visible.shows(Layer::EdgeCuts) {
+            for (k, q) in board.outline.iter().enumerate() {
+                let on = view.selected == Some(Pick::Corner(k));
+                let r = egui::Rect::from_center_size(d.at(p(*q)), egui::vec2(7.0, 7.0));
+                painter.rect_filled(r, 1.0, if on { SELECTED } else { BACKGROUND });
+                painter.rect_stroke(r, 1.0, Stroke::new(1.2, EDGE), egui::StrokeKind::Middle);
+                painter.circle_stroke(d.at(edge_middle(board, k)), 3.0, Stroke::new(1.2, EDGE));
+            }
+        }
+        if let Some(Pick::Cutout(k)) = view.selected {
+            if let Some(c) = board.cutouts().into_iter().nth(
+                board.graphics[..k.min(board.graphics.len())]
+                    .iter()
+                    .filter(|g| cutout_graphic(g))
+                    .count(),
+            ) {
+                let c: Vec<P> = c.iter().map(|q| p(*q)).collect();
+                d.outline(&c, Stroke::new(2.0, SELECTED));
+            }
         }
         // The selected part's box.
         if let Some(Pick::Footprint(path)) = &view.selected {
@@ -2898,6 +3180,7 @@ impl CircuiterApp {
             PcbTool::Zone { points }
             | PcbTool::Outline { points }
             | PcbTool::Keepout { points }
+            | PcbTool::Cutout { points }
                 if !points.is_empty() =>
             {
                 let mut pts = points.clone();
@@ -2962,7 +3245,9 @@ fn paint_graphic(
                 | Layer::BFab
                 | Layer::EdgeCuts
         );
-        (drawn && visible.shows(l)).then(|| layer_colour(l))
+        let silk = matches!(l, Layer::FSilk | Layer::BSilk);
+        (drawn && visible.shows(l))
+            .then(|| if visible.realistic && silk { LEGEND } else { layer_colour(l) })
     };
     match g {
         G::Line { layer, a, b, width } => {
@@ -3054,7 +3339,7 @@ pub fn board_inspector(app: &mut CircuiterApp, ui: &mut egui::Ui) {
             }
             style::section(ui, "Board", |ui| {
                 let outline: Vec<P> = changed.outline.iter().map(|q| p(*q)).collect();
-                let rect = outline.len() == 4 && {
+                let rect = outline.len() == 4 && changed.bulges.is_empty() && {
                     let (xs, ys): (Vec<f64>, Vec<f64>) =
                         outline.iter().map(|q| (q[0], q[1])).unzip();
                     xs.iter().all(|&x| {
@@ -3103,10 +3388,45 @@ pub fn board_inspector(app: &mut CircuiterApp, ui: &mut egui::Ui) {
                             ];
                         }
                     } else {
+                        let edge: Vec<P> = changed.edge().iter().map(|q| p(*q)).collect();
+                        let (lo, hi) =
+                            geometry::bounds(&vec![vec![edge]]).unwrap_or(([0.0; 2], [0.0; 2]));
                         style::name(ui, "Outline");
-                        ui.label(format!("{} corners", outline.len()));
+                        let arcs = changed.bulges.iter().filter(|b| **b != 0.0).count();
+                        ui.label(format!(
+                            "{} corners, {arcs} arcs · {:.2} × {:.2} mm",
+                            outline.len(),
+                            hi[0] - lo[0],
+                            hi[1] - lo[1]
+                        ));
                         ui.end_row();
                     }
+                    style::name(ui, "Corners");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut app.pcb.corner_radius)
+                                .range(0.1..=200.0)
+                                .speed(0.1)
+                                .suffix(" mm"),
+                        );
+                        if ui
+                            .button("Round")
+                            .on_hover_text(
+                                "Round every corner between straight edges to this radius",
+                            )
+                            .clicked()
+                        {
+                            changed.round_corners(app.pcb.corner_radius);
+                        }
+                        if ui
+                            .button("Straighten")
+                            .on_hover_text("Make every arc of the outline a straight edge")
+                            .clicked()
+                        {
+                            changed.bulges.clear();
+                        }
+                    });
+                    ui.end_row();
                     style::name(ui, "");
                     if ui
                         .button(format!("{}  Import Outline…", icon::POLYGON))
@@ -3565,6 +3885,94 @@ fn selected_ui(ui: &mut egui::Ui, board: &mut Board, layout: Option<&Layout>, pi
                 length_row(ui, "Diameter", &mut v.diameter, 0.2..=5.0);
                 length_row(ui, "Drill", &mut v.drill, 0.1..=4.0);
             });
+        }
+        Pick::Corner(k) => {
+            let n = board.outline.len();
+            if *k >= n {
+                return;
+            }
+            ui.label(RichText::new(format!("Board corner {}", k + 1)).strong().color(p.text));
+            style::properties(ui, "corner-props", |ui| {
+                let mut at = circuiter_pcb::layout::p(board.outline[*k]);
+                style::name(ui, "X");
+                let x = ui.add(egui::DragValue::new(&mut at[0]).speed(0.1).suffix(" mm")).changed();
+                ui.end_row();
+                style::name(ui, "Y");
+                let y = ui.add(egui::DragValue::new(&mut at[1]).speed(0.1).suffix(" mm")).changed();
+                ui.end_row();
+                if x || y {
+                    board.outline[*k] = point(at);
+                }
+                // The edge on to the next corner: straight, or an arc of a radius.
+                board.bulges.resize(n, 0.0);
+                let (a, b) = (
+                    circuiter_pcb::layout::p(board.outline[*k]),
+                    circuiter_pcb::layout::p(board.outline[(*k + 1) % n]),
+                );
+                let half = (b[0] - a[0]).hypot(b[1] - a[1]) / 2.0;
+                let bulge = board.bulges[*k];
+                let mut radius = if bulge == 0.0 {
+                    0.0
+                } else {
+                    let s = bulge * half;
+                    (half * half + s * s) / (2.0 * s)
+                };
+                style::name(ui, "Next edge");
+                let r = ui
+                    .add(egui::DragValue::new(&mut radius).speed(0.1).suffix(" mm"))
+                    .on_hover_text(
+                        "The radius of the edge on to the next corner: 0 is straight, negative bends it inwards",
+                    )
+                    .changed();
+                ui.end_row();
+                if r {
+                    // The bulge of the shorter arc of that radius through both corners.
+                    board.bulges[*k] = if radius.abs() < half {
+                        bulge
+                    } else {
+                        let s = radius - radius.signum() * (radius * radius - half * half).sqrt();
+                        s / half
+                    };
+                }
+                board.tidy_bulges();
+            });
+            ui.label(RichText::new("Drag it on the board · Del removes it").color(p.weak));
+        }
+        Pick::Cutout(k) => {
+            ui.label(RichText::new("Cutout").strong().color(p.text));
+            match board.graphics.get_mut(*k) {
+                Some(Graphic::Circle { center, radius, .. }) => {
+                    style::properties(ui, "cutout-props", |ui| {
+                        let mut c = circuiter_pcb::layout::p(*center);
+                        style::name(ui, "X");
+                        ui.add(egui::DragValue::new(&mut c[0]).speed(0.1).suffix(" mm"));
+                        ui.end_row();
+                        style::name(ui, "Y");
+                        ui.add(egui::DragValue::new(&mut c[1]).speed(0.1).suffix(" mm"));
+                        ui.end_row();
+                        *center = point(c);
+                        let mut d = radius.mm() * 2.0;
+                        style::name(ui, "Diameter");
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut d)
+                                    .range(0.3..=200.0)
+                                    .speed(0.1)
+                                    .suffix(" mm"),
+                            )
+                            .changed()
+                        {
+                            *radius = Length::from_mm(d / 2.0);
+                        }
+                        ui.end_row();
+                    });
+                }
+                Some(Graphic::Poly { points, .. }) => {
+                    ui.label(format!("{} corners", points.len()));
+                }
+                _ => {}
+            }
+            ui.label(RichText::new("Drag it on the board · Del removes it").color(p.weak));
         }
         Pick::Keepout(k) => {
             let copper = board.copper();

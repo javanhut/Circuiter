@@ -166,13 +166,14 @@ pub fn build_live(design: &Design, layout: &Layout, fills: &[ZoneFill], live: &L
     let board = &layout.board;
     let t = board.thickness.mm() as f32;
     let mut out = Board3d::default();
-    let outline: Vec<P> = board.outline.iter().map(|q| p(*q)).collect();
+    let outline: Vec<P> = board.edge().iter().map(|q| p(*q)).collect();
     if outline.len() >= 3 {
         let holes: Vec<Vec<(f32, f32)>> = layout
             .pads
             .iter()
             .filter_map(|pd| Some(ring(&geometry::circle(pd.center, pd.drill()? / 2.0))))
             .chain(board.vias.iter().map(|v| ring(&geometry::circle(p(v.at), v.drill.mm() / 2.0))))
+            .chain(crate::zones::cutouts(board).iter().map(ring))
             .collect();
         out.board = extrude_holes(&ring(&geometry::ccw(outline)), &holes, -t, 0.0, color("board"));
     }

@@ -228,7 +228,7 @@ pub fn check(layout: &Layout) -> Checked {
         |rule: Rule, message: String, at: Option<P>| out.push(Violation { rule, message, at });
 
     // The outline.
-    let outline: Vec<P> = board.outline.iter().map(|q| p(*q)).collect();
+    let outline: Vec<P> = board.edge().iter().map(|q| p(*q)).collect();
     let edge = zones::board_shape(layout);
     if outline.len() < 3 || geometry::area(&edge) < 1e-6 {
         flag(Rule::Outline, "the board has no closed outline on Edge.Cuts".into(), None);
@@ -399,8 +399,10 @@ pub fn check(layout: &Layout) -> Checked {
             );
         }
     }
-    let edges: Vec<(P, P)> =
-        (0..outline.len()).map(|k| (outline[k], outline[(k + 1) % outline.len()])).collect();
+    let edges: Vec<(P, P)> = std::iter::once(outline.clone())
+        .chain(zones::cutouts(board))
+        .flat_map(|c| (0..c.len()).map(move |k| (c[k], c[(k + 1) % c.len()])))
+        .collect();
     if !edge.is_empty() {
         for c in &copper {
             if matches!(c.item, Item::Fill(..)) {

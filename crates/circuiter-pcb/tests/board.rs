@@ -1234,3 +1234,47 @@ fn assembly_variants() {
     let layout = Layout::new(&design, &top, &b).unwrap();
     assert!(circuiter_pcb::fab::bom(&layout).contains("\"R1, R2\",\"10k\""));
 }
+
+/// A shaped board: a round corner and a mounting hole. The pour keeps clear of both,
+/// copper crossing the hole is off the board, the router keeps out of it, and the 3D
+/// board has the hole through it.
+#[test]
+fn arcs_and_cutouts_shape_the_board() {
+    use circuiter_model::board::Graphic;
+    let (design, top) = design();
+    let mut b = board();
+    // The right edge bows out 5 mm; a 4 mm hole in the bottom right.
+    b.bulges = vec![0.0, 2.0 * 5.0 / 30.0];
+    b.graphics.push(Graphic::Circle {
+        layer: Layer::EdgeCuts,
+        center: pt(35.0, 25.0),
+        radius: Length::from_mm(2.0),
+        width: Length::from_mm(0.1),
+    });
+    b.zones.push(Zone::new(Layer::BCu, "GND", b.outline.clone()));
+    let layout = Layout::new(&design, &top, &b).unwrap();
+    let shape = circuiter_pcb::zones::board_shape(&layout);
+    let area = circuiter_pcb::geometry::area(&shape);
+    // 40 × 30, plus the bow's circular segment (radius 25 mm), less the hole.
+    let angle = 2.0 * (15.0f64 / 25.0).asin();
+    let expect = 1200.0 + 625.0 / 2.0 * (angle - angle.sin()) - std::f64::consts::PI * 4.0;
+    assert!((area - expect).abs() < 0.5, "{area} vs {expect}");
+    let fills = circuiter_pcb::zones::fill(&layout);
+    let hole = vec![vec![circuiter_pcb::geometry::circle([35.0, 25.0], 2.0)]];
+    for f in &fills {
+        let inside = circuiter_pcb::geometry::difference(&f.shapes, &hole);
+        let lost =
+            circuiter_pcb::geometry::area(&f.shapes) - circuiter_pcb::geometry::area(&inside);
+        assert!(lost < 1e-6, "the pour stays out of the hole: {lost}");
+    }
+    // A track over the hole is off the board.
+    b.tracks.push(track(&layout, "mid", [30.0, 25.0], [39.0, 25.0], Layer::FCu));
+    let crossing = Layout::new(&design, &top, &b).unwrap();
+    assert!(count(&drc::check(&crossing), Rule::OutsideBoard) >= 1);
+    // The 3D board has the hole: fewer triangles' worth of board over it.
+    let built = circuiter_pcb::board3d::build(&design, &layout, &[]);
+    let solid = Board::new(40.0, 30.0);
+    let plain =
+        circuiter_pcb::board3d::build(&design, &Layout::new(&design, &top, &solid).unwrap(), &[]);
+    assert!(built.board.triangles() > plain.board.triangles());
+}

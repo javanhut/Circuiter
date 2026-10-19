@@ -6,10 +6,19 @@ use crate::style::{self, icon};
 
 impl CircuiterApp {
     pub(super) fn right_panel(&mut self, ui: &mut egui::Ui) {
-        if let Some(t) = style::strip(ui, |ui| {
-            style::tab_strip(ui, &["Properties", "Simulation", "Physics"], self.right_tab)
-        }) {
-            self.right_tab = t;
+        // Running the circuit belongs to the Simulation workspace.
+        let tabs: &[(usize, &str)] = if self.current_space() == Space::Simulation {
+            &[(1, "Simulation"), (2, "Physics"), (0, "Properties")]
+        } else {
+            &[(0, "Properties")]
+        };
+        if !tabs.iter().any(|(k, _)| *k == self.right_tab) {
+            self.right_tab = tabs[0].0;
+        }
+        let names: Vec<&str> = tabs.iter().map(|(_, n)| *n).collect();
+        let at = tabs.iter().position(|(k, _)| *k == self.right_tab).unwrap_or(0);
+        if let Some(t) = style::strip(ui, |ui| style::tab_strip(ui, &names, at)) {
+            self.right_tab = tabs[t].0;
         }
         egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
             match self.right_tab {
@@ -305,13 +314,20 @@ impl CircuiterApp {
         let problems = self.workspace.as_ref().map_or(0, |ws| ws.problems().len());
         let problems_tab = format!("Problems ({problems})");
         let mut hide = false;
+        // The schematic has its problems; the simulation its results too.
+        let tabs: Vec<(usize, &str)> = if self.current_space() == Space::Simulation {
+            vec![(0, "Waveforms"), (1, "Thermal"), (2, &problems_tab), (3, "Oscilloscope")]
+        } else {
+            vec![(2, &problems_tab)]
+        };
+        if !tabs.iter().any(|(k, _)| *k == self.bottom_tab) {
+            self.bottom_tab = tabs[0].0;
+        }
+        let names: Vec<&str> = tabs.iter().map(|(_, n)| *n).collect();
+        let at = tabs.iter().position(|(k, _)| *k == self.bottom_tab).unwrap_or(0);
         if let Some(t) = style::strip(ui, |ui| {
             ui.horizontal(|ui| {
-                let t = style::tab_strip(
-                    ui,
-                    &["Waveforms", "Thermal", &problems_tab, "Oscilloscope"],
-                    self.bottom_tab,
-                );
+                let t = style::tab_strip(ui, &names, at).map(|t| tabs[t].0);
                 style::trailing(ui, |ui| {
                     hide = style::icon_button(ui, icon::X, "Hide the results panel", true, false)
                         .clicked();

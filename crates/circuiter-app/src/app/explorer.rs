@@ -12,15 +12,19 @@ pub fn folder_label(name: &str) -> String {
 impl CircuiterApp {
     pub(super) fn explorer(&mut self, ui: &mut egui::Ui) {
         let p = style::palette(ui);
-        egui::Panel::bottom("components")
-            .resizable(true)
-            .default_size(380.0)
-            .min_size(120.0)
-            .frame(egui::Frame::new().fill(p.panel))
-            .show(ui, |ui| {
-                ui.expand_to_include_rect(ui.max_rect());
-                self.components(ui)
-            });
+        // Parts to place belong where circuits are drawn and run.
+        let space = self.current_space();
+        if matches!(space, Space::Schematic | Space::Simulation) {
+            egui::Panel::bottom(format!("components-{}", space.name()))
+                .resizable(true)
+                .default_size(380.0)
+                .min_size(120.0)
+                .frame(egui::Frame::new().fill(p.panel))
+                .show(ui, |ui| {
+                    ui.expand_to_include_rect(ui.max_rect());
+                    self.components(ui)
+                });
+        }
         let tab = style::strip(ui, |ui| {
             ui.horizontal(|ui| {
                 let picked = style::tab_strip(ui, &["Project", "Libraries"], self.left_tab);

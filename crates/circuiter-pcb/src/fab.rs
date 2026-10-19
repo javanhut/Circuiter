@@ -401,7 +401,7 @@ fn outputs_with(
         });
     }
     let mut edge = Gerber::new();
-    let mut outline: Vec<P> = board.outline.iter().map(|q| p(*q)).collect();
+    let mut outline: Vec<P> = board.edge().iter().map(|q| p(*q)).collect();
     if let Some(&first) = outline.first() {
         outline.push(first);
     }
