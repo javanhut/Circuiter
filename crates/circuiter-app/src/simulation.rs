@@ -676,6 +676,21 @@ mod tests {
         (design, CellId::new("cmos_inverter", "testbench"))
     }
 
+    /// A port named as an inverted output (`Q'`) works through every view: the
+    /// inverter's output renamed so still drives the testbench's OUT.
+    #[test]
+    fn a_primed_port_simulates() {
+        let (mut design, top) = example();
+        let inv = CellId::new("cmos_inverter", "inverter");
+        crate::interface::rename_port(design.cell_mut(&inv).unwrap(), "out", "Q'").unwrap();
+        let mut sim = Simulation::prepare(&design, &top).unwrap();
+        assert!(sim.diagnostics.is_empty(), "{:?}", sim.diagnostics);
+        sim.run(Analysis::Op);
+        assert_eq!(sim.error, None);
+        let out = sim.netlist.net("OUT").unwrap();
+        assert!(sim.voltage(out).unwrap() > 1.79, "the clock starts low, so Q' is high");
+    }
+
     #[test]
     fn the_example_simulates_end_to_end() {
         let (design, top) = example();

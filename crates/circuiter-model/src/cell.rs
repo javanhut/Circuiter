@@ -435,6 +435,14 @@ pub fn validate_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Validates a port name: as [`validate_name`], and a prime may follow, as in `Q'` for
+/// an inverted output. Port names never become directory names, and the netlister
+/// makes SPICE nodes of them.
+pub fn validate_port_name(name: &str) -> Result<(), String> {
+    validate_name(&name.replace('\'', "_"))
+        .map_err(|e| e.replace("use letters, digits and `_`", "use letters, digits, `_` and `'`"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,6 +454,15 @@ mod tests {
         assert!("std:".parse::<CellRef>().is_err());
         assert!("1bad".parse::<CellRef>().is_err());
         assert!("a:b:c".parse::<CellRef>().is_err());
+    }
+
+    #[test]
+    fn ports_may_be_primed() {
+        assert!(validate_port_name("Q'").is_ok());
+        assert!(validate_port_name("Q_n'").is_ok());
+        assert!(validate_port_name("'Q").is_err());
+        assert!(validate_port_name("Q-").unwrap_err().contains("`'`"));
+        assert!(validate_name("Q'").is_err(), "cells and instances still can't");
     }
 
     #[test]

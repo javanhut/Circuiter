@@ -4,7 +4,7 @@
 //! cell before an operation, which gives undo and redo for free. `design` is used only to
 //! look up the symbols of placed parts.
 
-use circuiter_model::cell::{Port, PortKind, validate_name};
+use circuiter_model::cell::{Port, PortKind, validate_name, validate_port_name};
 use circuiter_model::connectivity::placed_pins;
 use circuiter_model::geom::{Length, Point, Rotation, Transform};
 use circuiter_model::schematic::{Instance, NetLabel, Schematic, SchematicPort, Wire};
@@ -112,7 +112,7 @@ pub fn toggle_no_connect(def: &mut CellDef, at: Point) -> Result<(), String> {
 /// Places a port of the cell on its schematic, adding it to the cell's interface if it's
 /// new. A port can only be placed once.
 pub fn add_port(def: &mut CellDef, name: &str, kind: PortKind, at: Point) -> Result<usize, String> {
-    validate_name(name)?;
+    validate_port_name(name)?;
     let s = def.schematic.get_or_insert_with(Schematic::default);
     if s.ports.iter().any(|p| p.port == name) {
         return Err(format!("port `{name}` is already placed on this sheet"));
@@ -1016,7 +1016,7 @@ pub fn component_from(
             continue;
         }
         let named = matches!(net.source, NetNameSource::Label | NetNameSource::Port)
-            && validate_name(&net.name).is_ok();
+            && validate_port_name(&net.name).is_ok();
         let base = if named { net.name.clone() } else { format!("p{}", ports.len() + 1) };
         let mut name = base.clone();
         let mut n = 2;

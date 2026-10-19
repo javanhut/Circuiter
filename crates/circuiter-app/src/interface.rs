@@ -5,7 +5,7 @@
 //! line with [`circuiter_model::builder::sync`].
 
 use circuiter_model::CellDef;
-use circuiter_model::cell::{ParamDef, Port, PortKind, validate_name};
+use circuiter_model::cell::{ParamDef, Port, PortKind, validate_name, validate_port_name};
 
 pub fn set_description(def: &mut CellDef, text: &str) {
     def.cell.description = text.trim().to_owned();
@@ -29,7 +29,7 @@ pub fn set_prefix(def: &mut CellDef, prefix: &str) -> Result<(), String> {
 /// Adds a port to the interface. On a cell with a schematic it still has to be placed
 /// there with a port flag.
 pub fn add_port(def: &mut CellDef, name: &str, kind: PortKind) -> Result<(), String> {
-    validate_name(name)?;
+    validate_port_name(name)?;
     if def.cell.port(name).is_some() {
         return Err(format!("there is already a port `{name}`"));
     }
@@ -38,7 +38,7 @@ pub fn add_port(def: &mut CellDef, name: &str, kind: PortKind) -> Result<(), Str
 }
 
 pub fn rename_port(def: &mut CellDef, old: &str, new: &str) -> Result<(), String> {
-    validate_name(new)?;
+    validate_port_name(new)?;
     if old == new {
         return Ok(());
     }

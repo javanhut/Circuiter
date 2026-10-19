@@ -4,7 +4,7 @@
 //! Connectivity and electrical rules (floating nets, missing ground) belong to the
 //! netlister, which understands nets.
 
-use crate::cell::{CellDef, ViewKind, validate_name};
+use crate::cell::{CellDef, ViewKind, validate_name, validate_port_name};
 use crate::design::{CellId, Design};
 use crate::geom::Length;
 use crate::spice::{Placeholder, Segment, parse_template};
@@ -70,7 +70,7 @@ pub fn check_cell(design: &Design, id: &CellId, def: &CellDef, out: &mut Vec<Dia
     // Interface.
     let mut seen = BTreeSet::new();
     for port in &cell.ports {
-        if let Err(e) = validate_name(&port.name) {
+        if let Err(e) = validate_port_name(&port.name) {
             report(Error, None, format!("port name: {e}"));
         }
         if !seen.insert(&port.name) {
