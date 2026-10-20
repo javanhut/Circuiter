@@ -5,6 +5,7 @@ mod body_editor;
 mod chrome;
 mod code;
 mod explorer;
+mod footprint;
 mod panels;
 pub(crate) mod pcb;
 mod viewer3d;
@@ -3302,6 +3303,10 @@ fn cell_panel(
     {
         *open_3d = true;
     }
+
+    // Its land on the board, for cells that are parts rather than circuits of parts.
+    section(ui, "Footprint");
+    footprint::section(ui, ws);
 
     if let Some(schematic) = ws.schematic() {
         let conn = &ws.scene.connectivity;

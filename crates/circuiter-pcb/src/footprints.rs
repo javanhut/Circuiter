@@ -40,6 +40,24 @@ pub const PACKAGES: &[&str] = &[
     "fuse",
 ];
 
+/// The parameters `package` reads, with their defaults, for forms to offer.
+pub fn package_params(package: &str) -> &'static [(&'static str, &'static str)] {
+    match package {
+        "axial" | "fuse" => &[
+            ("pitch", "10.16"),
+            ("length", "6.3"),
+            ("diameter", "2.5"),
+            ("drill", "0.8"),
+            ("style", ""),
+        ],
+        "radial" => &[("pitch", "2.5"), ("diameter", "6.3")],
+        "disc" => &[("pitch", "5.08"), ("diameter", "5"), ("thickness", "2.5")],
+        "soic" | "dip" => &[("pins", "8")],
+        "header" | "terminal" => &[("pins", "2")],
+        _ => &[],
+    }
+}
+
 /// A footprint ready to place: its pads and drawings, with ports joined to pads.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Footprint {
@@ -574,6 +592,22 @@ mod tests {
             );
         }
         assert!(generate("dip", &|k| (k == "pins").then(|| "7".into())).is_err());
+    }
+
+    #[test]
+    fn the_parameters_offered_are_the_ones_read() {
+        // Each one offered changes the footprint when changed (style only marks diodes).
+        for name in PACKAGES {
+            for (key, default) in package_params(name) {
+                let other = match *key {
+                    "style" => "diode",
+                    "pins" => "16",
+                    _ => "7.62",
+                };
+                assert_ne!(*default, other);
+                assert_ne!(make(name, &[]), make(name, &[(key, other)]), "{name} reads {key}");
+            }
+        }
     }
 
     #[test]
