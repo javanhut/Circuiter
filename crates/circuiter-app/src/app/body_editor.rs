@@ -248,6 +248,24 @@ impl CircuiterApp {
             }
             style::trailing(ui, |ui| {
                 ui.add_enabled_ui(editable, |ui| {
+                    // Ready-made bodies to shape further: they replace what's there (undo
+                    // brings it back).
+                    ui.menu_button(format!("{}  Templates", icon::SQUARES_FOUR), |ui| {
+                        for (name, what) in circuiter_3d::templates::TEMPLATES {
+                            if ui.button(*name).on_hover_text(*what).clicked() {
+                                if let Some(f) = circuiter_3d::templates::template(name) {
+                                    draft.features = f;
+                                    draft.package.clear();
+                                    draft.params.clear();
+                                    ed.selected = None;
+                                    commit = true;
+                                }
+                                ui.close();
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text("Start from a ready-made part: chips with leads, headers, slots, connectors; every dimension stays editable");
                     ui.menu_button(format!("{}  From 2D", icon::POLYGON), |ui| {
                         if ui
                             .button("Import Outline (DXF, SVG)…")

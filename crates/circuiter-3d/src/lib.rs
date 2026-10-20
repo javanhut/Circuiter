@@ -14,6 +14,7 @@ pub mod math;
 pub mod packages;
 pub mod sketch;
 pub mod solid;
+pub mod templates;
 
 use math::{Mat4, V3, cross, normalize, sub};
 
@@ -37,6 +38,35 @@ pub struct Mesh {
 impl Mesh {
     pub fn triangles(&self) -> usize {
         self.indices.len() / 3
+    }
+
+    /// Where a ray from `from` along `dir` first meets the mesh: how far along (in
+    /// lengths of `dir`), and the face's outward normal there.
+    pub fn ray_hit(&self, from: V3, dir: V3) -> Option<(f32, V3)> {
+        use math::dot;
+        let mut best: Option<(f32, V3)> = None;
+        for t in self.indices.chunks_exact(3) {
+            let [a, b, c] = [0, 1, 2].map(|k| self.vertices[t[k] as usize].pos);
+            // Möller and Trumbore's test.
+            let (e1, e2) = (sub(b, a), sub(c, a));
+            let p = cross(dir, e2);
+            let det = dot(e1, p);
+            if det.abs() < 1e-12 {
+                continue;
+            }
+            let s = sub(from, a);
+            let u = dot(s, p) / det;
+            let q = cross(s, e1);
+            let v = dot(dir, q) / det;
+            let d = dot(e2, q) / det;
+            if u < 0.0 || v < 0.0 || u + v > 1.0 || d <= 1e-6 {
+                continue;
+            }
+            if best.is_none_or(|(near, _)| d < near) {
+                best = Some((d, normalize(cross(e1, e2))));
+            }
+        }
+        best
     }
 
     pub fn append(&mut self, other: Mesh) {

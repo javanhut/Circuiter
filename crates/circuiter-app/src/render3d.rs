@@ -86,6 +86,19 @@ impl Camera {
         self.target = add(self.target, add(scale(right, -dx * k), scale(up, dy * k)));
     }
 
+    /// The ray from the eye through the view at `ndc` (−1 to 1 across and up, as the
+    /// projection maps it), in a view `aspect` wide per unit of height: where it starts
+    /// and its direction.
+    pub fn ray(&self, ndc: [f32; 2], aspect: f32) -> (V3, V3) {
+        let eye = self.eye();
+        let forward = normalize(sub(self.target, eye));
+        let right = normalize(cross(forward, [0.0, 0.0, 1.0]));
+        let up = cross(right, forward);
+        let k = (FOV / 2.0).tan();
+        let dir = add(forward, add(scale(right, ndc[0] * k * aspect), scale(up, ndc[1] * k)));
+        (eye, normalize(dir))
+    }
+
     pub fn zoom(&mut self, factor: f32) {
         self.distance = (self.distance / factor).clamp(0.5, 50_000.0);
     }
@@ -488,6 +501,18 @@ impl egui_wgpu::CallbackTrait for Paint3d {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_ray_through_a_point_on_screen_passes_through_it() {
+        let c = Camera { target: [3.0, -2.0, 1.0], distance: 40.0, yaw: -1.1, pitch: 0.5 };
+        let vp = c.view_proj(1.5);
+        let p = [5.0, 4.0, -2.0];
+        let ndc = vp.point(p);
+        let (from, dir) = c.ray([ndc[0], ndc[1]], 1.5);
+        let to = sub(p, from);
+        let off = circuiter_3d::math::length(cross(to, dir));
+        assert!(off < 1e-3, "{off}");
+    }
 
     #[test]
     fn fitting_frames_the_whole_box_and_orbiting_keeps_the_target() {

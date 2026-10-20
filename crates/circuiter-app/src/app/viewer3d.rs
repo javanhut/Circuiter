@@ -105,6 +105,8 @@ pub struct Viewer3d {
     pub lid_lift: f32,
     bodies: Option<BoardBodies>,
     pub editor: super::body_editor::BodyEditor,
+    /// Picking a face to sketch on: to raise from it (Add) or cut into it (Cut).
+    pub on_face: Option<circuiter_model::model3d::Operation>,
 }
 
 impl Default for Viewer3d {
@@ -122,6 +124,7 @@ impl Default for Viewer3d {
             lid_lift: 1.0,
             bodies: None,
             editor: Default::default(),
+            on_face: None,
         }
     }
 }
@@ -430,6 +433,22 @@ impl CircuiterApp {
                         }
                         ui.separator();
                     }
+                    // Sketching on the body's faces, as in a CAD program.
+                    if !scene.sheet && editable && scene.shown > 0 {
+                        use circuiter_model::model3d::Operation;
+                        let on = self.viewer3d.on_face;
+                        for (op, label, tip) in [
+                            (Operation::Add, format!("{}  Sketch on Face", icon::PENCIL_SIMPLE), "Click a face of the body to draw on it; what you draw is raised from it"),
+                            (Operation::Cut, format!("{}  Cut into Face", icon::SCISSORS), "Click a face of the body to draw on it; what you draw is cut into it"),
+                        ] {
+                            if ui.selectable_label(on == Some(op), label).on_hover_text(tip).clicked() {
+                                self.viewer3d.on_face = if on == Some(op) { None } else { Some(op) };
+                            }
+                        }
+                        ui.separator();
+                    } else {
+                        self.viewer3d.on_face = None;
+                    }
                     let summary = if scene.sheet {
                         let mut s = format!("{} part(s) in 3D", scene.shown);
                         if !scene.without.is_empty() {
@@ -589,6 +608,27 @@ impl CircuiterApp {
                 cam.zoom((scroll * 0.002).exp());
             }
         }
+        // Picking a face to sketch on: the face under the pointer marked, a click starts
+        // the sketch there.
+        let mut face = None;
+        if let (Some(op), Some(at)) = (self.viewer3d.on_face, response.hover_pos()) {
+            let aspect = rect.width() / rect.height().max(1.0);
+            let ndc = [
+                (at.x - rect.center().x) / (rect.width() / 2.0),
+                (rect.center().y - at.y) / (rect.height() / 2.0),
+            ];
+            let (from, dir) = self.viewer3d.camera.ray(ndc, aspect);
+            if let Some((d, normal)) = scene.mesh.ray_hit(from, dir) {
+                let hit = circuiter_3d::math::add(from, circuiter_3d::math::scale(dir, d));
+                face = Some((op, hit, normal));
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.viewer3d.on_face = None;
+            }
+        }
+        if let (Some((op, hit, normal)), true) = (face, response.clicked()) {
+            self.sketch_on_face(op, hit, normal);
+        }
         if response.double_clicked()
             || (response.hovered() && ui.input(|i| i.key_pressed(egui::Key::F)))
         {
@@ -618,6 +658,28 @@ impl CircuiterApp {
             size,
         };
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(rect, Paint3d(frame)));
+        // The face picked: a ring on it and its normal.
+        if let Some((_, hit, normal)) = face {
+            let vp = cam.view_proj(rect.width() / rect.height().max(1.0));
+            let screen = |q: circuiter_3d::math::V3| {
+                let n = vp.point(q);
+                rect.center() + egui::vec2(n[0] * rect.width() / 2.0, -n[1] * rect.height() / 2.0)
+            };
+            let size = cam.distance * 0.04;
+            let tip = circuiter_3d::math::add(hit, circuiter_3d::math::scale(normal, size));
+            let accent = p.accent;
+            ui.painter().circle_stroke(screen(hit), 7.0, egui::Stroke::new(2.0, accent));
+            ui.painter().line_segment([screen(hit), screen(tip)], egui::Stroke::new(2.0, accent));
+        }
+        if self.viewer3d.on_face.is_some() {
+            ui.painter().text(
+                rect.left_top() + egui::vec2(10.0, 8.0),
+                egui::Align2::LEFT_TOP,
+                "Click a face to sketch on it · Esc to stop",
+                egui::FontId::proportional(13.0),
+                p.accent,
+            );
+        }
         // How to drive it, faintly, in the corner.
         ui.painter().text(
             rect.left_bottom() + egui::vec2(10.0, -8.0),
@@ -634,6 +696,53 @@ impl CircuiterApp {
                 egui::FontId::proportional(11.0),
                 p.weak,
             );
+        }
+    }
+
+    /// Starts a sketch on the body's face at `hit`, square to `normal`: a feature drawn
+    /// in that plane (a rectangle to reshape), raised from the face or cut into it, and
+    /// opened for drawing.
+    fn sketch_on_face(
+        &mut self,
+        op: circuiter_model::model3d::Operation,
+        hit: circuiter_3d::math::V3,
+        normal: circuiter_3d::math::V3,
+    ) {
+        use circuiter_model::model3d::{Feature, Operation, Shape, Sketch, SketchPoint};
+        let Some(ws) = &mut self.workspace else { return };
+        let round = |v: f32| ((f64::from(v) * 100.0).round() / 100.0).to_string();
+        let turn = circuiter_3d::cad::turn_to(normal);
+        let sketch = Sketch {
+            points: [(-3.0, -2.0), (3.0, -2.0), (3.0, 2.0), (-3.0, 2.0)]
+                .iter()
+                .map(|&(x, y)| SketchPoint::new(x, y))
+                .collect(),
+        };
+        // Cut, it goes back into the body from the face.
+        let height = if op == Operation::Cut { "-2" } else { "2" };
+        let mut index = 0;
+        let made = ws.edit(|_, _, def| {
+            let model = def.model3d.get_or_insert_with(Default::default);
+            let base = if op == Operation::Cut { "Cut on face" } else { "Sketch on face" };
+            let name = (1..)
+                .map(|k| if k == 1 { base.to_owned() } else { format!("{base} {k}") })
+                .find(|n| !model.features.iter().any(|f| f.name == *n))
+                .expect("a free name");
+            let mut f = Feature::new(&name, Shape::Extrude { sketch, height: height.into() });
+            f.operation = op;
+            f.at = hit.map(round);
+            f.turn = turn.map(round);
+            model.features.push(f);
+            index = model.features.len() - 1;
+            Ok(())
+        });
+        match made {
+            Ok(()) => {
+                self.viewer3d.editor.selected = Some(index);
+                self.viewer3d.editor.pad.narrow = false;
+                self.viewer3d.on_face = None;
+            }
+            Err(e) => self.error = Some(e),
         }
     }
 

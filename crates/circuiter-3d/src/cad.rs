@@ -396,6 +396,17 @@ fn placement(f: &Feature, vars: &dyn Fn(&str) -> Option<f64>) -> Result<Mat4, St
         .mul(&Mat4::rotate_x(turn[0])))
 }
 
+/// The turns (about X, then Y, in degrees) that stand a feature's own Z axis along
+/// `normal`: a sketch on that face, raised out of it.
+pub fn turn_to(normal: V3) -> [f32; 3] {
+    let n = crate::math::normalize(normal);
+    let a = -n[1].clamp(-1.0, 1.0).asin();
+    let b = n[0].atan2(n[2]);
+    // Straight up or down, the second turn means nothing: keep it square.
+    let b = if n[0].abs() < 1e-6 && n[2].abs() < 1e-6 { 0.0 } else { b };
+    [a.to_degrees(), b.to_degrees(), 0.0]
+}
+
 /// Whether a feature places itself: patterns and mirrors work on another feature as it
 /// was placed.
 fn placed_by_others(f: &Feature) -> bool {
@@ -457,6 +468,26 @@ mod tests {
                 crate::math::dot(a, crate::math::cross(b, c)) / 6.0
             })
             .sum()
+    }
+
+    #[test]
+    fn turning_to_a_face_stands_a_sketch_on_it() {
+        for n in [
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, -1.0],
+            [1.0, 0.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, -1.0, 0.0],
+            [0.6, -0.48, 0.64],
+        ] {
+            let mut f = Feature::new("F", Shape::Sphere { radius: "1".into() });
+            f.turn = turn_to(n).map(|d| d.to_string());
+            let m = placement(&f, &|_| None).unwrap();
+            let z = crate::math::sub(m.point([0.0, 0.0, 1.0]), m.point([0.0; 3]));
+            let d = crate::math::sub(z, crate::math::normalize(n));
+            assert!(crate::math::length(d) < 1e-5, "{n:?} → {z:?}");
+        }
     }
 
     #[test]

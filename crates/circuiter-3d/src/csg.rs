@@ -313,6 +313,18 @@ pub fn union(a: &Mesh, b: &Mesh) -> Mesh {
     if b.vertices.is_empty() {
         return a.clone();
     }
+    // Piece by piece, each against only what's near it: a BSP tree's planes reach across
+    // all space, so a row of pins, joined whole, would cut every other pin to pieces.
+    pieces(b).iter().fold(a.clone(), |out, piece| {
+        near(&out, piece, |near| Some(union_whole(&near, piece)), true)
+    })
+}
+
+/// [`union`] of whole meshes.
+fn union_whole(a: &Mesh, b: &Mesh) -> Mesh {
+    if a.vertices.is_empty() {
+        return b.clone();
+    }
     run(a, b, |mut a, mut b| {
         a.clip_to(&b);
         b.clip_to(&a);
@@ -334,7 +346,16 @@ pub fn difference(a: &Mesh, b: &Mesh, cut_color: Option<Rgba>) -> Mesh {
     if let Some(c) = cut_color {
         b.vertices.iter_mut().for_each(|v| v.color = c);
     }
-    run(a, &b, |mut a, mut b| {
+    // As union: each piece cut only from what's near it. A piece touching none of
+    // `a`'s faces cuts nothing (a hollow sealed inside isn't made).
+    pieces(&b).iter().fold(a.clone(), |out, piece| {
+        near(&out, piece, |near| Some(difference_whole(&near, piece)), false)
+    })
+}
+
+/// [`difference`] of whole meshes.
+fn difference_whole(a: &Mesh, b: &Mesh) -> Mesh {
+    run(a, b, |mut a, mut b| {
         a.invert();
         a.clip_to(&b);
         b.clip_to(&a);
@@ -345,6 +366,67 @@ pub fn difference(a: &Mesh, b: &Mesh, cut_color: Option<Rgba>) -> Mesh {
         a.invert();
         a.all_polygons()
     })
+}
+
+/// `a`'s triangles whose bounds reach `piece`'s worked on by `op`, the rest kept as
+/// they are. With none near, `piece` is added alongside when `add`, else left out.
+fn near(a: &Mesh, piece: &Mesh, op: impl Fn(Mesh) -> Option<Mesh>, add: bool) -> Mesh {
+    let Some((lo, hi)) = piece.bounds() else { return a.clone() };
+    let reach = 1e-3;
+    let (mut close, mut far) = (Mesh::default(), Mesh::default());
+    for t in a.indices.chunks_exact(3) {
+        let v = [0, 1, 2].map(|k| a.vertices[t[k] as usize]);
+        let touches = (0..3).all(|ax| {
+            let (tlo, thi) = v
+                .iter()
+                .fold((f32::MAX, f32::MIN), |(l, h), x| (l.min(x.pos[ax]), h.max(x.pos[ax])));
+            thi >= lo[ax] - reach && tlo <= hi[ax] + reach
+        });
+        let into = if touches { &mut close } else { &mut far };
+        let base = into.vertices.len() as u32;
+        into.vertices.extend(v);
+        into.indices.extend([base, base + 1, base + 2]);
+    }
+    if close.vertices.is_empty() {
+        if add {
+            far.append(piece.clone());
+        }
+        return far;
+    }
+    if let Some(m) = op(close) {
+        far.append(m);
+    }
+    far
+}
+
+/// The separate pieces of a mesh: triangles joined through corners at one place.
+fn pieces(m: &Mesh) -> Vec<Mesh> {
+    let key = |p: [f32; 3]| p.map(|x| (x * 1e4).round() as i64);
+    let tris = m.indices.len() / 3;
+    let mut parent: Vec<usize> = (0..tris).collect();
+    fn find(parent: &mut [usize], mut k: usize) -> usize {
+        while parent[k] != k {
+            parent[k] = parent[parent[k]];
+            k = parent[k];
+        }
+        k
+    }
+    let mut first: std::collections::HashMap<[i64; 3], usize> = Default::default();
+    for (t, tri) in m.indices.chunks_exact(3).enumerate() {
+        for &i in tri {
+            let other = *first.entry(key(m.vertices[i as usize].pos)).or_insert(t);
+            let (a, b) = (find(&mut parent, t), find(&mut parent, other));
+            parent[a] = b;
+        }
+    }
+    let mut out: std::collections::BTreeMap<usize, Mesh> = Default::default();
+    for (t, tri) in m.indices.chunks_exact(3).enumerate() {
+        let piece = out.entry(find(&mut parent, t)).or_default();
+        let base = piece.vertices.len() as u32;
+        piece.vertices.extend(tri.iter().map(|&i| m.vertices[i as usize]));
+        piece.indices.extend([base, base + 1, base + 2]);
+    }
+    out.into_values().collect()
 }
 
 /// What is in both.
