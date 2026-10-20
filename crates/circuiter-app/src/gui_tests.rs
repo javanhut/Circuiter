@@ -1126,3 +1126,38 @@ fn assembly_variants_from_the_editor() {
         std::fs::read_to_string(tmp.path().join("fab/blinker/blinker-Variant_1-bom.csv")).unwrap();
     assert!(bom.contains("DNP"), "{bom}");
 }
+
+/// The footprint editor: an array of pads placed as a double-row header numbers down
+/// its columns, and saving makes it the part's footprint, with a courtyard round it.
+#[test]
+fn the_footprint_editor_saves_an_array_of_pads() {
+    use circuiter_model::board::{FootprintView, Graphic, Layer};
+    let tmp = example_copy("cmos_inverter");
+    let mut h = open(tmp.path().to_path_buf());
+    h.state_mut().edit_footprint(FootprintView::default());
+    h.run_steps(3);
+    let icon = egui_phosphor::regular::SQUARES_FOUR;
+    h.get_by_label(&format!("{icon}  Place Array")).click();
+    h.run_steps(2);
+    h.get_by_label(&format!("{}  Save", egui_phosphor::regular::CHECK)).click();
+    h.run_steps(3);
+    assert!(!h.state().footprint_editor_open(), "closed once saved");
+    let ws = h.state().workspace().unwrap();
+    let fp = ws.current_def().unwrap().footprint.clone().expect("saved");
+    assert!(fp.package.is_empty());
+    assert_eq!(fp.pads.len(), 8, "2 rows of 4");
+    let at = |n: &str| fp.pads.iter().find(|p| p.number == n).unwrap().at;
+    assert_eq!(at("1").x, at("2").x, "numbered down the columns: 2 under 1");
+    assert!(at("2").y > at("1").y);
+    assert!(fp.graphics.iter().any(|g| matches!(g, Graphic::Poly { layer: Layer::FCrtYd, .. })));
+    // Cancel closes it, the footprint as saved.
+    h.state_mut().edit_footprint(fp.clone());
+    h.run_steps(2);
+    h.get_by_label(&format!("{icon}  Place Array")).click();
+    h.run_steps(2);
+    h.get_by_label("Cancel").click();
+    h.run_steps(3);
+    assert!(!h.state().footprint_editor_open());
+    let ws = h.state().workspace().unwrap();
+    assert_eq!(ws.current_def().unwrap().footprint.as_ref(), Some(&fp));
+}

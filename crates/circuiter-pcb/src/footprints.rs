@@ -563,6 +563,137 @@ pub fn resolve(
     Ok(Footprint { pads, graphics, pins, name })
 }
 
+// ---- Editing footprints pad by pad ----------------------------------------------------
+
+/// How a pad array numbers its pads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Numbering {
+    /// Along each row, then the next row: 1 2 3 / 4 5 6.
+    Rows,
+    /// Down each column, then the next: 1 3 5 / 2 4 6, as a double-row header.
+    Columns,
+    /// A letter for the row and a number for the column: A1 A2 / B1 B2, as a BGA.
+    Grid,
+}
+
+/// JEDEC's row letters for ball grids: I, O, Q, S, X and Z are left out.
+const ROW_LETTERS: &[u8] = b"ABCDEFGHJKLMNPRTUVWY";
+
+/// The name of grid row `k` (from 0): A … Y, then AA, AB …
+pub fn row_name(k: usize) -> String {
+    let n = ROW_LETTERS.len();
+    if k < n {
+        (ROW_LETTERS[k] as char).to_string()
+    } else {
+        format!("{}{}", row_name(k / n - 1), ROW_LETTERS[k % n] as char)
+    }
+}
+
+/// `rows` × `cols` copies of `pad`, `pitch` apart (across, down), the first where
+/// `pad` is, numbered from `first` (a number; the grid's columns always count from 1).
+pub fn pad_array(
+    pad: &Pad,
+    rows: usize,
+    cols: usize,
+    pitch: (f64, f64),
+    first: usize,
+    numbering: Numbering,
+) -> Vec<Pad> {
+    let (x0, y0) = (pad.at.x.mm(), pad.at.y.mm());
+    let mut out = Vec::with_capacity(rows * cols);
+    for r in 0..rows {
+        for c in 0..cols {
+            let number = match numbering {
+                Numbering::Rows => (first + r * cols + c).to_string(),
+                Numbering::Columns => (first + c * rows + r).to_string(),
+                Numbering::Grid => format!("{}{}", row_name(r), c + 1),
+            };
+            out.push(Pad {
+                number,
+                at: pt(x0 + c as f64 * pitch.0, y0 + r as f64 * pitch.1),
+                ..pad.clone()
+            });
+        }
+    }
+    out
+}
+
+/// The number after the highest plain number among `pads`: what a new pad gets.
+pub fn next_number(pads: &[Pad]) -> String {
+    let top = pads.iter().filter_map(|p| p.number.parse::<usize>().ok()).max().unwrap_or(0);
+    (top + 1).to_string()
+}
+
+/// A pad's corners, turned as it is.
+pub fn pad_corners(p: &Pad) -> [(f64, f64); 4] {
+    let (w, h) = (p.size.0.mm() / 2.0, p.size.1.mm() / 2.0);
+    let (s, c) = p.rotation.to_radians().sin_cos();
+    [(-w, -h), (w, -h), (w, h), (-w, h)].map(|(x, y)| {
+        // Counter-clockwise as seen, with Y down.
+        (p.at.x.mm() + x * c + y * s, p.at.y.mm() - x * s + y * c)
+    })
+}
+
+/// A courtyard round the pads and the body drawn on the fab and silkscreen layers,
+/// `margin` clear of them (IPC-7351's 0.25 mm for most parts).
+pub fn courtyard(pads: &[Pad], graphics: &[Graphic], margin: f64) -> Option<Graphic> {
+    let mut lo = [f64::MAX; 2];
+    let mut hi = [f64::MIN; 2];
+    let mut grow = |x: f64, y: f64| {
+        lo = [lo[0].min(x), lo[1].min(y)];
+        hi = [hi[0].max(x), hi[1].max(y)];
+    };
+    for p in pads {
+        pad_corners(p).iter().for_each(|&(x, y)| grow(x, y));
+    }
+    for g in graphics {
+        match g {
+            Graphic::Line { layer: Layer::FSilk | Layer::FFab, a, b, .. } => {
+                grow(a.x.mm(), a.y.mm());
+                grow(b.x.mm(), b.y.mm());
+            }
+            Graphic::Poly { layer: Layer::FSilk | Layer::FFab, points, .. } => {
+                points.iter().for_each(|q| grow(q.x.mm(), q.y.mm()));
+            }
+            Graphic::Circle { layer: Layer::FSilk | Layer::FFab, center, radius, .. } => {
+                let (x, y, r) = (center.x.mm(), center.y.mm(), radius.mm());
+                grow(x - r, y - r);
+                grow(x + r, y + r);
+            }
+            _ => {}
+        }
+    }
+    (lo[0] <= hi[0]).then(|| {
+        // On a 0.01 mm grid, as KiCad keeps courtyards.
+        let snap = |v: f64, up: bool| {
+            let k = v * 100.0;
+            (if up { k.ceil() } else { k.floor() }) / 100.0
+        };
+        rect(
+            Layer::FCrtYd,
+            snap(lo[0] - margin, false),
+            snap(lo[1] - margin, false),
+            snap(hi[0] + margin, true),
+            snap(hi[1] + margin, true),
+            CRT,
+        )
+    })
+}
+
+/// `view` as pads and drawings to edit one by one: a package's are generated (with
+/// the part's parameter values) and the package let go; the ports keep their pads.
+pub fn editable(
+    view: &FootprintView,
+    ports: &[String],
+    param: &dyn Fn(&str) -> Option<String>,
+) -> Result<FootprintView, String> {
+    if view.package.is_empty() {
+        return Ok(view.clone());
+    }
+    let fp = resolve(view, ports, param)?;
+    Ok(FootprintView { pads: fp.pads, graphics: fp.graphics, pins: fp.pins, ..Default::default() })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -592,6 +723,50 @@ mod tests {
             );
         }
         assert!(generate("dip", &|k| (k == "pins").then(|| "7".into())).is_err());
+    }
+
+    #[test]
+    fn arrays_number_by_rows_columns_or_grid() {
+        let pad = smd(1, -1.0, -2.0, 0.5, 0.5);
+        let rows = pad_array(&pad, 2, 3, (1.27, 2.54), 1, Numbering::Rows);
+        let names: Vec<&str> = rows.iter().map(|p| p.number.as_str()).collect();
+        assert_eq!(names, ["1", "2", "3", "4", "5", "6"]);
+        assert_eq!(rows[5].at, pt(-1.0 + 2.0 * 1.27, -2.0 + 2.54));
+        let cols = pad_array(&pad, 2, 3, (2.54, 2.54), 1, Numbering::Columns);
+        let at = |n: &str| cols.iter().find(|p| p.number == n).unwrap().at;
+        assert_eq!(at("2"), pt(-1.0, 0.54), "a double-row header: 2 under 1");
+        assert_eq!(at("3"), pt(1.54, -2.0));
+        let grid = pad_array(&pad, 22, 2, (1.0, 1.0), 1, Numbering::Grid);
+        let names: Vec<&str> = grid.iter().map(|p| p.number.as_str()).collect();
+        assert_eq!(&names[..4], ["A1", "A2", "B1", "B2"]);
+        assert_eq!(names[16], "J1", "no I");
+        assert_eq!(names[40], "AA1", "after Y");
+        assert_eq!(next_number(&rows), "7");
+        assert_eq!(next_number(&grid), "1");
+    }
+
+    #[test]
+    fn a_courtyard_clears_turned_pads_and_packages_become_pads() {
+        let mut pad = smd(1, 2.0, 0.0, 2.0, 1.0);
+        pad.rotation = 90.0;
+        let Some(Graphic::Poly { points, layer, .. }) = courtyard(&[pad], &[], 0.25) else {
+            panic!("a courtyard")
+        };
+        assert_eq!(layer, Layer::FCrtYd);
+        // Turned, the pad is 1 wide and 2 tall.
+        assert_eq!(points[0], pt(1.25, -1.25));
+        assert_eq!(points[2], pt(2.75, 1.25));
+        let view = FootprintView {
+            package: "dip".into(),
+            pins: [("vcc".to_owned(), "8".to_owned())].into(),
+            ..FootprintView::default()
+        };
+        let ports = ["gnd".to_owned(), "vcc".to_owned()];
+        let pads = editable(&view, &ports, &|_| None).unwrap();
+        assert!(pads.package.is_empty() && pads.pads.len() == 8);
+        let a = resolve(&view, &ports, &|_| None).unwrap();
+        let b = resolve(&pads, &ports, &|_| None).unwrap();
+        assert_eq!((a.pads, a.pins), (b.pads, b.pins), "the same footprint, now editable");
     }
 
     #[test]

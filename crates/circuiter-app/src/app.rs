@@ -87,6 +87,8 @@ pub struct CircuiterApp {
     live_speed: Option<f64>,
     /// A part dragged in from the library is being previewed on the sheet.
     drop_preview: bool,
+    /// The footprint editor, when a footprint is open in it.
+    footprint_editor: footprint::Editor,
     /// The Simulation workspace was chosen (the sheet, with the bench around it).
     simulating: bool,
     /// The workspace whose panels are showing, and each workspace's panels while
@@ -525,6 +527,7 @@ impl CircuiterApp {
             show_3d: false,
             show_pcb: false,
             simulating: false,
+            footprint_editor: footprint::Editor::default(),
             space: Space::Schematic,
             spaces: Space::ALL.map(Panels::first),
             was_running: false,
@@ -931,7 +934,11 @@ impl CircuiterApp {
         {
             self.save();
         }
-        if self.prompt.is_some() || ctx.egui_wants_keyboard_input() {
+        // The footprint editor takes the keys while it's open.
+        if self.prompt.is_some()
+            || ctx.egui_wants_keyboard_input()
+            || self.footprint_editor.is_open()
+        {
             return;
         }
         let keys = ctx.input(|i| {
@@ -1436,6 +1443,7 @@ impl CircuiterApp {
         let field = &mut self.field;
         let mut prompt = None;
         let mut open_3d = false;
+        let mut edit_footprint = None;
         egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
             let mut sel = ws.selection.iter();
             match (sel.next().copied(), sel.next()) {
@@ -1480,7 +1488,7 @@ impl CircuiterApp {
                         ws.delete_selection();
                     }
                 }
-                _ => cell_panel(ui, ws, field, &mut prompt, &mut open_3d),
+                _ => cell_panel(ui, ws, field, &mut prompt, &mut open_3d, &mut edit_footprint),
             }
         });
         if prompt.is_some() {
@@ -1489,6 +1497,21 @@ impl CircuiterApp {
         if open_3d {
             self.open_body_3d();
         }
+        if let (Some(view), Some(ws)) = (edit_footprint, &self.workspace) {
+            self.footprint_editor.start(ws.current().cell.clone(), view);
+        }
+    }
+
+    /// Opens `view` in the footprint editor, as Edit Pads does, for the cell in front.
+    #[cfg(test)]
+    pub fn edit_footprint(&mut self, view: circuiter_model::board::FootprintView) {
+        let cell = self.workspace.as_ref().expect("open").current().cell.clone();
+        self.footprint_editor.start(cell, view);
+    }
+
+    #[cfg(test)]
+    pub fn footprint_editor_open(&self) -> bool {
+        self.footprint_editor.is_open()
     }
 
     /// Whether the 3D view is showing.
@@ -3070,6 +3093,7 @@ fn cell_panel(
     field: &mut Field,
     prompt: &mut Option<Prompt>,
     open_3d: &mut bool,
+    edit_footprint: &mut Option<circuiter_model::board::FootprintView>,
 ) {
     let Some(def) = ws.current_def().cloned() else { return };
     let id = ws.current().cell.clone();
@@ -3306,7 +3330,9 @@ fn cell_panel(
 
     // Its land on the board, for cells that are parts rather than circuits of parts.
     section(ui, "Footprint");
-    footprint::section(ui, ws);
+    if let Some(view) = footprint::section(ui, ws) {
+        *edit_footprint = Some(view);
+    }
 
     if let Some(schematic) = ws.schematic() {
         let conn = &ws.scene.connectivity;
@@ -3627,6 +3653,7 @@ impl eframe::App for CircuiterApp {
         self.handle_close_request(&ctx);
         self.prompts(&ctx);
         self.shortcuts(&ctx);
+        footprint::window(self, &ctx);
         self.live_frame(&ctx);
         self.update_title(&ctx);
         self.sync_space();

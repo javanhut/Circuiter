@@ -66,17 +66,23 @@ and the project is named after it.
 
 **The window**
 
-- Left: **Project** and **Libraries** trees (folders and cells), and below them
-  **Components**: every part by kind, with a search box. Click a part, then the sheet;
-  or drag it onto the sheet.
-- Middle: open cells as **tabs**, each remembering where it was left. Above the sheet,
-  switch between **Schematic**, **Symbol**, **PCB** (the board), **3D** and **Netlist**
-  (the SPICE deck the simulator runs), and pick drawing tools and zoom. The column of common parts beside
-  the sheet works like Components.
-- Right: **Properties** of what's selected (or the cell), **Simulation** (run, results,
-  plotted signals) and **Physics** (ratings, temperatures, what failed).
-- Bottom: **Waveforms**, **Thermal**, **Problems** and **Oscilloscope**. Hide it with
-  its ×; Run brings it back.
+The title bar switches between four **workspaces**, each a place of its own with only
+the panels it needs. Each keeps its panels' tabs, sizes and what's shown while you're
+in another.
+
+| Workspace | What's there |
+|---|---|
+| **Schematic** | The sheet, with **Schematic**, **Symbol** and **Netlist** (the SPICE deck the simulator runs) above it; **Components** to place; **Problems** below |
+| **PCB** | The board editor, its layers, and below it the design rules, nets, net classes, pairs and stack-up |
+| **3D** | Part bodies to model, the sheet's parts in 3D, the board in its case |
+| **Simulation** | The sheet with **Simulation** (run, results, plotted signals) and **Physics** (ratings, temperatures, what failed) beside it, and **Waveforms**, **Thermal**, **Problems** and **Oscilloscope** below. Starting a run from the schematic brings it forward |
+
+- Left: **Project** and **Libraries** trees (folders and cells), and in Schematic and
+  Simulation, **Components**: every part by kind, with a search box. Click a part, then
+  the sheet; or drag it onto the sheet.
+- Middle: open cells as **tabs**, each remembering where it was left. The column of
+  common parts beside the sheet works like Components.
+- Right: **Properties** of what's selected (or the cell).
 - Help → Keyboard Shortcuts lists every key.
 
 **Viewing**
@@ -143,6 +149,86 @@ wires between them become a new cell; every connection to the rest of the sheet 
 a port (named after its net label when it has one), while GND and VDD stay connected by
 name. The sheet itself is left as it was.
 
+Port names start with a letter and use letters, digits, `_` and `'`, so an inverted
+output can be called `Q'`. Cell and instance names keep to letters, digits and `_`,
+since they become folder names.
+
+**Giving a component a footprint**
+
+A component with a footprint is a part on the board; one without is a circuit whose
+parts go on the board instead. Select nothing (so Properties shows the cell) and
+scroll to **Footprint**:
+
+1. **Choose a package…**: chip resistors and capacitors (0603, 0805, 1206), SOD-123,
+   SOT-23, SOT-223, SOIC, DIP, axial and radial parts, discs, LEDs, TO-92, TO-220,
+   bridges, crystals, pin headers, terminal blocks, relays, pots, switches,
+   transformers, batteries and more. Its pads, silkscreen, courtyard and fab drawing
+   are made for it, matching the 3D body of the same package, and Properties shows its
+   name in KiCad's libraries (`Package_DIP:DIP-8_W7.62mm`).
+2. **Its size**: packages that come in sizes show their parameters: **pins** for a DIP,
+   SOIC, header or terminal block; **pitch**, **length**, **diameter** and **drill**
+   for an axial part (and **style** `diode` for a cathode band); **pitch** and
+   **diameter** for a radial one. Leave one blank for its default (shown faintly in
+   the field), or write `${param.NAME}` to take it from the part's own parameter, so
+   each placed copy can differ.
+3. **Pads for each port**: every port with the pad it's joined to. Ports go to pads in
+   order (the first port to pad 1, and so on) unless you type another number; type
+   `2,4` to join a port to two pads, as a regulator's tab is joined to its middle pin.
+   A pad that doesn't exist is flagged in red ("no pad 9"), and pads joined to no port
+   are listed.
+4. **The drawing** below shows the footprint as it will go on the board: silkscreen,
+   copper pads (pad 1 square on through-hole parts) with their holes, each pad's
+   number on it and its port above it.
+
+Changes are made as you leave a field and can be undone. **Remove Footprint** takes it
+off again. On disk the footprint is `footprint.ron` in the cell's folder:
+
+```ron
+(package: "dip", params: {"pins": "8"}, pins: {"vcc": "8", "gnd": "1"})
+```
+
+**Drawing a footprint of your own**
+
+For a pad layout no package makes (a CPU socket, an odd connector, a module), choose
+**Draw my own…** at the top of the package list, or **Edit Pads One by One…** under a
+package's drawing to start from its pads. The footprint editor opens in a window of its
+own, with the footprint as it stands, kept apart from the part until you **Save** it
+(**Cancel** leaves the part as it was; saving can be undone like any edit).
+
+| Action | How |
+|---|---|
+| Place pads | The **Pad** tool: click to place a pad like the one set under **New pads** (size, shape, through-hole, surface mount or an unplated hole, drill, turn), numbered after the highest number so far |
+| Arrays | Under **Array**: rows, columns, the pitch across and down, and how they're numbered: **along rows** (1 2 3 / 4 5 6), **down columns** (1 3 5 / 2 4 6, as a double-row header) or **A1, A2…** as a ball grid (a letter per row, I, O, Q, S, X and Z left out, AA after Y). **Place Array** puts them centred on the origin, selected, ready to drag where they go |
+| Select | The **Select** tool: click a pad (Shift adds or takes away), or drag a box round several; click a line to select it |
+| Move | Drag the selected pads; they move on the grid (0.05 mm to 2.54 mm) |
+| Change | With one pad selected: its number and its X and Y. With any selected: size, shape, kind, drill and turn, set on all of them at once. `R` turns them 90° |
+| Silkscreen | The **Line** and **Rectangle** tools: click where a line starts and ends, or two opposite corners. Select one to put it on the silkscreen, fab or courtyard layer, or change its width |
+| Courtyard | **Courtyard Round the Pads** draws a rectangle 0.25 mm clear of the pads and the drawing, replacing any other; one is added on saving if there's none, since the rules check needs it |
+| Delete, undo | `Delete` removes what's selected; `Ctrl+Z` and `Ctrl+Y` (or the arrows at the top) undo and redo within the editor; `Esc` goes back to Select |
+| View | The wheel zooms about the pointer, right or middle drag pans; the pointer's X and Y show below. The origin (the cross) is where the part is placed on the board |
+
+Two pads with the same number are joined (as a regulator's tab is to its pin); the
+editor warns of numbers used twice in case that isn't meant. Once saved, the ports are
+joined to the pads by number in the Footprint section, as for a package.
+
+**Saving and reusing components**
+
+`Ctrl+S` saves every changed cell into the project folder, one folder per cell under
+`cells/` (folders you make in the Project tree become folders there):
+`cell.ron` (ports and parameters), `symbol.ron`, `schematic.ron`, `footprint.ron`,
+`model3d.ron` (its 3D body) and `board.ron` (its board, if it has one). Your cells are
+listed first in Components, ready to place in any sheet of the project.
+
+To use them in other projects, keep them in a library: a folder with its own `cells/`
+inside, named in each project's `circuiter.toml`:
+
+```toml
+[libraries]
+mylib = { path = "../my-parts" }
+```
+
+Its parts then appear under **Libraries** and are placed as `mylib:part`.
+
 **Simulating**
 
 Circuiter has its own simulator, written in Rust and built into the app, so there is
@@ -192,13 +278,14 @@ active one on top.
 | Packages | Resistors, capacitors, diodes, LEDs, transistors, op-amps, the 555 and logic gates each have a Package parameter: through-hole (axial, disc, TO-92, DIP) or surface mount (0603, 0805, 1206, SOD-123, SOT-23, SOIC), with KiCad's footprint names and 3D bodies that sit on their pads |
 | Keepouts | The keepout tool draws an area that bars tracks, vias, pours or parts, on chosen layers or all; the autorouter goes round it and the rules check flags anything inside |
 | Rearrange tracks | Drag a track: it slides square to itself and the tracks either side stretch to meet it at their own angles (a new leg joins it to a pad). Drag a corner where tracks meet, or a via, and the tracks there follow. `Delete` removes the piece selected |
-| Routing modes | As in Altium: `Shift+R` cycles Walkaround (the track finds its way round other nets' copper as you move, live), Stop at obstacle (it stops short of the first thing in the way) and Ignore (straight over; the rules check flags it). `Shift+Space` cycles 45°, 90° and any-angle corners, `Space` flips which leg comes first, `3` cycles the track width (minimum, preferred, double). **Ctrl+click** finishes the connection by itself, through vias if it must. Finishing a route that makes a second way between two points takes the old way off (loop removal). The status line gives the route's length |
+| Routing modes | As in Altium: `Shift+R` cycles Push and shove (the default: other nets' tracks in the way are pushed aside, each pushing the next, just far enough to keep their clearance, and shown where they'll go as you move; where nothing can be pushed, as when crossing a track or next to a pad, it walks round instead), Walkaround (the track finds its way round other nets' copper as you move, live), Stop at obstacle (it stops short of the first thing in the way) and Ignore (straight over; the rules check flags it). `Shift+Space` cycles 45°, 90° and any-angle corners, `Space` flips which leg comes first, `3` cycles the track width (minimum, preferred, double). **Ctrl+click** finishes the connection by itself, through vias if it must. Finishing a route that makes a second way between two points takes the old way off (loop removal). The status line gives the route's length |
 | Autoroute | Autoroute → Route All turns every ratsnest line into tracks: shortest first, at 0°, 45° and 90°, keeping each net's clearance, across every copper layer with vias where it must change side (the front prefers to run across, the back up and down), each path pulled as straight as it can go. Route the Selection's Nets does only the nets of the selected part, track or via. Whatever can't get through stays on the ratsnest, named |
 | Tidy up | Autoroute → Clean Up Tracks joins segments in a line and takes off stubs and duplicates; Unroute takes a net's tracks off, or all of them |
-| Route | `X` (or the route tool), click a pad, then click to lay each corner: tracks run at 0°, 45° and 90° (`/` swaps which leg comes first), at the net's width, and a track that would come too close to other copper shows red with its clearance outline. Click a pad, track or via of the same net to finish. `V` drops a via and carries on on the other side; picking another layer (panel, toolbar, `Page Up`/`Page Down`) mid-route drops a via and carries on on that one, inner layers included; `Backspace` takes back the last leg; `Esc` stops |
-| Layers | The Layers panel beside the board lists every layer in its colour: click a copper layer to work on it, the eye to show or hide any layer (silkscreen, courtyards, fab drawings, the edge), and choose 2, 4 or 6 copper layers. Pours, ratsnest and rule markers switch on and off there too, and Dim other layers fades everything but the layer in hand. `Page Up` / `Page Down` step through the copper layers |
+| Route | `X` (or the route tool), click a pad, then click to lay each corner: tracks run at 0°, 45° and 90° (`/` swaps which leg comes first), at the net's width, and a track that would come too close to other copper shows red with its clearance outline. Click a pad, track or via of the same net to finish. `V` (or the toolbar's Via) drops a via and carries on on the other side; clicking another layer's button in the toolbar (or the panel, or `Page Up`/`Page Down`) mid-route drops a via and carries on on that one, inner layers included; `Backspace` takes back the last leg; `Esc` stops |
+| Layers | The toolbar has a button for each copper layer in its colour (click to work on it), **All / Dim / Only** for how the other layers show, and **Realistic**: the board as it's made, green solder mask over the copper, gold pads and a white legend, the side being worked on. The Layers panel beside the board lists every layer in its colour: click a copper layer to work on it, the eye to show or hide any layer (silkscreen, courtyards, fab drawings, the edge), and choose 2, 4 or 6 copper layers. Pours, ratsnest and rule markers switch on and off there too, and Dim other layers fades everything but the layer in hand. `Page Up` / `Page Down` step through the copper layers |
 | Copper pour | The zone tool, pick its net (GND by default), click its corners, double-click to finish. It fills to the board's edge, keeps the clearance from other nets, joins its own pads through thermal spokes and drops islands; select it to set priority, pad connection, relief gap and spoke width |
-| Board shape | Width and height in Properties, the outline tool to draw any shape, or Import Outline… from a DXF or SVG drawing |
+| Board shape | Width and height in Properties, the outline tool to draw any shape, or Import Outline… from a DXF or SVG drawing. With the select tool the outline has handles: drag a corner's square to move it, drag the dot mid-edge to bend that edge into an arc, double-click the edge to add a corner, select a corner and `Delete` to remove it (Properties shows its X, Y and the radius of the edge after it). **Round** gives every corner a radius, **Straighten** takes the arcs out |
+| Cutouts and holes | The cutout tool draws an opening of any shape through the board; the hole tool drills round mounting holes (3.2 mm by default, for M3). Both are Edge.Cuts, so pours, tracks and the router keep clear of them, the rules check flags copper crossing them, and they're in the Gerbers and the 3D board. Select one to move it, change a hole's diameter, or delete it |
 | Rules | Properties → Design rules: clearance, track width, via size, the board house's minimums, edge clearance, hole spacing |
 | Nets | The Nets tab under the board lists every net, as Altium's PCB panel does: its colour (click the swatch; `F5` shows net colours on the routing), class, pads, routed length (tracks plus the board's thickness per via, yellow when shorter than its class allows, red when longer), vias and connections still to route. Click a net to show it |
 | Net classes | The Net Classes tab: classes with their own clearance, track width, via, minimum and maximum routed length and impedance profile; put a net in one from the Nets tab. Selecting a part on the schematic selects it on the board, and the other way round |
@@ -353,19 +440,48 @@ features, each adding to, cutting from or intersecting the body made so far.
 |---|---|
 | Box | A box, optionally with rounded vertical edges |
 | Cylinder, cone, sphere | The solids, a cone possibly truncated |
-| Extrude | An outline you draw, raised to a height |
+| Extrude | An outline you draw, raised to a height (negative goes the other way); its top and bottom edges can be filleted or chamfered |
 | Revolve | An outline turned about the vertical axis, all the way or part way |
+| Sweep | An outline carried along a path you draw |
+| Loft | One outline at the bottom joined to another at a height |
+| Shell | An earlier feature hollowed to a wall thickness, open at the top, bottom or both, or closed |
 | Hole | A cylinder that cuts |
 | Copies, Ring, Mirror | Copies of an earlier feature in a row, around the axis, or reflected |
 
 Each feature has a placement (where, and turned about each axis) and a colour, and can
 be hidden, reordered or deleted. Dimensions are expressions in millimetres that may
 use the cell's parameters (`width - 2*wall`), so changing a parameter reshapes the
-part. Outlines are drawn in a sketch editor: drag corners (snapping to 0.5 mm), click
-an edge's + to add a corner, right-click one to remove it, start from a rectangle,
-circle, slot or hexagon, or type the corners, with arcs between them. Each edge shows
-its length; under Dimensions, type an edge's length and direction (the corners after
-it follow) or the outline's overall width and height. Every change can be undone.
+part. Every change can be undone.
+
+**Templates**: the Body panel's **Templates** menu starts a part from a ready-made one,
+replacing what's there: DIP-8, SOIC-8, QFP-44, a 121-ball BGA, 1×8 and 2×8 pin headers,
+a PCIe x16 slot, a DDR4 DIMM slot, a USB-A receptacle, a TO-220, an electrolytic
+capacitor and a heatsink. They're ordinary features, so everything stays editable: a
+lead is a feature called Lead (its side profile, bent down through the board or
+gull-winged onto it, extruded to the lead's width), Leads is its copies (the count is
+the pins per side, the step the pitch), and the "other side" features mirror them.
+Parts are centred on the origin with their rows of pins along Y, standing on the
+board's top, as the footprints have them.
+
+**Sketching**: an extrusion, revolve, sweep or loft is drawn in a sketch editor that
+takes most of the panel while it's open (**Narrow** keeps it beside the model). It
+works as a 2D CAD program does, from its tool buttons or by typing AutoCAD's commands
+at the command line under the drawing:
+
+| Tools | |
+|---|---|
+| Draw | Line `L` (`C` closes, Enter ends), arc through three points `A`, arc from its centre `AC`, circle `C`, rectangle `REC`, polygon `POL`, construction line `XL` |
+| Change | Trim `TR`, extend `EX`, offset `O`, mirror `MI`, fillet `F` and chamfer `CHA` where two lines meet, dimension `DIM`; drag points, `Delete` removes what's selected |
+| Aids | Object snaps (`F3`: ends, middles, centres, crossings, nearest), grid (`F9`), ortho (`F8`), polar tracking (`F10`, `polar 30` for another step), `Z` fits the view |
+| Typed points | `x,y`, `@dx,dy`, `@length<angle`, or just a length along the pointer's direction; numbers may use the cell's parameters |
+| Constraints | With things selected: horizontal, vertical, parallel, perpendicular, tangent, equal, coincident or on a curve, fixed; dimensions of length, radius, angle and distances, as numbers or expressions. They're shown on the drawing and listed to change or remove, and the part follows them |
+
+Closed outlines make the profile; outlines inside others are holes.
+
+**Sketching on the body**: **Sketch on Face** in the 3D view's toolbar, then click any
+face of the body (the face under the pointer is marked): a sketch starts on that face,
+a rectangle to redraw, raised 2 mm from it. **Cut into Face** does the same but cuts
+into the body, for pockets, slots and holes. `Esc` stops picking.
 
 **From 2D**: Import Outline (DXF, SVG)… extrudes a drawing (lines, polylines with arcs,
 circles, rectangles, paths), its inner outlines cut through as holes; From the Symbol
