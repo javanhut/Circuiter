@@ -657,23 +657,26 @@ fn memory_view(ui: &mut egui::Ui, ws: &Workspace, p: &style::Palette) {
         ui.label(RichText::new(text).size(16.0).monospace().color(color));
         ui.add_space(6.0);
     }
+    // Register files, whether a part or made of gates, then the other memories.
+    for (path, regs) in sim.registers() {
+        egui::CollapsingHeader::new(RichText::new(format!("{path} · registers")).monospace())
+            .id_salt(("memory", &path))
+            .default_open(true)
+            .show(ui, |ui| registers(ui, &path, &regs, p));
+    }
     for (path, words) in &run.memories {
         let model = sim.model(path).unwrap_or("");
+        if model == "regfile" {
+            continue;
+        }
         let title = match model {
-            "regfile" => format!("{path} · registers"),
             "rom" => format!("{path} · program"),
             _ => format!("{path} · data"),
         };
         egui::CollapsingHeader::new(RichText::new(title).monospace())
             .id_salt(("memory", path))
             .default_open(model != "rom")
-            .show(ui, |ui| {
-                if model == "regfile" {
-                    registers(ui, path, words, p);
-                } else {
-                    memory_words(ui, path, words, p);
-                }
-            });
+            .show(ui, |ui| memory_words(ui, path, words, p));
     }
 }
 

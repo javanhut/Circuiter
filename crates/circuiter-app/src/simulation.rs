@@ -99,6 +99,8 @@ pub struct Simulation {
     pub mixed: bool,
     /// The project directory, where programs for memories are found.
     pub root: PathBuf,
+    /// Register files made of gates, found once: see [`register_nets`].
+    gate_registers: Vec<(String, [Option<usize>; 32])>,
 }
 
 impl Simulation {
@@ -128,6 +130,7 @@ impl Simulation {
                 }
             }
             let probes = default_probes(&netlist);
+            let gate_registers = register_nets(&netlist);
             return Ok(Simulation {
                 top: top.clone(),
                 netlist,
@@ -144,6 +147,7 @@ impl Simulation {
                 digital: true,
                 mixed: false,
                 root: root.to_path_buf(),
+                gate_registers,
             });
         }
         let mixed = Netlist::is_mixed(design, top);
@@ -198,6 +202,7 @@ impl Simulation {
             });
         }
         let probes = default_probes(&netlist);
+        let gate_registers = register_nets(&netlist);
         Ok(Simulation {
             top: top.clone(),
             netlist,
@@ -214,6 +219,7 @@ impl Simulation {
             digital: false,
             mixed,
             root: root.to_path_buf(),
+            gate_registers,
         })
     }
 
@@ -253,17 +259,43 @@ impl Simulation {
 
     /// The design has memories or register files whose contents a run leaves behind.
     pub fn has_memories(&self) -> bool {
-        self.netlist.digital.iter().any(|e| matches!(e.model.as_str(), "regfile" | "rom" | "dmem"))
+        !self.gate_registers.is_empty()
+            || self
+                .netlist
+                .digital
+                .iter()
+                .any(|e| matches!(e.model.as_str(), "regfile" | "rom" | "dmem"))
+    }
+
+    /// The register files at the end of a digital or mixed run, by instance path: a
+    /// register file part's contents, or the values on the nets of one made of gates.
+    pub fn registers(&self) -> Vec<(String, Vec<circuiter_logic::Value>)> {
+        use circuiter_logic::Value;
+        let Some(run) = self.logic_run() else { return Vec::new() };
+        let parts = run
+            .memories
+            .iter()
+            .filter(|(path, _)| self.model(path) == Some("regfile"))
+            .map(|(path, regs)| (path.clone(), regs.clone()));
+        let gates = self.gate_registers.iter().map(|(path, nets)| {
+            let regs = nets
+                .iter()
+                .map(|n| match n {
+                    // Flip-flops never loaded hold nothing known.
+                    Some(n) => run.last(*n).unwrap_or(Value::unknown(32)),
+                    // Only x0 can be missing: it's wired to zero.
+                    None => Value::new(32, 0),
+                })
+                .collect();
+            (path.clone(), regs)
+        });
+        parts.chain(gates).collect()
     }
 
     /// What a program left in a0 (x10), the register main's return value goes to: from
     /// the first 32-register file, after a digital or mixed run.
     pub fn program_result(&self) -> Option<circuiter_logic::Value> {
-        let run = self.logic_run()?;
-        run.memories
-            .iter()
-            .find(|(path, regs)| regs.len() == 32 && self.model(path) == Some("regfile"))
-            .map(|(_, regs)| regs[10])
+        self.registers().into_iter().find(|(_, regs)| regs.len() == 32).map(|(_, regs)| regs[10])
     }
 
     pub fn has_errors(&self) -> bool {
@@ -628,6 +660,27 @@ fn element_path(netlist: &Netlist, element: &str) -> Option<String> {
         .iter()
         .find(|e| e.line.split_whitespace().next().is_some_and(|n| n.eq_ignore_ascii_case(element)))
         .map(|e| e.path.clone())
+}
+
+/// Register files made of gates, which no part holds as an array: an instance with
+/// 32-bit nets `x1` to `x31` (and `x0`, if it has one), by its path, with each
+/// register's flat net.
+fn register_nets(netlist: &Netlist) -> Vec<(String, [Option<usize>; 32])> {
+    let mut found: std::collections::BTreeMap<&str, [Option<usize>; 32]> = Default::default();
+    for (i, n) in netlist.nets.iter().enumerate() {
+        let Some((path, reg)) = n.name.rsplit_once('.') else { continue };
+        let Some(k) = reg.strip_prefix('x').and_then(|k| k.parse::<usize>().ok()) else {
+            continue;
+        };
+        if k < 32 && n.width == 32 && reg == format!("x{k}") {
+            found.entry(path).or_default()[k] = Some(i);
+        }
+    }
+    found
+        .into_iter()
+        .filter(|(_, regs)| regs[1..].iter().all(Option::is_some))
+        .map(|(path, regs)| (path.to_owned(), regs))
+        .collect()
 }
 
 /// Named top-level nets, which are usually the ones worth plotting first.
@@ -1078,6 +1131,11 @@ mod digital_tests {
                 None => assert_eq!(golden.regs[k], 0, "x{k} unwritten on the gates"),
             }
         }
+        // With no register file part, the registers shown are read from its nets.
+        let regs = sim.registers();
+        assert_eq!(regs.len(), 1);
+        assert_eq!(regs[0].0, "RF");
+        assert_eq!(sim.program_result().and_then(|v| v.known()), Some(u64::from(golden.regs[10])));
         let fib: Vec<u64> = run.memories["DMEM"][..12].iter().map(|v| v.known().unwrap()).collect();
         assert_eq!(fib, [0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89]);
     }
