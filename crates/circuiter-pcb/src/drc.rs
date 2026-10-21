@@ -118,22 +118,74 @@ impl Checked {
 
 /// The shortest distance between two shapes: 0 where they meet.
 pub fn distance(a: &Shapes, b: &Shapes) -> f64 {
-    if geometry::overlaps(a, b) {
-        return 0.0;
-    }
+    // The larger first, its edges passed over by the smaller one's box.
+    let size = |s: &Shapes| s.iter().flatten().map(Vec::len).sum::<usize>();
+    let (a, b) = if size(a) < size(b) { (b, a) } else { (a, b) };
+    let (Some(box_a), Some(box_b)) = (geometry::bounds(a), geometry::bounds(b)) else {
+        return f64::INFINITY;
+    };
+    // Edge to edge, passing over segments further from the other shape's box than the
+    // best found so far: most of a pour's thousands of edges, for a pad or a track. A
+    // corner of `b` to `a`'s edges makes a first best, so the passing over starts at once.
     let mut best = f64::INFINITY;
-    for ca in a.iter().flatten() {
-        for cb in b.iter().flatten() {
+    if let Some(q) = b.iter().flatten().flatten().next().copied() {
+        for ca in a.iter().flatten() {
             for i in 0..ca.len() {
-                let (a0, a1) = (ca[i], ca[(i + 1) % ca.len()]);
+                best = best.min(geometry::segment_distance(ca[i], ca[(i + 1) % ca.len()], q, q));
+            }
+        }
+    }
+    for ca in a.iter().flatten() {
+        for i in 0..ca.len() {
+            let (a0, a1) = (ca[i], ca[(i + 1) % ca.len()]);
+            if box_gap(segment_box(a0, a1), box_b) > best {
+                continue;
+            }
+            for cb in b.iter().flatten() {
                 for j in 0..cb.len() {
-                    best =
-                        best.min(geometry::segment_distance(a0, a1, cb[j], cb[(j + 1) % cb.len()]));
+                    let (b0, b1) = (cb[j], cb[(j + 1) % cb.len()]);
+                    if box_gap(segment_box(b0, b1), box_a) <= best {
+                        best = best.min(geometry::segment_distance(a0, a1, b0, b1));
+                    }
                 }
             }
         }
     }
+    // Edges that never meet still overlap if one shape lies inside the other.
+    let first = |s: &Shapes| s.iter().flatten().flatten().next().copied();
+    let within = |q: Option<P>, s: &Shapes| q.is_some_and(|q| s.iter().any(|x| contains(x, q)));
+    if best > 0.0 && (within(first(b), a) || within(first(a), b)) {
+        return 0.0;
+    }
     best
+}
+
+fn segment_box(p: P, q: P) -> (P, P) {
+    ([p[0].min(q[0]), p[1].min(q[1])], [p[0].max(q[0]), p[1].max(q[1])])
+}
+
+/// How far apart two boxes are: 0 where they meet.
+fn box_gap((lo, hi): (P, P), (lo2, hi2): (P, P)) -> f64 {
+    let dx = (lo2[0] - hi[0]).max(lo[0] - hi2[0]).max(0.0);
+    let dy = (lo2[1] - hi[1]).max(lo[1] - hi2[1]).max(0.0);
+    dx.hypot(dy)
+}
+
+/// Whether `q` is inside a shape (its outline less its holes): crossings of a ray
+/// counted over every contour, odd inside.
+fn contains(shape: &[geometry::Contour], q: P) -> bool {
+    let mut odd = false;
+    for c in shape {
+        for k in 0..c.len() {
+            let (a, b) = (c[k], c[(k + 1) % c.len()]);
+            if (a[1] > q[1]) != (b[1] > q[1])
+                && q[0] < a[0] + (q[1] - a[1]) * (b[0] - a[0]) / (b[1] - a[1])
+            {
+                odd = !odd;
+            }
+        }
+    }
+    odd
 }
 
 fn center(c: &Copper) -> P {
@@ -601,4 +653,35 @@ pub fn check(layout: &Layout) -> Checked {
     }
     out.sort_by_key(|v| v.rule);
     Checked { fills, copper, connectivity, violations: out }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn square(x: f64, y: f64, s: f64) -> geometry::Contour {
+        vec![[x, y], [x + s, y], [x + s, y + s], [x, y + s]]
+    }
+
+    #[test]
+    fn distances_between_shapes() {
+        // A pour 10 mm square with a 4 mm hole in its middle, and pads about it.
+        let pour: Shapes = vec![vec![square(0.0, 0.0, 10.0), square(3.0, 3.0, 4.0)]];
+        let pad = |x, y| -> Shapes { vec![vec![square(x, y, 1.0)]] };
+        let close = |d: f64, want: f64| (d - want).abs() < 1e-9;
+        // Outside, either way round.
+        assert!(close(distance(&pour, &pad(12.0, 4.0)), 2.0));
+        assert!(close(distance(&pad(12.0, 4.0), &pour), 2.0));
+        // In the hole, clear of its edges.
+        assert!(close(distance(&pad(4.5, 4.5), &pour), 1.5));
+        // Wholly inside the copper: no edges meet, but they overlap.
+        assert_eq!(distance(&pad(1.0, 1.0), &pour), 0.0);
+        assert_eq!(distance(&pour, &pad(1.0, 1.0)), 0.0);
+        // Across an edge, and just touching.
+        assert_eq!(distance(&pad(9.5, 4.0), &pour), 0.0);
+        assert_eq!(distance(&pad(10.0, 4.0), &pour), 0.0);
+        // A pad round the whole pour.
+        let around: Shapes = vec![vec![square(-1.0, -1.0, 12.0)]];
+        assert_eq!(distance(&around, &pour), 0.0);
+    }
 }

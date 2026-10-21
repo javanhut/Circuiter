@@ -1,0 +1,12 @@
+(
+    description: "USB Micro-B receptacle (device side): VBUS and ground from the host, the D+ and D− pair, ID left open for a device, the shell grounded",
+    prefix: "J",
+    ports: [
+        (name: "vbus", description: "VBUS, 5 V from the host"),
+        (name: "dm", description: "D−"),
+        (name: "dp", description: "D+"),
+        (name: "id", description: "ID (open on a device)"),
+        (name: "gnd", description: "Ground"),
+        (name: "shield", description: "Shell"),
+    ],
+)

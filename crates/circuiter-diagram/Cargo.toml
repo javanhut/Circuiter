@@ -1,0 +1,19 @@
+[package]
+name = "circuiter-diagram"
+description = "Automatic schematic layout for Circuiter: blocks in columns, signals flowing left to right, wires routed between them"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+circuiter-model.workspace = true
+circuiter-scene.workspace = true
+circuiter-hdl.workspace = true
+
+[dev-dependencies]
+circuiter-stdlib.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,14 @@
+(
+    description: "256 Kbit I²C serial EEPROM (24C256 family), SOIC-8: 1.7 to 5.5 V, addressed by A0 to A2, writes barred while WP is high",
+    prefix: "U",
+    ports: [
+        (name: "a0", kind: Input, description: "Address bit 0"),
+        (name: "a1", kind: Input, description: "Address bit 1"),
+        (name: "a2", kind: Input, description: "Address bit 2"),
+        (name: "vss", kind: PowerIn, description: "Ground"),
+        (name: "sda", kind: Bidirectional, description: "Serial data (open drain)"),
+        (name: "scl", kind: Input, description: "Serial clock"),
+        (name: "wp", kind: Input, description: "Write protect"),
+        (name: "vcc", kind: PowerIn, description: "Supply"),
+    ],
+)

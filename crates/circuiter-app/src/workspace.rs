@@ -15,7 +15,7 @@ use circuiter_model::cell::{Cell, PortKind, validate_name};
 use circuiter_model::check::{Diagnostic, Severity, check_libraries};
 use circuiter_model::connectivity::Item;
 use circuiter_model::geom::{Length, Point, Rotation, Transform};
-use circuiter_model::schematic::{Instance, Schematic};
+use circuiter_model::schematic::{Instance, Note, Schematic};
 use circuiter_model::symbol::{Anchor, Graphic, PinDirection, Symbol};
 use circuiter_model::{CellDef, CellId, CellRef, Design, Project, STD_LIBRARY};
 use circuiter_scene::{
@@ -68,6 +68,14 @@ pub enum Tool {
         name: String,
         kind: PortKind,
     },
+    /// A dashed box around a group of parts: two opposite corners.
+    GroupBox {
+        from: Option<Point>,
+    },
+    /// A note's text, placed where clicked.
+    Note {
+        text: String,
+    },
     // Symbol drawing.
     Line {
         points: Vec<Point>,
@@ -101,6 +109,8 @@ impl Tool {
             Tool::Label { .. } => "Label",
             Tool::NoConnect => "No connect",
             Tool::Port { .. } => "Port",
+            Tool::GroupBox { .. } => "Group box",
+            Tool::Note { .. } => "Note",
             Tool::Line { .. } => "Line",
             Tool::Rect { .. } => "Rectangle",
             Tool::Circle { .. } => "Circle",
@@ -131,6 +141,11 @@ impl Tool {
                 "Click a pin that's meant to be left open (click again to take the flag off) · Esc done"
             }
             Tool::Port { .. } => "Click where the port connects · Esc cancel",
+            Tool::GroupBox { from: None } => {
+                "Click a corner of the box to draw around a group of parts · Esc done"
+            }
+            Tool::GroupBox { .. } => "Click the opposite corner · Esc cancel",
+            Tool::Note { .. } => "Click to place the note · Esc cancel",
             Tool::Line { points } if points.is_empty() => "Click to start a line · Esc done",
             Tool::Line { .. } => {
                 "Click to add a point · click the start to close · double-click to end · Esc cancel"
@@ -501,9 +516,10 @@ impl Workspace {
         if let Some(scene) = self.build_scene() {
             self.scene = scene;
         }
-        let (n_inst, n_wire, n_label, n_port) = self.schematic().map_or((0, 0, 0, 0), |s| {
-            (s.instances.len(), s.wires.len(), s.labels.len(), s.ports.len())
-        });
+        let (n_inst, n_wire, n_label, n_port, n_note) =
+            self.schematic().map_or((0, 0, 0, 0, 0), |s| {
+                (s.instances.len(), s.wires.len(), s.labels.len(), s.ports.len(), s.notes.len())
+            });
         let (n_graphic, n_pin) = self.symbol().map_or((0, 0), |s| (s.graphics.len(), s.pins.len()));
         self.selection.retain(|o| match *o {
             Owner::Instance(i) => i < n_inst,
@@ -512,6 +528,7 @@ impl Workspace {
             Owner::Port(i) => i < n_port,
             Owner::Graphic(i) => i < n_graphic,
             Owner::Pin(i) => i < n_pin,
+            Owner::Note(i) => i < n_note,
             Owner::Derived => false,
         });
         self.update_net();
@@ -749,6 +766,16 @@ impl Workspace {
 
     /// Applies an edit to the current cell as one undoable step. A generated symbol is
     /// kept in step with any change to the ports.
+    /// Makes `laid`, the sheet as the Diagram view lays it out, the sheet itself.
+    pub fn use_layout(&mut self, laid: Schematic) -> Result<(), String> {
+        self.edit(|d, lib, def| {
+            edit::use_layout(d, lib, def, laid);
+            Ok(())
+        })?;
+        self.selection.clear();
+        Ok(())
+    }
+
     pub fn edit<T>(
         &mut self,
         f: impl FnOnce(&Design, &str, &mut CellDef) -> Result<T, String>,
@@ -1356,6 +1383,7 @@ impl Workspace {
             Tool::Wire { points, .. } if !points.is_empty() => points.clear(),
             Tool::Line { points } if !points.is_empty() => points.clear(),
             Tool::Rect { from: from @ Some(_) } => *from = None,
+            Tool::GroupBox { from: from @ Some(_) } => *from = None,
             Tool::Circle { center: center @ Some(_) } => *center = None,
             Tool::Arc { center: center @ Some(_), start } => {
                 *center = None;
@@ -1835,6 +1863,35 @@ impl Workspace {
                 self.tool = Tool::Select;
                 return result.err();
             }
+            (Tool::GroupBox { from }, Gesture::Click { at, .. }) => {
+                let p = snapped(at);
+                match from {
+                    None => self.tool = Tool::GroupBox { from: Some(p) },
+                    Some(a) if a.x != p.x && a.y != p.y => {
+                        self.tool = Tool::GroupBox { from: None };
+                        let (a, b) = (
+                            Point::new(a.x.min(p.x), a.y.min(p.y)),
+                            Point::new(a.x.max(p.x), a.y.max(p.y)),
+                        );
+                        let note = Note::Box { a, b, title: String::new() };
+                        let added = self.edit(|_, _, def| edit::add_note(def, note));
+                        if let Ok(i) = added {
+                            self.select_only(Some(Owner::Note(i)));
+                        }
+                        return added.err();
+                    }
+                    Some(_) => {}
+                }
+            }
+            (Tool::Note { text }, Gesture::Click { at, .. }) => {
+                self.tool = Tool::Select;
+                let note = Note::Text { at: snapped(at), text };
+                let added = self.edit(|_, _, def| edit::add_note(def, note));
+                if let Ok(i) = added {
+                    self.select_only(Some(Owner::Note(i)));
+                }
+                return added.err();
+            }
             (Tool::Line { .. }, Gesture::Click { at, .. }) => {
                 let p = snapped_fine(at);
                 let Tool::Line { points } = &mut self.tool else { unreachable!() };
@@ -2179,6 +2236,19 @@ impl Workspace {
             }
             Tool::Label { net, .. } => overlay.ghost.push(text(net.clone(), Role::NetLabel)),
             Tool::Port { name, .. } => overlay.ghost.push(text(format!("port {name}"), Role::Port)),
+            Tool::Note { text: note } => overlay.ghost.push(text(note.clone(), Role::Note)),
+            Tool::GroupBox { from: Some(a) } => {
+                let (a, b) = (Pt::from(*a), Pt::from(at));
+                overlay.ghost.push(Element {
+                    role: Role::Note,
+                    owner: Owner::Derived,
+                    shape: Shape::Polyline {
+                        points: vec![a, Pt::new(b.x, a.y), b, Pt::new(a.x, b.y)],
+                        closed: true,
+                        filled: false,
+                    },
+                });
+            }
             _ => {}
         }
         overlay
@@ -2506,6 +2576,11 @@ impl Workspace {
             Owner::Wire(i) => net_name(Item::Wire(i)).map(|n| format!("wire on net {n}")),
             Owner::Label(i) => net_name(Item::Label(i)).map(|n| format!("label on net {n}")),
             Owner::Port(i) => schematic.ports.get(i).map(|p| format!("port {}", p.port)),
+            Owner::Note(i) => schematic.notes.get(i).map(|n| match n {
+                Note::Box { title, .. } if title.is_empty() => "group box".to_owned(),
+                Note::Box { title, .. } => format!("group box {title}"),
+                Note::Text { .. } => "note".to_owned(),
+            }),
             Owner::Graphic(_) | Owner::Pin(_) | Owner::Derived => None,
         }
         .unwrap_or_default()

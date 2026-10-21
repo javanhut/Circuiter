@@ -1154,6 +1154,13 @@ fn top<'m>(
     Ok((c, body))
 }
 
+/// The width of each signal of module `name` (or the last of `modules`), its ports
+/// among them, at its parameters' defaults.
+pub fn widths(modules: &[Module], name: Option<&str>) -> Result<BTreeMap<String, u32>, String> {
+    let (c, _) = top(modules, name, &BTreeMap::new())?;
+    Ok(c.names.iter().map(|(n, &k)| (n.clone(), c.signals[k].width)).collect())
+}
+
 /// The ports of module `name` (or the file's only module), with widths for the given
 /// parameter values.
 pub fn interface(

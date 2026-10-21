@@ -1,0 +1,18 @@
+(
+    generated: true,
+    graphics: [
+        Rect(a: (-5.08, -7.62), b: (5.08, 7.62)),
+        Text(at: (-5.08, -8.89), text: "${name}"),
+        Text(at: (-5.08, 8.89), text: "eeprom"),
+    ],
+    pins: [
+        (port: "a0", at: (-7.62, -5.08), direction: Right, show_name: true),
+        (port: "a1", at: (-7.62, -2.54), direction: Right, show_name: true),
+        (port: "a2", at: (-7.62, 0.0), direction: Right, show_name: true),
+        (port: "vss", at: (0.0, 10.16), direction: Up, show_name: true),
+        (port: "sda", at: (7.62, 0.0), direction: Left, show_name: true),
+        (port: "scl", at: (-7.62, 2.54), direction: Right, show_name: true),
+        (port: "wp", at: (-7.62, 5.08), direction: Right, show_name: true),
+        (port: "vcc", at: (0.0, -10.16), direction: Down, show_name: true),
+    ],
+)

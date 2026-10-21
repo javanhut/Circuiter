@@ -23,6 +23,8 @@ pub struct CodeTab {
     checking: Option<Receiver<Vec<CodeProblem>>>,
     /// The last check found nothing wrong.
     pub checked_ok: bool,
+    /// For Verilog: its RTL diagram.
+    pub(super) rtl: super::diagram::RtlView,
 }
 
 impl CodeTab {
@@ -142,6 +144,7 @@ impl CircuiterApp {
                     problems: Vec::new(),
                     checking: None,
                     checked_ok: false,
+                    rtl: Default::default(),
                 });
                 self.active_code = Some(self.code_tabs.len() - 1);
             }
@@ -280,6 +283,15 @@ impl CircuiterApp {
                     if tab.dirty() {
                         ui.label(RichText::new("● unsaved").color(p.warning).small());
                     }
+                    if tab.language().ends_with("Verilog") {
+                        ui.add_space(8.0);
+                        let at = usize::from(tab.rtl.shown);
+                        if let Some(k) =
+                            style::segmented(ui, &[("Code", true), ("Diagram", true)], at)
+                        {
+                            tab.rtl.shown = k == 1;
+                        }
+                    }
                     style::trailing(ui, |ui| {
                         if tab.language().ends_with("Verilog") {
                             let make =
@@ -334,60 +346,70 @@ impl CircuiterApp {
                 });
             },
         );
-        // Problems, if any, under the header.
-        let error_lines: Vec<usize> = tab.problems.iter().filter_map(|(l, _)| *l).collect();
-        if !tab.problems.is_empty() || tab.checked_ok {
-            egui::Frame::new().fill(p.raised).inner_margin(egui::Margin::symmetric(10, 4)).show(
-                ui,
-                |ui| {
-                    ui.set_width(ui.available_width());
-                    if tab.problems.is_empty() {
-                        ui.label(
-                            RichText::new(format!("{}  Builds cleanly", icon::CHECK_CIRCLE))
-                                .color(p.go),
-                        );
-                    }
-                    for (line, message) in tab.problems.iter().take(8) {
-                        let at = line.map(|l| format!("line {l}: ")).unwrap_or_default();
-                        ui.label(
-                            RichText::new(format!("{}  {at}{message}", icon::X_CIRCLE))
-                                .color(p.error),
-                        );
-                    }
-                },
-            );
-        }
-        let language = tab.language();
-        let dark = ui.visuals().dark_mode;
-        let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap: f32| {
-            let mut job = highlight(text.as_str(), language, dark, &error_lines);
-            job.wrap.max_width = wrap;
-            ui.fonts_mut(|f| f.layout_job(job))
-        };
-        let well = egui::Frame::new().fill(p.well).inner_margin(egui::Margin::symmetric(4, 6));
-        well.show(ui, |ui| {
-            ui.set_min_size(ui.available_size());
-            egui::ScrollArea::both().id_salt(("code", i)).auto_shrink([false; 2]).show(ui, |ui| {
-                ui.horizontal_top(|ui| {
-                    let lines =
-                        tab.text.lines().count().max(1) + usize::from(tab.text.ends_with('\n'));
-                    let numbers: String = (1..=lines).map(|n| format!("{n:>4}\n")).collect();
-                    ui.add(egui::Label::new(
-                        RichText::new(numbers).monospace().color(p.weak.gamma_multiply(0.6)),
-                    ));
-                    ui.add(
-                        egui::TextEdit::multiline(&mut tab.text)
-                            .code_editor()
-                            .frame(egui::Frame::NONE)
-                            .background_color(p.well)
-                            .desired_width(f32::INFINITY)
-                            .desired_rows(40)
-                            .lock_focus(true)
-                            .layouter(&mut layouter),
-                    );
-                });
+        if tab.rtl.shown {
+            super::diagram::rtl_pane(ui, &mut tab.rtl, &tab.text, self.theme, self.show_grid);
+        } else {
+            // Problems, if any, under the header.
+            let error_lines: Vec<usize> = tab.problems.iter().filter_map(|(l, _)| *l).collect();
+            if !tab.problems.is_empty() || tab.checked_ok {
+                egui::Frame::new()
+                    .fill(p.raised)
+                    .inner_margin(egui::Margin::symmetric(10, 4))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        if tab.problems.is_empty() {
+                            ui.label(
+                                RichText::new(format!("{}  Builds cleanly", icon::CHECK_CIRCLE))
+                                    .color(p.go),
+                            );
+                        }
+                        for (line, message) in tab.problems.iter().take(8) {
+                            let at = line.map(|l| format!("line {l}: ")).unwrap_or_default();
+                            ui.label(
+                                RichText::new(format!("{}  {at}{message}", icon::X_CIRCLE))
+                                    .color(p.error),
+                            );
+                        }
+                    });
+            }
+            let language = tab.language();
+            let dark = ui.visuals().dark_mode;
+            let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap: f32| {
+                let mut job = highlight(text.as_str(), language, dark, &error_lines);
+                job.wrap.max_width = wrap;
+                ui.fonts_mut(|f| f.layout_job(job))
+            };
+            let well = egui::Frame::new().fill(p.well).inner_margin(egui::Margin::symmetric(4, 6));
+            well.show(ui, |ui| {
+                ui.set_min_size(ui.available_size());
+                egui::ScrollArea::both().id_salt(("code", i)).auto_shrink([false; 2]).show(
+                    ui,
+                    |ui| {
+                        ui.horizontal_top(|ui| {
+                            let lines = tab.text.lines().count().max(1)
+                                + usize::from(tab.text.ends_with('\n'));
+                            let numbers: String =
+                                (1..=lines).map(|n| format!("{n:>4}\n")).collect();
+                            ui.add(egui::Label::new(
+                                RichText::new(numbers)
+                                    .monospace()
+                                    .color(p.weak.gamma_multiply(0.6)),
+                            ));
+                            ui.add(
+                                egui::TextEdit::multiline(&mut tab.text)
+                                    .code_editor()
+                                    .frame(egui::Frame::NONE)
+                                    .background_color(p.well)
+                                    .desired_width(f32::INFINITY)
+                                    .desired_rows(40)
+                                    .lock_focus(true)
+                                    .layouter(&mut layouter),
+                            );
+                        });
+                    },
+                );
             });
-        });
+        }
         match action {
             Some("save") => self.save_code(),
             Some("check") => {

@@ -30,6 +30,10 @@ pub struct Theme {
     pub net_label: Rgba,
     pub port: Rgba,
     pub unconnected: Rgba,
+    pub bus: Rgba,
+    pub note: Rgba,
+    /// The sheet's border and title block.
+    pub frame: Rgba,
     /// Selected objects.
     pub selection: Rgba,
     /// The net under inspection.
@@ -52,6 +56,9 @@ impl Theme {
         net_label: Rgba::hex(0x1A1A1A),
         port: Rgba::hex(0x6A3D9A),
         unconnected: Rgba::hex(0xE0301E),
+        bus: Rgba::hex(0x1F4E9A),
+        note: Rgba::hex(0x4A4A4A),
+        frame: Rgba::hex(0x7A2A1F),
         selection: Rgba::hex(0xE8871E),
         highlight: Rgba::hex(0x2E86DE),
     };
@@ -72,6 +79,9 @@ impl Theme {
         net_label: Rgba::hex(0x5BE38F),
         port: Rgba::hex(0xA98BFA),
         unconnected: Rgba::hex(0xF87171),
+        bus: Rgba::hex(0x60A5FA),
+        note: Rgba::hex(0xB4C0CF),
+        frame: Rgba::hex(0x6B7E98),
         selection: Rgba::hex(0xFBBF24),
         highlight: Rgba::hex(0x3B8BF6),
     };
@@ -84,12 +94,16 @@ impl Theme {
             Role::Body => self.body,
             Role::Pin => self.pin,
             Role::PinName => self.pin_name,
+            Role::PinNumber => self.pin,
             Role::Reference => self.reference,
             Role::Value => self.value,
             Role::NetLabel => self.net_label,
             Role::Port => self.port,
             Role::Unconnected => self.unconnected,
             Role::Guide => self.grid,
+            Role::Bus => self.bus,
+            Role::Note => self.note,
+            Role::Frame => self.frame,
         }
     }
 }

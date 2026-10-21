@@ -7,7 +7,9 @@
 use circuiter_model::cell::{Port, PortKind, validate_name, validate_port_name};
 use circuiter_model::connectivity::placed_pins;
 use circuiter_model::geom::{Length, Point, Rotation, Transform};
-use circuiter_model::schematic::{Instance, NetLabel, Schematic, SchematicPort, Wire};
+use circuiter_model::schematic::{
+    Frame, Instance, NetLabel, Note, Paper, Schematic, SchematicPort, Wire,
+};
 use circuiter_model::{CellDef, CellRef, Design};
 use circuiter_scene::Owner;
 use std::collections::{BTreeMap, BTreeSet};
@@ -26,6 +28,38 @@ pub fn next_instance_name(s: &Schematic, prefix: &str) -> String {
     let prefix = if prefix.is_empty() { "X" } else { prefix };
     let used: BTreeSet<&str> = s.instances.iter().map(|i| i.name.as_str()).collect();
     (1..).map(|n| format!("{prefix}{n}")).find(|name| !used.contains(name.as_str())).unwrap()
+}
+
+/// Replaces `def`'s sheet with `laid`: the same parts and nets laid out afresh, as the
+/// Diagram view draws them. The power symbols it adds get names, the frame stays,
+/// fitted around the new drawing, and notes' text is stacked under it; group boxes go,
+/// since what they surrounded has moved.
+pub fn use_layout(design: &Design, library: &str, def: &mut CellDef, mut laid: Schematic) {
+    let Some(old) = def.schematic.take() else { return };
+    for k in 0..laid.instances.len() {
+        if laid.instances[k].name.starts_with('#') {
+            let cell = &laid.instances[k].cell;
+            let prefix = design.resolve(cell, library).map(|(_, d)| d.cell.prefix.clone());
+            laid.instances[k].name = next_instance_name(&laid, &prefix.unwrap_or_default());
+        }
+    }
+    let id = circuiter_model::CellId::new(library, &def.name);
+    let drawn = circuiter_scene::Scene::build_from(design, &id, &def.cell, &laid).bounds;
+    let mut y = snap(Point::mm(0.0, drawn.max.y + 5.08), GRID).y;
+    let x = snap(Point::mm(drawn.min.x, 0.0), GRID).x;
+    for note in old.notes {
+        if let Note::Text { text, .. } = note {
+            let lines = text.lines().count().max(1) as i64;
+            laid.notes.push(Note::Text { at: Point::new(x, y), text });
+            y = y + Length(GRID.nm() * (lines + 1));
+        }
+    }
+    if let Some(mut frame) = old.frame {
+        let all = circuiter_scene::Scene::build_from(design, &id, &def.cell, &laid).bounds;
+        fit_frame(&mut frame, Point::mm(all.min.x, all.min.y), Point::mm(all.max.x, all.max.y));
+        laid.frame = Some(frame);
+    }
+    def.schematic = Some(laid);
 }
 
 /// Places a part and returns its index.
@@ -99,6 +133,42 @@ pub fn add_label(def: &mut CellDef, net: &str, at: Point, global: bool) -> Resul
     Ok(s.labels.len() - 1)
 }
 
+/// Adds a note (a dashed box or text) to the sheet and returns its index.
+pub fn add_note(def: &mut CellDef, note: Note) -> Result<usize, String> {
+    if let Note::Text { text, .. } = &note {
+        if text.trim().is_empty() {
+            return Err("a note needs some text".into());
+        }
+    }
+    let s = def.schematic.get_or_insert_with(Schematic::default);
+    s.notes.push(note);
+    Ok(s.notes.len() - 1)
+}
+
+/// Sizes and places `frame` around a drawing spanning `min` to `max`: the smallest
+/// paper it fits on, with the drawing centred clear of the title block and the paper's
+/// corner on the grid.
+pub fn fit_frame(frame: &mut Frame, min: Point, max: Point) {
+    use circuiter_model::schematic::{FRAME_MARGIN, TITLE_BLOCK};
+    let (w, h) = ((max.x - min.x).mm(), (max.y - min.y).mm());
+    // Room to spare around the drawing, inside the border.
+    let air = 10.0;
+    let (paper, portrait) = Paper::fitting(w + 2.0 * air, h + 2.0 * air);
+    frame.paper = paper;
+    frame.portrait = portrait;
+    let (pw, ph) = frame.size();
+    let inset = FRAME_MARGIN + 2.0;
+    let (iw, ih) = (pw - 2.0 * inset, ph - 2.0 * inset);
+    // Centred above the title block if it fits there, else beside it.
+    let (cx, cy) = if h + 2.0 * air <= ih - TITLE_BLOCK.1 {
+        (inset + iw / 2.0, inset + (ih - TITLE_BLOCK.1) / 2.0)
+    } else {
+        (inset + (iw - TITLE_BLOCK.0) / 2.0, inset + ih / 2.0)
+    };
+    let mid = Point::mm((min.x + max.x).mm() / 2.0, (min.y + max.y).mm() / 2.0);
+    frame.origin = snap(mid - Point::mm(cx, cy), GRID);
+}
+
 /// Puts a no-connect flag at `at`, or takes off the one there.
 pub fn toggle_no_connect(def: &mut CellDef, at: Point) -> Result<(), String> {
     let s = def.schematic.get_or_insert_with(Schematic::default);
@@ -144,6 +214,9 @@ pub fn delete(def: &mut CellDef, targets: &BTreeSet<Owner>) {
             }
             Owner::Port(i) if i < s.ports.len() => {
                 removed_ports.push(s.ports.remove(i).port);
+            }
+            Owner::Note(i) if i < s.notes.len() => {
+                s.notes.remove(i);
             }
             _ => {}
         }
@@ -281,6 +354,11 @@ pub fn translate(
             Owner::Port(i) => {
                 if let Some(p) = s.ports.get_mut(i) {
                     p.at = p.at + delta;
+                }
+            }
+            Owner::Note(i) => {
+                if let Some(n) = s.notes.get_mut(i) {
+                    n.translate(delta);
                 }
             }
             _ => {}
@@ -795,6 +873,8 @@ pub struct Clip {
     pub instances: Vec<Instance>,
     pub wires: Vec<Wire>,
     pub labels: Vec<NetLabel>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<Note>,
 }
 
 /// What the system clipboard holds for a clip: this line, then the clip in RON.
@@ -802,7 +882,10 @@ const CLIP_HEADER: &str = "circuiter clip 1";
 
 impl Clip {
     pub fn is_empty(&self) -> bool {
-        self.instances.is_empty() && self.wires.is_empty() && self.labels.is_empty()
+        self.instances.is_empty()
+            && self.wires.is_empty()
+            && self.labels.is_empty()
+            && self.notes.is_empty()
     }
 
     pub fn to_text(&self) -> String {
@@ -828,7 +911,8 @@ pub fn copy(
     targets: &BTreeSet<Owner>,
 ) -> (Clip, Point) {
     let origin = Point::new(Length(0), Length(0));
-    let empty = Clip { instances: Vec::new(), wires: Vec::new(), labels: Vec::new() };
+    let empty =
+        Clip { instances: Vec::new(), wires: Vec::new(), labels: Vec::new(), notes: Vec::new() };
     let Some(s) = def.schematic.as_ref() else { return (empty, origin) };
     let mut clip = empty;
     let mut ends: BTreeSet<Point> = BTreeSet::new();
@@ -857,8 +941,10 @@ pub fn copy(
         }
     }
     for t in targets {
-        if let Owner::Label(i) = *t {
-            clip.labels.extend(s.labels.get(i).cloned());
+        match *t {
+            Owner::Label(i) => clip.labels.extend(s.labels.get(i).cloned()),
+            Owner::Note(i) => clip.notes.extend(s.notes.get(i).cloned()),
+            _ => {}
         }
     }
     // Centre it on the grid point nearest the middle of what was copied.
@@ -868,7 +954,11 @@ pub fn copy(
         .iter()
         .map(|i| i.placement.position)
         .chain(clip.wires.iter().flat_map(|w| w.points.iter().copied()))
-        .chain(clip.labels.iter().map(|l| l.at));
+        .chain(clip.labels.iter().map(|l| l.at))
+        .chain(clip.notes.iter().map(|n| match n {
+            Note::Box { a, .. } => *a,
+            Note::Text { at, .. } => *at,
+        }));
     for p in points {
         bounds = Some(match bounds {
             None => (p, p),
@@ -896,6 +986,9 @@ impl Clip {
         }
         for l in &mut self.labels {
             l.at = l.at + by;
+        }
+        for n in &mut self.notes {
+            n.translate(by);
         }
     }
 }
@@ -932,6 +1025,10 @@ pub fn paste(
     for l in clip.labels {
         s.labels.push(l);
         added.insert(Owner::Label(s.labels.len() - 1));
+    }
+    for n in clip.notes {
+        s.notes.push(n);
+        added.insert(Owner::Note(s.notes.len() - 1));
     }
     added
 }
@@ -1053,6 +1150,112 @@ mod tests {
 
     fn sheet() -> CellDef {
         CellDef { name: "top".into(), schematic: Some(Schematic::default()), ..CellDef::default() }
+    }
+
+    #[test]
+    fn a_fitted_frame_holds_the_drawing_clear_of_the_title_block() {
+        use circuiter_model::schematic::{FRAME_MARGIN, TITLE_BLOCK};
+        for (min, max) in [
+            (mm(-20.0, -10.0), mm(60.0, 40.0)),
+            (mm(100.0, 300.0), mm(420.0, 480.0)),
+            (mm(0.0, 0.0), mm(150.0, 260.0)),
+        ] {
+            let mut frame = Frame::new(Paper::A4);
+            fit_frame(&mut frame, min, max);
+            let (w, h) = frame.size();
+            let o = frame.origin;
+            assert_eq!(o, snap(o, GRID), "the paper's corner is on the grid");
+            let inset = FRAME_MARGIN + 2.0;
+            let (x0, y0) = (o.x.mm() + inset, o.y.mm() + inset);
+            let (x1, y1) = (o.x.mm() + w - inset, o.y.mm() + h - inset);
+            assert!(min.x.mm() > x0 && min.y.mm() > y0, "{min} inside {frame:?}");
+            assert!(max.x.mm() < x1 && max.y.mm() < y1, "{max} inside {frame:?}");
+            let in_block = max.x.mm() > x1 - TITLE_BLOCK.0 && max.y.mm() > y1 - TITLE_BLOCK.1;
+            assert!(!in_block, "{frame:?} puts the title block over the drawing");
+        }
+        let mut small = Frame::new(Paper::A0);
+        fit_frame(&mut small, mm(0.0, 0.0), mm(50.0, 50.0));
+        assert_eq!(small.paper, Paper::A4);
+    }
+
+    #[test]
+    fn a_diagram_layout_becomes_the_sheet() {
+        let d = design();
+        let mut def = sheet();
+        let r1 = resistor_at(&d, &mut def, 0.0, 0.0);
+        let r2 = resistor_at(&d, &mut def, 30.48, 20.32);
+        let s = def.schematic.as_mut().unwrap();
+        let (a, b) = (s.instances[r1].clone(), s.instances[r2].clone());
+        let pins = |inst: &Instance| -> Vec<Point> {
+            placed_pins(d.resolve(&inst.cell, "std").unwrap().1, inst)
+                .into_iter()
+                .map(|(p, _)| p)
+                .collect()
+        };
+        let (pa, pb) = (pins(&a), pins(&b));
+        s.wires.push(Wire { points: route(pa[1], pb[0], true) });
+        s.labels.push(NetLabel { net: "GND".into(), at: pb[1], global: true });
+        s.notes.push(Note::Box { a: mm(-20.0, -20.0), b: mm(20.0, 20.0), title: "Divider".into() });
+        s.notes.push(Note::Text { at: mm(0.0, 40.0), text: "Two resistors\nin series".into() });
+        s.frame = Some(Frame::new(Paper::A3));
+        let laid = circuiter_diagram::arrange_sheet(&d, "std", &def.cell, s);
+        use_layout(&d, "std", &mut def, laid);
+        let s = def.schematic.as_ref().unwrap();
+        let names: BTreeSet<&str> = s.instances.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names.len(), s.instances.len(), "names are unique");
+        for name in &names {
+            assert!(validate_name(name).is_ok(), "{name}");
+        }
+        assert!(names.contains("R1") && names.contains("R2"));
+        assert!(
+            matches!(&s.notes[..], [Note::Text { text, .. }] if text == "Two resistors\nin series"),
+            "the box goes, the text stays: {:?}",
+            s.notes
+        );
+        let frame = s.frame.as_ref().unwrap();
+        assert_eq!(frame.paper, Paper::A4, "fitted to the smaller drawing");
+        let conn = Connectivity::analyze(&d, "std", s);
+        let joined = |x: usize, y: usize| {
+            let net = |i: usize, port: &str| {
+                let k = conn.pins.iter().position(|p| p.instance == i && p.port == port).unwrap();
+                conn.net_of(circuiter_model::connectivity::Item::Pin(k))
+            };
+            (net(x, "b"), net(y, "a"))
+        };
+        let (x, y) = joined(0, 1);
+        assert_eq!(x, y, "R1 and R2 are still joined");
+    }
+
+    #[test]
+    fn notes_move_copy_and_delete_with_the_rest() {
+        let d = design();
+        let mut def = sheet();
+        let r = resistor_at(&d, &mut def, 0.0, 0.0);
+        let b = add_note(
+            &mut def,
+            Note::Box { a: mm(-10.16, -10.16), b: mm(10.16, 10.16), title: "Bias".into() },
+        )
+        .unwrap();
+        let t =
+            add_note(&mut def, Note::Text { at: mm(0.0, 20.32), text: "R1 sets the gain".into() })
+                .unwrap();
+        assert!(add_note(&mut def, Note::Text { at: mm(0.0, 0.0), text: " ".into() }).is_err());
+        let all = BTreeSet::from([Owner::Instance(r), Owner::Note(b), Owner::Note(t)]);
+        translate(&d, "std", &mut def, &all, mm(2.54, 0.0));
+        let s = def.schematic.as_ref().unwrap();
+        assert_eq!(
+            s.notes[0],
+            Note::Box { a: mm(-7.62, -10.16), b: mm(12.7, 10.16), title: "Bias".into() }
+        );
+        assert_eq!(s.notes[1], Note::Text { at: mm(2.54, 20.32), text: "R1 sets the gain".into() });
+        let (clip, _) = copy(&d, "std", &def, &all);
+        assert_eq!(clip.notes.len(), 2);
+        let back = Clip::from_text(&clip.to_text()).unwrap();
+        assert_eq!(back, clip);
+        let added = paste(&d, "std", &mut def, &clip, mm(50.8, 0.0));
+        assert!(added.contains(&Owner::Note(3)));
+        delete(&mut def, &BTreeSet::from([Owner::Note(0), Owner::Note(2)]));
+        assert_eq!(def.schematic.as_ref().unwrap().notes.len(), 2);
     }
 
     #[test]

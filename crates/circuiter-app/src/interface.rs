@@ -68,6 +68,14 @@ pub fn set_port_kind(def: &mut CellDef, name: &str, kind: PortKind) {
     }
 }
 
+/// Puts a port in a section of the symbol (`Bank 0`, `Power`), or none when `group` is
+/// empty.
+pub fn set_port_group(def: &mut CellDef, name: &str, group: &str) {
+    if let Some(port) = def.cell.ports.iter_mut().find(|p| p.name == name) {
+        port.group = group.trim().to_owned();
+    }
+}
+
 /// Removes a port from the interface, with its port flags and pin.
 pub fn remove_port(def: &mut CellDef, name: &str) {
     def.cell.ports.retain(|p| p.name != name);

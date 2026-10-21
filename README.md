@@ -43,6 +43,7 @@ cargo run --release -p circuiter-app -- examples/ce_amplifier
 cargo run --release -p circuiter-app -- examples/riscv
 cargo run --release -p circuiter-app -- examples/bench
 cargo run --release -p circuiter-app -- examples/analog_lab
+cargo run --release -p circuiter-app -- examples/devboard
 ```
 
 The examples are a CMOS inverter built from two MOSFETs and driven by a clock, a
@@ -59,6 +60,18 @@ ground pour and every connection autorouted, in a vented case (3D view).
 ```sh
 cargo run --release -p circuiter-app -- examples/analog_lab --cell blinker --view pcb
 cargo run --release -p circuiter-app -- examples/analog_lab --cell blinker --view board3d --select section
+```
+
+The development board is a microcontroller board as a board house would build it: a
+32-bit microcontroller in an LQFP-48 with its decoupling, USB Micro-B (D+ and D− routed
+as a differential pair), a 3.3 V regulator, an 8 MHz crystal, reset and boot buttons,
+LEDs, an I²C EEPROM and its GPIO on pin headers, 42 parts on a four-layer board with
+rounded corners: signals on the outer layers, ground and 3.3 V planes inside, ground
+poured over both sides and stitched, every connection routed and the rules check clean.
+
+```sh
+cargo run --release -p circuiter-app -- examples/devboard --view pcb
+cargo run --release -p circuiter-app -- examples/devboard --view board3d
 ```
 
 Start your own with File → New Project… (or the welcome screen): pick an empty folder

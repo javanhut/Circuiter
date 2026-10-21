@@ -1,0 +1,5 @@
+(
+    description: "Mounting hole for an M3 screw, 3.2 mm, plated with a 6 mm ring so the screw grounds the board to its case",
+    prefix: "H",
+    ports: [(name: "mh", description: "The plated ring")],
+)

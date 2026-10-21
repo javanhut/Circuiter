@@ -18,6 +18,7 @@ pub const PACKAGES: &[&str] = &[
     "sod123",
     "sot23",
     "soic",
+    "qfp",
     "axial",
     "disc",
     "led",
@@ -104,6 +105,7 @@ pub fn generate(package: &str, p: Params<'_>) -> Result<Mesh, String> {
         "sod123" => sod123(),
         "sot23" => sot23(),
         "soic" => soic(p)?,
+        "qfp" => qfp(p)?,
         "bridge" => bridge(),
         "hc49" => hc49(),
         "fuse" => fuse(p),
@@ -458,6 +460,37 @@ fn soic(p: Params<'_>) -> Result<Mesh, String> {
         let y = -span / 2.0 + 1.27 * k as f32;
         m.append(gull(-1.95, -3.0, y, 0.2, 0.75));
         m.append(gull(1.95, 3.0, y, 0.2, 0.75));
+    }
+    Ok(m)
+}
+
+/// A quad flat pack: a square body `body` wide, 1.4 mm thick on a 0.1 mm standoff,
+/// with `pins` gull-wing leads a quarter to a side, `pitch` apart, reaching 1 mm out;
+/// pin 1 at the top of the left side, as the footprint numbers them.
+fn qfp(p: Params<'_>) -> Result<Mesh, String> {
+    let n = num(p, "pins", 48.0).round() as i32;
+    if !(8..=256).contains(&n) || n % 4 != 0 {
+        return Err(format!("a QFP needs a multiple of 4 pins, 8 to 256, not {n}"));
+    }
+    let pitch = num(p, "pitch", 0.5);
+    let per = n / 4;
+    let row = (per - 1) as f32 * pitch;
+    let h = num(p, "body", 7.0).max(row + 2.0 * pitch) / 2.0;
+    let mut m = cuboid([-h, -h, 0.1], [h, h, 1.5], color("black"));
+    // Pin 1's dimple, in the corner by it.
+    let d = (h * 0.12).clamp(0.25, 0.6);
+    m.append(cylinder(d, 1.5, 1.52, 20, color("grey")).translated([
+        -h + 2.0 * d,
+        h - 2.0 * d,
+        0.0,
+    ]));
+    let half = (pitch * 0.22).min(0.25);
+    let mut side = Mesh::default();
+    for k in 0..per {
+        side.append(gull(-h, -h - 1.0, -row / 2.0 + pitch * k as f32, half, 0.75));
+    }
+    for turn in 0..4 {
+        m.append(side.clone().transformed(&Mat4::rotate_z(turn as f32 * FRAC_PI_2)));
     }
     Ok(m)
 }

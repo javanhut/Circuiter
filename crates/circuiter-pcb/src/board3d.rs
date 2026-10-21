@@ -81,8 +81,19 @@ fn side(layout: &Layout, fills: &[ZoneFill], top: bool, t: f32, out: &mut Mesh) 
     let z = |h: f32| if top { h } else { -t - h };
     let span = |a: f32, b: f32| if top { (z(a), z(b)) } else { (z(b), z(a)) };
     let (c0, c1) = span(0.0, COPPER);
+    // A pour joins its own net's plated holes and vias, but the drill takes its copper
+    // out of them.
+    let drilled: geometry::Shapes = layout
+        .pads
+        .iter()
+        .filter_map(|pd| Some(vec![geometry::circle(pd.center, pd.drill()? / 2.0)]))
+        .chain(
+            layout.board.vias.iter().map(|v| vec![geometry::circle(p(v.at), v.drill.mm() / 2.0)]),
+        )
+        .collect();
     for f in fills.iter().filter(|f| f.layer == cu) {
-        for piece in &f.shapes {
+        let shapes = geometry::difference(&f.shapes, &drilled);
+        for piece in &shapes {
             if let Some((outer, holes)) = piece.split_first() {
                 let holes: Vec<_> = holes.iter().map(ring).collect();
                 out.append(extrude_holes(&ring(outer), &holes, c0, c1 - 0.005, MASK_OVER_COPPER));

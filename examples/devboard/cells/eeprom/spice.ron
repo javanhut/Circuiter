@@ -1,0 +1,3 @@
+(
+    template: "R${inst} ${node.vcc} ${node.vss} 1meg",
+)

@@ -1,0 +1,4 @@
+(
+    package: "soic",
+    params: {"pins": "8"},
+)

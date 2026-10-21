@@ -165,6 +165,10 @@ pub struct Port {
     /// of names and numbers (`wa+wb`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub width_of: Option<String>,
+    /// The section of the symbol the pin is drawn in, such as `Bank 0` or `Power`: a
+    /// generated symbol stacks its sections, each titled and ruled off from the next.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub group: String,
 }
 
 fn one() -> u32 {
@@ -184,6 +188,7 @@ impl Port {
             global: None,
             width: 1,
             width_of: None,
+            group: String::new(),
         }
     }
 

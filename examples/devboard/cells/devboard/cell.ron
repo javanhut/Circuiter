@@ -1,0 +1,5 @@
+(
+    description: "Microcontroller development board: USB Micro-B, a 3.3 V LDO, an 8 MHz crystal, reset and boot buttons, power and user LEDs, 30 GPIO on four 8-way headers, a power header and SWD; on a 70 × 45 mm four-layer board",
+    prefix: "X",
+    ports: [],
+)

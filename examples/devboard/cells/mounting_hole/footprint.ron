@@ -1,0 +1,10 @@
+(
+    pads: [
+        (number: "1", at: (0.0, 0.0), size: (6.0, 6.0), shape: Circle, kind: Through(drill: 3.2)),
+    ],
+    graphics: [
+        Circle(layer: FSilk, center: (0.0, 0.0), radius: 3.25, width: 0.12),
+        Circle(layer: FFab, center: (0.0, 0.0), radius: 3.0, width: 0.1),
+        Circle(layer: FCrtYd, center: (0.0, 0.0), radius: 3.45, width: 0.05),
+    ],
+)

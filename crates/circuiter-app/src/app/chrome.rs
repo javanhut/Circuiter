@@ -473,28 +473,32 @@ impl CircuiterApp {
                 // The schematic workspace's views; the others have their own bars.
                 if !(self.show_pcb || self.show_3d || self.simulating) {
                     {
-                        let active = match (self.show_netlist, ws.mode) {
-                            (true, _) => 2,
-                            (false, Mode::Schematic) => 0,
-                            (false, Mode::Symbol) => 1,
+                        let active = match (self.show_netlist, self.show_diagram, ws.mode) {
+                            (true, _, _) => 2,
+                            (_, true, _) => 3,
+                            (_, _, Mode::Schematic) => 0,
+                            (_, _, Mode::Symbol) => 1,
                         };
                         let views = [
                             ("Schematic", has_schematic),
                             ("Symbol", true),
                             ("Netlist", has_schematic),
+                            ("Diagram", has_schematic),
                         ];
-                        match style::segmented(ui, &views, active) {
-                            Some(0) => {
-                                self.show_netlist = false;
-                                ws.set_mode(Mode::Schematic);
-                            }
-                            Some(1) => {
-                                self.show_netlist = false;
-                                ws.set_mode(Mode::Symbol);
-                            }
+                        let picked = style::segmented(ui, &views, active);
+                        if picked.is_some() {
+                            (self.show_netlist, self.show_diagram) = (false, false);
+                        }
+                        match picked {
+                            Some(0) => ws.set_mode(Mode::Schematic),
+                            Some(1) => ws.set_mode(Mode::Symbol),
                             Some(2) => {
                                 ws.set_mode(Mode::Schematic);
                                 self.show_netlist = true;
+                            }
+                            Some(3) => {
+                                ws.set_mode(Mode::Schematic);
+                                self.show_diagram = true;
                             }
                             _ => {}
                         }
@@ -542,14 +546,18 @@ impl CircuiterApp {
                 }
                 ui.spacing_mut().item_spacing.x = 2.0;
                 ui.add_space(8.0);
-                let view = self.canvas.view;
-                let level = ws.levels.last_mut().expect("level");
-                let pct = level.camera.map_or(100.0, |c| c.scale / ZOOM_100 * 100.0);
+                // The diagram has its own view of things.
+                let (camera, view) = if self.show_diagram {
+                    (&mut self.diagram.camera, self.diagram.canvas.view)
+                } else {
+                    (&mut ws.levels.last_mut().expect("level").camera, self.canvas.view)
+                };
+                let pct = camera.map_or(100.0, |c| c.scale / ZOOM_100 * 100.0);
                 if icon_button(ui, icon::CORNERS_OUT, "Fit to window  (F)", true, false).clicked() {
-                    level.camera = None;
+                    *camera = None;
                 }
                 let mut zoom = |factor: f32| {
-                    if let (Some(cam), Some(view)) = (&mut level.camera, view) {
+                    if let (Some(cam), Some(view)) = (camera.as_mut(), view) {
                         cam.zoom_about(view, view.center(), factor);
                         cam.fitted = None;
                     }
@@ -565,7 +573,24 @@ impl CircuiterApp {
                 {
                     zoom(0.8);
                 }
-                if self.show_netlist || self.show_3d {
+                if self.show_diagram && ws.editable() {
+                    toolbar_gap(ui);
+                    let laid = self.diagram.laid_out(&ws.current().cell, ws.revision);
+                    let r = ui
+                        .add_enabled(laid.is_some(), egui::Button::new("Use This Layout"))
+                        .on_hover_text(
+                            "Make this layout the sheet's own: parts and wires move to where \
+                             they are here (undo with Ctrl+Z). Group boxes are dropped and \
+                             notes stacked under the drawing.",
+                        );
+                    if let Some(laid) = laid.filter(|_| r.clicked()) {
+                        match ws.use_layout(laid) {
+                            Ok(()) => self.show_diagram = false,
+                            Err(e) => error = Some(e),
+                        }
+                    }
+                }
+                if self.show_netlist || self.show_diagram || self.show_3d {
                     return;
                 }
                 toolbar_gap(ui);
@@ -617,6 +642,17 @@ impl CircuiterApp {
                         ws.tool = Tool::Line { points: Vec::new() };
                     }
                 } else {
+                    if tool(ui, icon::NOTE, "Note", "Note  (T): text on the sheet") {
+                        prompt = Some(Prompt::Note { text: String::new() });
+                    }
+                    if tool(
+                        ui,
+                        icon::SELECTION,
+                        "Group box",
+                        "Group box  (B): a dashed box around a group of parts",
+                    ) {
+                        ws.tool = Tool::GroupBox { from: None };
+                    }
                     if tool(ui, icon::PLUS, "Place", "Add part  (A)") {
                         prompt = Some(Prompt::AddPart { query: String::new() });
                     }

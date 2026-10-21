@@ -1,0 +1,16 @@
+(
+    generated: true,
+    graphics: [
+        Rect(a: (-5.08, -5.08), b: (5.08, 5.08)),
+        Text(at: (-5.08, -6.35), text: "${name}"),
+        Text(at: (5.588, 6.35), text: "usb_micro_b"),
+    ],
+    pins: [
+        (port: "vbus", at: (-7.62, -2.54), direction: Right, show_name: true),
+        (port: "dm", at: (7.62, -2.54), direction: Left, show_name: true),
+        (port: "dp", at: (-7.62, 0.0), direction: Right, show_name: true),
+        (port: "id", at: (7.62, 0.0), direction: Left, show_name: true),
+        (port: "gnd", at: (0.0, 7.62), direction: Up, show_name: true),
+        (port: "shield", at: (-7.62, 2.54), direction: Right, show_name: true),
+    ],
+)

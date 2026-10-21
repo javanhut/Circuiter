@@ -121,26 +121,72 @@ pub fn generate(name: &str, cell: &Cell) -> Symbol {
     };
     let (top_step, bottom_step) = (step(&top), step(&bottom));
     let span = |ports: &[usize], step: i64| ports.len().saturating_sub(1) as i64 * step;
+    // Sections of side pins, in the order their groups first appear.
+    let mut groups: Vec<&str> = Vec::new();
+    for (i, port) in cell.ports.iter().enumerate() {
+        if matches!(sides[i], Side::Left | Side::Right) && !groups.contains(&port.group.as_str()) {
+            groups.push(&port.group);
+        }
+    }
+    let sectioned = groups.len() > 1 || groups.first().is_some_and(|g| !g.is_empty());
+    let title_width = |g: &&str| g.chars().count() as i64 * TEXT_SIZE * 3 / 5 + 2 * NAME_GAP;
     let width = round_up(
         (name_width(&left) + name_width(&right) + NAME_CLEARANCE)
             .max(span(&top, top_step) + 2 * PITCH)
             .max(span(&bottom, bottom_step) + 2 * PITCH)
+            .max(if sectioned { groups.iter().map(title_width).max().unwrap_or(0) } else { 0 })
             .max(MIN_WIDTH),
         PITCH,
     );
-    let rows = left.len().max(right.len()).max(1) as i64;
-    let (x0, y0) = (-(width / PITCH / 2) * PITCH, -((rows + 1) / 2) * PITCH);
-    let (x1, y1) = (x0 + width, y0 + (rows + 1) * PITCH);
+
+    // Each side pin's distance below the top edge. Unsectioned, a shorter side is
+    // centred against the longer one; sectioned, each section's pins start below its
+    // title, and a rule closes it off from the next.
+    let mut depth = vec![0; cell.ports.len()];
+    let mut rules = Vec::new();
+    let mut titles = Vec::new();
+    let height = if sectioned {
+        let mut cursor = 0;
+        for (k, g) in groups.iter().enumerate() {
+            if k > 0 {
+                rules.push(cursor);
+            }
+            if !g.is_empty() {
+                titles.push((cursor + PITCH, *g));
+                cursor += PITCH;
+            }
+            let mut rows = 0;
+            for side in [&left, &right] {
+                let mine: Vec<usize> =
+                    side.iter().copied().filter(|&i| cell.ports[i].group == *g).collect();
+                for (k, &i) in mine.iter().enumerate() {
+                    depth[i] = cursor + (k as i64 + 1) * PITCH;
+                }
+                rows = rows.max(mine.len() as i64);
+            }
+            cursor += (rows + 1) * PITCH;
+        }
+        cursor
+    } else {
+        let rows = left.len().max(right.len()).max(1) as i64;
+        for side in [&left, &right] {
+            let offset = (rows - side.len() as i64) / 2;
+            for (k, &i) in side.iter().enumerate() {
+                depth[i] = (offset + k as i64 + 1) * PITCH;
+            }
+        }
+        (rows + 1) * PITCH
+    };
+    let (x0, y0) = (-(width / PITCH / 2) * PITCH, -(height / PITCH / 2) * PITCH);
+    let (x1, y1) = (x0 + width, y0 + height);
 
     let mut at = vec![Point::ORIGIN; cell.ports.len()];
-    let column = |ports: &[usize], x: i64, at: &mut Vec<Point>| {
-        let offset = (rows - ports.len() as i64) / 2;
-        for (k, &i) in ports.iter().enumerate() {
-            at[i] = Point::mils(x, y0 + (offset + k as i64 + 1) * PITCH);
-        }
-    };
-    column(&left, x0 - PITCH, &mut at);
-    column(&right, x1 + PITCH, &mut at);
+    for &i in &left {
+        at[i] = Point::mils(x0 - PITCH, y0 + depth[i]);
+    }
+    for &i in &right {
+        at[i] = Point::mils(x1 + PITCH, y0 + depth[i]);
+    }
     let row = |ports: &[usize], step: i64, y: i64, at: &mut Vec<Point>| {
         let start = x0 + (width - span(ports, step)) / 2 / PITCH * PITCH;
         for (k, &i) in ports.iter().enumerate() {
@@ -180,11 +226,25 @@ pub fn generate(name: &str, cell: &Cell) -> Symbol {
     let place = |pins: &[usize], chars: i64, y: i64| {
         if fits_left(pins, chars) { Point::mils(x0, y) } else { Point::mils(x1 + NAME_GAP, y) }
     };
-    let graphics = vec![
+    let mut graphics = vec![
         Graphic::Rect { a: Point::mils(x0, y0), b: Point::mils(x1, y1), fill: false },
         text(place(&top, 5, y0 - TEXT_SIZE), "${name}"),
         text(place(&bottom, name.chars().count() as i64, y1 + TEXT_SIZE), name),
     ];
+    for y in rules {
+        graphics.push(Graphic::Polyline {
+            points: vec![Point::mils(x0, y0 + y), Point::mils(x1, y0 + y)],
+            fill: false,
+        });
+    }
+    for (y, title) in titles {
+        graphics.push(Graphic::Text {
+            at: Point::mils((x0 + x1) / 2, y0 + y),
+            text: title.to_owned(),
+            size: Length::from_mils(TEXT_SIZE),
+            anchor: Anchor::Center,
+        });
+    }
     Symbol { generated: true, graphics, pins, states: Vec::new() }
 }
 
@@ -336,6 +396,67 @@ mod tests {
         use PortKind::*;
         let s = generate("and3", &cell(&[("a", Input), ("b", Input), ("c", Input), ("y", Output)]));
         assert_eq!(s.pin("b").unwrap().at.y, s.pin("y").unwrap().at.y);
+    }
+
+    #[test]
+    fn grouped_ports_get_titled_sections() {
+        use PortKind::*;
+        let mut c = cell(&[
+            ("pa0", Bidirectional),
+            ("pa1", Bidirectional),
+            ("pb0", Bidirectional),
+            ("rst", Input),
+            ("vdd", PowerIn),
+        ]);
+        for (port, group) in c.ports.iter_mut().zip(["Bank A", "Bank A", "Bank B", "Bank A", ""]) {
+            port.group = group.into();
+        }
+        let s = generate("mcu", &c);
+        let Some(Graphic::Rect { a, b, .. }) = s.graphics.first() else { panic!("no body") };
+        let titles: Vec<(&str, Point)> = s
+            .graphics
+            .iter()
+            .filter_map(|g| match g {
+                Graphic::Text { text, at, anchor: Anchor::Center, .. } => {
+                    Some((text.as_str(), *at))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(titles.iter().map(|t| t.0).collect::<Vec<_>>(), ["Bank A", "Bank B"]);
+        let rules: Vec<Length> = s
+            .graphics
+            .iter()
+            .filter_map(|g| match g {
+                Graphic::Polyline { points, .. } => Some(points[0].y),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rules.len(), 1);
+        let y = |p: &str| s.pin(p).unwrap().at.y;
+        // Bank A's pins sit between its title and the rule, Bank B's below the rule.
+        for p in ["pa0", "pa1", "rst"] {
+            assert!(y(p) > titles[0].1.y && y(p) < rules[0], "{p}");
+        }
+        assert!(y("pb0") > titles[1].1.y && titles[1].1.y > rules[0]);
+        assert_eq!(y("pa0"), y("rst"), "left and right start level");
+        assert!(a.y < titles[0].1.y && y("pb0") < b.y);
+        for pin in &s.pins {
+            assert!(on_grid(pin.at), "{} at {}", pin.port, pin.at);
+        }
+        // The supply stays on top, outside the sections.
+        assert!(y("vdd") < a.y);
+    }
+
+    #[test]
+    fn ungrouped_symbols_are_unchanged() {
+        use PortKind::*;
+        let c = cell(&[("a", Input), ("b", Input), ("y", Output)]);
+        let s = generate("and2", &c);
+        assert_eq!(s.graphics.len(), 3);
+        assert_eq!(s.pin("a").unwrap().at, Point::mils(-300, 0));
+        assert_eq!(s.pin("b").unwrap().at, Point::mils(-300, 100));
+        assert_eq!(s.pin("y").unwrap().at, Point::mils(300, 0));
     }
 
     fn def(ports: &[(&str, PortKind)], symbol: Option<Symbol>) -> CellDef {

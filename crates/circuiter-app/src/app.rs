@@ -4,6 +4,7 @@ mod bench;
 mod body_editor;
 mod chrome;
 mod code;
+mod diagram;
 mod explorer;
 mod footprint;
 mod panels;
@@ -64,6 +65,9 @@ pub struct CircuiterApp {
     show_bottom: bool,
     /// The Netlist view instead of the sheet.
     show_netlist: bool,
+    /// The sheet laid out automatically instead of as drawn.
+    show_diagram: bool,
+    diagram: diagram::DiagramView,
     /// Showing the 3D view instead of the sheet.
     show_3d: bool,
     /// Showing the board editor instead of the sheet.
@@ -238,6 +242,10 @@ enum Prompt {
         error: Option<String>,
     },
     SymbolText {
+        text: String,
+    },
+    /// A note's text, before placing it on the sheet.
+    Note {
         text: String,
     },
     Transient {
@@ -526,6 +534,8 @@ impl CircuiterApp {
             bottom_tab: 0,
             show_bottom: true,
             show_netlist: false,
+            show_diagram: false,
+            diagram: diagram::DiagramView::default(),
             show_3d: false,
             show_pcb: false,
             simulating: false,
@@ -586,6 +596,9 @@ impl CircuiterApp {
             }
             if args.view.as_deref() == Some("pcb") {
                 app.show_pcb = true;
+            }
+            if args.view.as_deref() == Some("diagram") {
+                app.show_diagram = true;
             }
             if args.view.as_deref() == Some("board3d") {
                 app.show_3d = true;
@@ -1091,6 +1104,12 @@ impl CircuiterApp {
         if keys.no_connect {
             ws.tool = Tool::NoConnect;
         }
+        if keys.rect {
+            ws.tool = Tool::GroupBox { from: None };
+        }
+        if keys.text {
+            self.prompt = Some(Prompt::Note { text: String::new() });
+        }
         if keys.hand {
             ws.tool = if ws.tool == Tool::Pan { Tool::Select } else { Tool::Pan };
         }
@@ -1333,18 +1352,21 @@ impl CircuiterApp {
                     .clicked()
                 {
                     (self.show_pcb, self.show_3d, self.show_netlist) = (false, false, false);
+                    self.show_diagram = false;
                     self.show_bottom = true;
                     self.bottom_tab = 2;
                 }
                 ui.separator();
                 if ui.add_enabled(sheet, egui::Button::new("Board (PCB)")).clicked() {
                     (self.show_pcb, self.show_3d, self.show_netlist) = (true, false, false);
+                    self.show_diagram = false;
                 }
                 if ui
                     .add_enabled(sheet && editable, egui::Button::new("Update PCB from Schematic"))
                     .clicked()
                 {
                     (self.show_pcb, self.show_3d, self.show_netlist) = (true, false, false);
+                    self.show_diagram = false;
                     self.pcb_update_from_schematic();
                 }
                 ui.separator();
@@ -1453,6 +1475,7 @@ impl CircuiterApp {
                 (Some(Owner::Instance(i)), None) => instance_panel(ui, ws, i, field),
                 (Some(Owner::Pin(i)), None) => pin_panel(ui, ws, i, field),
                 (Some(Owner::Graphic(i)), None) => graphic_panel(ui, ws, i, field),
+                (Some(Owner::Note(i)), None) => note_panel(ui, ws, i, field),
                 (Some(Owner::Wire(_) | Owner::Label(_) | Owner::Port(_)), None) => {
                     if let Some(n) = ws.net {
                         net_panel(ui, ws, n);
@@ -1523,11 +1546,24 @@ impl CircuiterApp {
         self.show_3d
     }
 
+    /// Whether the Diagram view is showing.
+    #[cfg(test)]
+    pub fn showing_diagram(&self) -> bool {
+        self.show_diagram
+    }
+
+    /// Where part `name` is on screen in the Diagram view.
+    #[cfg(test)]
+    pub fn diagram_part(&self, name: &str) -> Option<egui::Pos2> {
+        self.diagram.part_on_screen(name)
+    }
+
     /// Shows the cell being edited in the 3D view with its Body panel, to model it.
     fn open_body_3d(&mut self) {
         self.show_3d = true;
         self.show_pcb = false;
         self.show_netlist = false;
+        self.show_diagram = false;
         self.viewer3d.body_mode = true;
     }
 
@@ -2144,6 +2180,24 @@ impl CircuiterApp {
                     if enter && !text.trim().is_empty() {
                         if let Some(ws) = ws {
                             ws.tool = Tool::Text { text: text.trim().to_owned() };
+                        }
+                        close = true;
+                    }
+                }
+                Prompt::Note { text } => {
+                    ui.heading("Note");
+                    ui.label("Text on the sheet. Ctrl+Enter places it; Enter starts a new line.");
+                    let r = ui.add(
+                        egui::TextEdit::multiline(text)
+                            .hint_text("What this part of the circuit does")
+                            .desired_rows(3)
+                            .desired_width(f32::INFINITY),
+                    );
+                    r.request_focus();
+                    let place = ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter));
+                    if (place || ui.button("Place Note").clicked()) && !text.trim().is_empty() {
+                        if let Some(ws) = ws {
+                            ws.tool = Tool::Note { text: text.trim().to_owned() };
                         }
                         close = true;
                     }
@@ -3295,6 +3349,10 @@ fn cell_panel(
         });
     }
 
+    if ws.mode == Mode::Schematic && def.schematic.is_some() {
+        frame_section(ui, ws, field);
+    }
+
     // Symbol.
     if def.cell.global_net.is_none() {
         section(ui, "Symbol");
@@ -3338,6 +3396,35 @@ fn cell_panel(
                 }
             }
         });
+        // Sections of a generated symbol, as a big part's banks are drawn.
+        if editable && builder::is_generated(&def) && def.cell.ports.len() > 1 {
+            egui::CollapsingHeader::new("Sections").id_salt(key("sections")).show(ui, |ui| {
+                ui.label(
+                    RichText::new(
+                        "Ports with the same section are drawn together, under its title \
+                         and ruled off from the rest, as a big part's banks are.",
+                    )
+                    .weak(),
+                );
+                let mut set: Option<(String, String)> = None;
+                egui::Grid::new("sections").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
+                    for p in def.cell.ports.iter().filter(|p| p.global.is_none()) {
+                        ui.label(RichText::new(&p.name).monospace());
+                        let k = key(&format!("port/{}/group", p.name));
+                        if let Some(group) = field.edit_hinted(ui, &k, &p.group, 120.0, "none") {
+                            set = Some((p.name.clone(), group));
+                        }
+                        ui.end_row();
+                    }
+                });
+                if let Some((name, group)) = set {
+                    let _ = ws.edit(|_, _, d| {
+                        interface::set_port_group(d, &name, &group);
+                        Ok(())
+                    });
+                }
+            });
+        }
     }
 
     // Its physical body.
@@ -3506,6 +3593,172 @@ fn pin_panel(ui: &mut egui::Ui, ws: &mut Workspace, index: usize, field: &mut Fi
 }
 
 /// A symbol drawing primitive: fill, size and text.
+/// A note on the sheet: a group box's title, or a note's text.
+fn note_panel(ui: &mut egui::Ui, ws: &mut Workspace, index: usize, field: &mut Field) {
+    use circuiter_model::schematic::Note;
+    let Some(note) = ws.schematic().and_then(|s| s.notes.get(index)).cloned() else { return };
+    let editable = ws.editable();
+    let key = format!("{}/note/{index}", ws.current().cell);
+    ui.label(RichText::new("Note").weak());
+    let set = |ws: &mut Workspace, note: Note| {
+        let _ = ws.edit(|_, _, d| {
+            if let Some(n) = d.schematic.as_mut().and_then(|s| s.notes.get_mut(index)) {
+                *n = note;
+            }
+            Ok(())
+        });
+    };
+    match note {
+        Note::Box { a, b, title } => {
+            ui.label(RichText::new("Group box").size(22.0).strong());
+            section(ui, "Properties");
+            egui::Grid::new("note").num_columns(2).spacing([10.0, 4.0]).show(ui, |ui| {
+                ui.label("Title");
+                if !editable {
+                    ui.label(&title);
+                } else if let Some(t) =
+                    field.edit_hinted(ui, &format!("{key}/title"), &title, 180.0, "Power supply")
+                {
+                    set(ws, Note::Box { a, b, title: t.trim().to_owned() });
+                }
+                ui.end_row();
+                ui.label("Size");
+                ui.label(format!(
+                    "{:.2} × {:.2} mm",
+                    (b.x - a.x).mm().abs(),
+                    (b.y - a.y).mm().abs()
+                ));
+                ui.end_row();
+            });
+        }
+        Note::Text { at, text } => {
+            ui.label(RichText::new("Text").size(22.0).strong());
+            section(ui, "Text");
+            let id = egui::Id::new(&key);
+            let mut buffer =
+                ui.data_mut(|d| d.get_temp::<String>(id)).unwrap_or_else(|| text.clone());
+            let r = ui.add_enabled(
+                editable,
+                egui::TextEdit::multiline(&mut buffer).desired_rows(4).desired_width(f32::INFINITY),
+            );
+            if r.changed() {
+                ui.data_mut(|d| d.insert_temp(id, buffer.clone()));
+            }
+            if r.lost_focus() {
+                ui.data_mut(|d| d.remove::<String>(id));
+                if buffer.trim() != text && !buffer.trim().is_empty() {
+                    set(ws, Note::Text { at, text: buffer.trim().to_owned() });
+                }
+            }
+        }
+    }
+    if editable {
+        ui.add_space(8.0);
+        if ui.button(format!("{}  Delete", style::icon::TRASH)).clicked() {
+            ws.delete_selection();
+        }
+    }
+}
+
+/// The sheet's frame and title block: whether it has one, the paper and the fields.
+fn frame_section(ui: &mut egui::Ui, ws: &mut Workspace, field: &mut Field) {
+    use circuiter_model::schematic::{Frame, Paper};
+    let Some(frame) = ws.schematic().map(|s| s.frame.clone()) else { return };
+    let editable = ws.editable();
+    if frame.is_none() && !editable {
+        return;
+    }
+    section(ui, "Sheet");
+    let set = |ws: &mut Workspace, frame: Option<Frame>| {
+        let _ = ws.edit(|_, _, d| {
+            if let Some(s) = d.schematic.as_mut() {
+                s.frame = frame.clone();
+            }
+            Ok(())
+        });
+    };
+    // Fitting the frame around what is drawn, ignoring the frame itself.
+    let fit = |ws: &Workspace, mut frame: Frame| {
+        let mut r = circuiter_scene::Rect::EMPTY;
+        for e in ws.scene.elements.iter().filter(|e| e.role != circuiter_scene::Role::Frame) {
+            r.union(&e.shape.bounds());
+        }
+        if !r.is_empty() {
+            let mm = circuiter_model::geom::Point::mm;
+            crate::edit::fit_frame(&mut frame, mm(r.min.x, r.min.y), mm(r.max.x, r.max.y));
+        }
+        frame
+    };
+    let mut on = frame.is_some();
+    if ui
+        .add_enabled(editable, egui::Checkbox::new(&mut on, "Frame and title block"))
+        .on_hover_text("The border, grid references and title block it is printed in")
+        .changed()
+    {
+        let new = on.then(|| fit(ws, Frame::new(Paper::A4)));
+        set(ws, new);
+        return;
+    }
+    let Some(frame) = frame else { return };
+    let key = format!("{}/frame", ws.current().cell);
+    let mut changed: Option<Frame> = None;
+    egui::Grid::new("frame").num_columns(2).spacing([10.0, 4.0]).show(ui, |ui| {
+        ui.label("Paper");
+        ui.horizontal(|ui| {
+            let mut paper = frame.paper;
+            ui.add_enabled_ui(editable, |ui| {
+                egui::ComboBox::from_id_salt("paper")
+                    .selected_text(paper.name())
+                    .width(80.0)
+                    .show_ui(ui, |ui| {
+                        for p in Paper::ALL {
+                            ui.selectable_value(&mut paper, p, p.name());
+                        }
+                    });
+            });
+            let mut portrait = frame.portrait;
+            ui.add_enabled(editable, egui::Checkbox::new(&mut portrait, "Portrait"));
+            if paper != frame.paper || portrait != frame.portrait {
+                changed = Some(Frame { paper, portrait, ..frame.clone() });
+            }
+        });
+        ui.end_row();
+        type FrameText = fn(&mut Frame) -> &mut String;
+        let rows: [(&str, &str, FrameText); 5] = [
+            ("Title", "the cell's name", |f| &mut f.title),
+            ("Revision", "A", |f| &mut f.revision),
+            ("Date", "2026-10-21", |f| &mut f.date),
+            ("Company", "", |f| &mut f.company),
+            ("Comment", "", |f| &mut f.comment),
+        ];
+        for (label, hint, get) in rows {
+            ui.label(label);
+            let mut copy = frame.clone();
+            let current = get(&mut copy).clone();
+            if !editable {
+                ui.label(&current);
+            } else if let Some(text) =
+                field.edit_hinted(ui, &format!("{key}/{label}"), &current, 170.0, hint)
+            {
+                *get(&mut copy) = text.trim().to_owned();
+                changed = Some(copy);
+            }
+            ui.end_row();
+        }
+    });
+    if editable
+        && ui
+            .button("Fit Around Drawing")
+            .on_hover_text("The smallest paper the sheet fits on, centred on what is drawn")
+            .clicked()
+    {
+        changed = Some(fit(ws, frame.clone()));
+    }
+    if let Some(f) = changed {
+        set(ws, Some(f));
+    }
+}
+
 fn graphic_panel(ui: &mut egui::Ui, ws: &mut Workspace, index: usize, field: &mut Field) {
     let Some(graphic) = ws.symbol().and_then(|s| s.graphics.get(index)).cloned() else { return };
     let editable = ws.editable();
@@ -3770,6 +4023,8 @@ impl eframe::App for CircuiterApp {
             let show_grid = self.show_grid;
             let netlist = self.show_netlist
                 && self.workspace.as_ref().is_some_and(|ws| ws.has_schematic());
+            let diagram = self.show_diagram
+                && self.workspace.as_ref().is_some_and(|ws| ws.has_schematic());
             if self.show_3d && self.workspace.is_some() {
                 self.cursor = None;
                 self.hovered = None;
@@ -3792,6 +4047,11 @@ impl eframe::App for CircuiterApp {
                         self.welcome(ui);
                     });
                 }
+                Some(_) if diagram => {
+                    self.show_netlist = false;
+                    self.diagram_view(ui);
+                    self.error_toast(&ui.ctx().clone(), ui.max_rect());
+                }
                 Some(_) if netlist => {
                     self.cursor = None;
                     self.hovered = None;
@@ -3799,6 +4059,7 @@ impl eframe::App for CircuiterApp {
                 }
                 Some(ws) => {
                     self.show_netlist = false;
+                    self.show_diagram = false;
                     if ws.editable() && ws.mode == Mode::Schematic {
                         egui::Panel::left("parts-column")
                             .resizable(false)
@@ -3897,6 +4158,7 @@ impl CircuiterApp {
             Space::Simulation => (false, false, true),
         };
         self.show_netlist = false;
+        self.show_diagram = false;
         self.active_code = None;
         if matches!(space, Space::Schematic | Space::Simulation) {
             if let Some(ws) = self.workspace.as_mut().filter(|ws| ws.has_schematic()) {
@@ -3917,6 +4179,7 @@ impl CircuiterApp {
         if running && !self.was_running && self.current_space() == Space::Schematic {
             self.simulating = true;
             self.show_netlist = false;
+            self.show_diagram = false;
         }
         self.was_running = running;
         let now = self.current_space();

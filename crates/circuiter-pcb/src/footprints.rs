@@ -15,6 +15,7 @@ pub const PACKAGES: &[&str] = &[
     "sod123",
     "sot23",
     "soic",
+    "qfp",
     "axial",
     "radial",
     "disc",
@@ -53,6 +54,7 @@ pub fn package_params(package: &str) -> &'static [(&'static str, &'static str)] 
         "radial" => &[("pitch", "2.5"), ("diameter", "6.3")],
         "disc" => &[("pitch", "5.08"), ("diameter", "5"), ("thickness", "2.5")],
         "soic" | "dip" => &[("pins", "8")],
+        "qfp" => &[("pins", "48"), ("pitch", "0.5"), ("body", "7")],
         "header" | "terminal" => &[("pins", "2")],
         _ => &[],
     }
@@ -335,6 +337,57 @@ pub fn generate(package: &str, p: Params<'_>) -> Result<(Vec<Pad>, Vec<Graphic>)
             g.push(rect(Layer::FCrtYd, -3.7, -half - 0.35, 3.7, half + 0.35, CRT));
             g.push(reference(-half - 1.2));
         }
+        // A quad flat pack (LQFP, TQFP): `pins` gull-wing leads, a quarter on each
+        // side of a square body `body` wide, `pitch` apart, reaching 1 mm beyond it.
+        // Pin 1 is at the top of the left side and they count anticlockwise, as on
+        // the package's top.
+        "qfp" => {
+            let n = num(p, "pins", 48.0).round() as usize;
+            if !(8..=256).contains(&n) || n % 4 != 0 {
+                return Err(format!("a QFP needs a multiple of 4 pins, 8 to 256, not {n}"));
+            }
+            let pitch = num(p, "pitch", 0.5);
+            if !(0.3..=10.0).contains(&pitch) {
+                return Err(format!("a QFP's pitch must be 0.3 to 10 mm, not {pitch}"));
+            }
+            let per = n / 4;
+            let row = (per - 1) as f64 * pitch;
+            // The body is at least as long as its rows of leads.
+            let body = num(p, "body", 7.0).max(row + 2.0 * pitch);
+            // IPC nominal lands: 1.475 mm long, 0.6 of the pitch wide, centred on the
+            // feet of leads reaching 1 mm out from the body.
+            let (len, w) = (1.475, (pitch * 0.6).min(0.6));
+            let x = body / 2.0 + 1.0 - 0.3375;
+            for k in 0..per {
+                let along = -row / 2.0 + pitch * k as f64;
+                pads.push(smd(k + 1, -x, along, len, w));
+                pads.push(smd(per + k + 1, along, x, w, len));
+                pads.push(smd(2 * per + k + 1, x, -along, len, w));
+                pads.push(smd(3 * per + k + 1, -along, -x, w, len));
+            }
+            pads.sort_by_key(|pad| pad.number.parse::<usize>().unwrap_or(0));
+            let h = body / 2.0;
+            // The body on fab, its pin 1 corner cut.
+            let c = 1.0f64.min(h / 2.0);
+            g.push(Graphic::Poly {
+                layer: Layer::FFab,
+                points: vec![pt(-h + c, -h), pt(h, -h), pt(h, h), pt(-h, h), pt(-h, -h + c)],
+                width: mm(FAB),
+                filled: false,
+            });
+            // Silk at the corners, clear of the pads, and a tick out along pin 1.
+            let (s, end) = (h + 0.11, row / 2.0 + w / 2.0 + 0.32);
+            if end < s {
+                for (sx, sy) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+                    g.push(line(Layer::FSilk, (sx * s, sy * s), (sx * end, sy * s), SILK));
+                    g.push(line(Layer::FSilk, (sx * s, sy * s), (sx * s, sy * end), SILK));
+                }
+            }
+            g.push(line(Layer::FSilk, (-s, -end), (-x - len / 2.0, -end), SILK));
+            let o = x + len / 2.0 + 0.25;
+            g.push(rect(Layer::FCrtYd, -o, -o, o, o, CRT));
+            g.push(reference(-o - 0.8));
+        }
         "sot223" => {
             for k in 0..3 {
                 pads.push(smd(k + 1, -2.3 + 2.3 * k as f64, 3.15, 0.95, 2.0));
@@ -506,6 +559,11 @@ pub fn kicad_name(package: &str, p: Params<'_>, pads: usize) -> String {
             16 => "Package_SO:SOIC-16_3.9x9.9mm_P1.27mm".into(),
             n => format!("Package_SO:SOIC-{n}_3.9mm_P1.27mm"),
         },
+        "qfp" => {
+            let (pitch, body) = (n("pitch", 0.5), n("body", 7.0));
+            let kind = if pitch >= 0.8 { "TQFP" } else { "LQFP" };
+            format!("Package_QFP:{kind}-{pads}_{body}x{body}mm_P{pitch}mm")
+        }
         "0603" | "0805" | "1206" => {
             let metric = match package {
                 "0603" => "1608",
@@ -794,6 +852,44 @@ mod tests {
         assert_eq!(at("5"), Point::mm(3.81, 3.81));
         assert_eq!(at("8"), Point::mm(3.81, -3.81));
         assert_eq!(pads[0].shape, PadShape::Rect, "pin 1 is square");
+    }
+
+    #[test]
+    fn a_qfp_counts_anticlockwise_from_the_top_of_its_left_side() {
+        // KiCad's LQFP-48_7x7mm_P0.5mm: lands 1.475 × 0.3 centred 4.1625 out.
+        let (pads, g) = make("qfp", &[]);
+        assert_eq!(pads.len(), 48);
+        let at = |n: &str| {
+            let p = pads.iter().find(|p| p.number == n).unwrap();
+            ((p.at.x.mm() * 1e4).round() / 1e4, (p.at.y.mm() * 1e4).round() / 1e4)
+        };
+        assert_eq!(at("1"), (-4.1625, -2.75));
+        assert_eq!(at("12"), (-4.1625, 2.75));
+        assert_eq!(at("13"), (-2.75, 4.1625), "then along the bottom");
+        assert_eq!(at("25"), (4.1625, 2.75), "up the right");
+        assert_eq!(at("48"), (-2.75, -4.1625), "and back along the top");
+        let p1 = &pads[0];
+        assert_eq!((p1.size.0.mm(), p1.size.1.mm()), (1.475, 0.3));
+        assert_eq!((pads[12].size.0.mm(), pads[12].size.1.mm()), (0.3, 1.475));
+        // Silk keeps off the lands.
+        for x in &g {
+            let Graphic::Line { layer: Layer::FSilk, a, b, .. } = x else { continue };
+            for p in &pads {
+                let (w, h) = (p.size.0.mm() / 2.0 + 0.1, p.size.1.mm() / 2.0 + 0.1);
+                let inside = |q: &Point| {
+                    (q.x.mm() - p.at.x.mm()).abs() < w && (q.y.mm() - p.at.y.mm()).abs() < h
+                };
+                let mid = Point::mm((a.x.mm() + b.x.mm()) / 2.0, (a.y.mm() + b.y.mm()) / 2.0);
+                assert!(!inside(a) && !inside(b) && !inside(&mid), "silk over pad {}", p.number);
+            }
+        }
+        let p = |k: &str| match k {
+            "pins" => Some("64".to_owned()),
+            "body" => Some("10".to_owned()),
+            _ => None,
+        };
+        assert_eq!(kicad_name("qfp", &p, 64), "Package_QFP:LQFP-64_10x10mm_P0.5mm");
+        assert!(generate("qfp", &|k| (k == "pins").then(|| "50".into())).is_err());
     }
 
     #[test]

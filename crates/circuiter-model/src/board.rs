@@ -172,6 +172,24 @@ pub struct FootprintView {
     pub package_pins: BTreeMap<String, BTreeMap<String, String>>,
 }
 
+impl FootprintView {
+    /// The pad numbers of `port`, one of the cell's `ports` in order, on an instance with
+    /// these parameter values: as listed for its package, else its place from 1. Several
+    /// pads are separated by commas (`"4,5"`).
+    pub fn pin_number(
+        &self,
+        ports: &[&str],
+        port: &str,
+        param: &dyn Fn(&str) -> Option<String>,
+    ) -> Option<String> {
+        let package = crate::digital::expand(&self.package, param).unwrap_or_default();
+        let map = self.package_pins.get(&package).unwrap_or(&self.pins);
+        map.get(port)
+            .cloned()
+            .or_else(|| Some((ports.iter().position(|p| *p == port)? + 1).to_string()))
+    }
+}
+
 /// A footprint placed on a board.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Placed {

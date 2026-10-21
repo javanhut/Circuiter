@@ -1215,3 +1215,154 @@ fn the_footprint_editor_saves_an_array_of_pads() {
     let ws = h.state().workspace().unwrap();
     assert_eq!(ws.current_def().unwrap().footprint.as_ref(), Some(&fp));
 }
+
+/// The Diagram view lays the sheet out afresh; double-clicking a part goes inside it.
+#[test]
+fn the_diagram_view_shows_a_sheet_laid_out_and_opens_its_parts() {
+    let tmp = example_copy("riscv");
+    let mut h = open(tmp.path().to_path_buf());
+    h.get_by_label("Diagram").click();
+    h.run_steps(4);
+    assert!(h.state().showing_diagram());
+    let at = h.state().diagram_part("BU").expect("the branch unit is drawn");
+    // Long enough after clicking Diagram that egui doesn't count a triple click.
+    h.run_steps(60);
+    h.hover_at(at);
+    h.step();
+    // Both clicks in one frame: the harness's frames are too far apart for egui to
+    // call two of them a double click.
+    for pressed in [true, false, true, false] {
+        h.input_mut().events.push(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        });
+    }
+    h.step();
+    h.run_steps(4);
+    let ws = h.state().workspace().unwrap();
+    assert_eq!(ws.current().cell.cell, "branch_unit", "went inside BU");
+    assert!(h.state().showing_diagram(), "still in the Diagram view");
+}
+
+/// A SystemVerilog file's modules as an RTL diagram, beside its text.
+#[test]
+fn a_verilog_file_shows_its_rtl_diagram() {
+    let tmp = example_copy("riscv");
+    let mut h = open(tmp.path().to_path_buf());
+    h.get_by_label("control.sv").click();
+    h.run_steps(3);
+    h.get_by_label("Diagram").click();
+    h.run_steps(3);
+    h.get_by_label("Module");
+    h.get_by_label_contains("double-click an instance");
+    // A broken file says why instead.
+    h.state_mut().code_tab_mut("programs/control.sv").unwrap().text.push_str("\nmodule broken(");
+    h.run_steps(3);
+    assert!(h.query_by_label("Module").is_none());
+}
+
+/// A group box and a note drawn from the keyboard, and a frame with its title block
+/// put round the sheet from the inspector.
+#[test]
+fn group_boxes_notes_and_a_title_block() {
+    use circuiter_model::schematic::Note;
+    let tmp = example_copy("analog_lab");
+    let mut h = open(tmp.path().to_path_buf());
+    let (a, pa) = on_sheet(&h, -100.0, -80.0);
+    let (b, pb) = on_sheet(&h, 100.0, 80.0);
+    h.key_press(egui::Key::B);
+    h.run_steps(2);
+    click_at(&mut h, a);
+    click_at(&mut h, b);
+    {
+        let ws = h.state().workspace().unwrap();
+        let notes = &ws.schematic().unwrap().notes;
+        assert_eq!(notes[..], [Note::Box { a: pa, b: pb, title: String::new() }]);
+        assert!(ws.scene.elements.iter().any(|e| e.role == circuiter_scene::Role::Note));
+    }
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+
+    // T opens the note's text; Place Note, then a click puts it down.
+    let (c, pc) = on_sheet(&h, 0.0, 120.0);
+    h.key_press(egui::Key::T);
+    h.run_steps(2);
+    h.event(egui::Event::Text("Gain of ten".into()));
+    h.run_steps(2);
+    h.get_by_label("Place Note").click();
+    h.run_steps(2);
+    click_at(&mut h, c);
+    {
+        let ws = h.state().workspace().unwrap();
+        let notes = &ws.schematic().unwrap().notes;
+        assert_eq!(notes[1], Note::Text { at: pc, text: "Gain of ten".into() });
+        assert!(
+            ws.selection.contains(&circuiter_scene::Owner::Note(1)),
+            "the new note is selected"
+        );
+    }
+    h.key_press(egui::Key::Delete);
+    h.run_steps(2);
+    assert_eq!(h.state().workspace().unwrap().schematic().unwrap().notes.len(), 1);
+
+    // With nothing selected, the inspector has the sheet's frame.
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    h.get_by_label("Frame and title block").click();
+    h.run_steps(3);
+    let ws = h.state().workspace().unwrap();
+    let frame = ws.schematic().unwrap().frame.clone().expect("a frame");
+    let (w, hgt) = frame.size();
+    let drawn = ws.scene.elements.iter().filter(|e| e.role != circuiter_scene::Role::Frame).fold(
+        circuiter_scene::Rect::EMPTY,
+        |mut r, e| {
+            r.union(&e.shape.bounds());
+            r
+        },
+    );
+    let (x0, y0) = (frame.origin.x.mm(), frame.origin.y.mm());
+    assert!(drawn.min.x > x0 && drawn.min.y > y0, "{drawn:?} inside {frame:?}");
+    assert!(drawn.max.x < x0 + w && drawn.max.y < y0 + hgt, "{drawn:?} inside {frame:?}");
+    let title = ws.scene.elements.iter().any(|e| {
+        e.role == circuiter_scene::Role::Frame
+            && matches!(&e.shape, circuiter_scene::Shape::Text { text, .. } if text == "amplifier")
+    });
+    assert!(title, "the title block names the sheet");
+    h.get_by_label("Fit Around Drawing");
+}
+
+/// The Diagram view's layout taken as the sheet's own, and undone.
+#[test]
+fn a_diagram_layout_can_become_the_sheet() {
+    let tmp = example_copy("analog_lab");
+    let mut h = open(tmp.path().to_path_buf());
+    let before = h.state().workspace().unwrap().schematic().unwrap().clone();
+    h.get_by_label("Diagram").click();
+    h.run_steps(4);
+    h.get_by_label("Use This Layout").click();
+    h.run_steps(3);
+    assert!(!h.state().showing_diagram(), "back on the sheet");
+    {
+        let ws = h.state().workspace().unwrap();
+        let after = ws.schematic().unwrap();
+        assert_ne!(after, &before);
+        for inst in &before.instances {
+            assert!(
+                after.instance(&inst.name).is_some() || inst.name.starts_with('#'),
+                "{} kept",
+                inst.name
+            );
+        }
+        let errors: Vec<_> = ws
+            .problems()
+            .into_iter()
+            .filter(|(s, _)| *s == circuiter_model::check::Severity::Error)
+            .collect();
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.run_steps(2);
+    assert_eq!(h.state().workspace().unwrap().schematic().unwrap(), &before);
+}

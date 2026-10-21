@@ -93,10 +93,7 @@ pub fn fill(layout: &Layout) -> Vec<ZoneFill> {
             if same && on_layer {
                 match zone.pads {
                     PadConnection::Solid => {}
-                    PadConnection::Thermal => {
-                        keep_out.push(vec![geometry::pad(pad, zone.thermal_gap.mm())]);
-                        thermal.push(pad);
-                    }
+                    PadConnection::Thermal => thermal.push(pad),
                     PadConnection::None => {
                         keep_out.push(vec![geometry::pad(pad, gap(Some(&zone.net)))])
                     }
@@ -127,6 +124,10 @@ pub fn fill(layout: &Layout) -> Vec<ZoneFill> {
         for f in done.iter().filter(|f| f.layer == zone.layer && f.net != zone.net) {
             keep_out.extend(geometry::offset(&f.shapes, gap(Some(&f.net))));
         }
+        // What spokes must keep clear of: everything but the reliefs round the pads
+        // they join (which a neighbour's keep-out may overlap, on fine-pitch parts).
+        let others = geometry::merge(keep_out.clone());
+        keep_out.extend(thermal.iter().map(|pad| vec![geometry::pad(pad, zone.thermal_gap.mm())]));
         let keep_out = geometry::merge(keep_out);
         let mut copper = geometry::difference(&area, &keep_out);
         if !thermal.is_empty() {
@@ -136,11 +137,6 @@ pub fn fill(layout: &Layout) -> Vec<ZoneFill> {
             for pad in &thermal {
                 all.extend(spokes(pad, zone.spoke_width.mm(), reach));
             }
-            let mut others = keep_out.clone();
-            // The spokes' own pads aren't obstacles for them.
-            let relief: Shapes =
-                thermal.iter().map(|pad| vec![geometry::pad(pad, zone.thermal_gap.mm())]).collect();
-            others = geometry::difference(&others, &relief);
             let bridges = geometry::difference(
                 &geometry::intersection(&geometry::merge(all), &area),
                 &others,
@@ -149,7 +145,10 @@ pub fn fill(layout: &Layout) -> Vec<ZoneFill> {
         }
         // Too thin to make: an opening by half the minimum width.
         let half = zone.min_width.mm() / 2.0;
-        copper = geometry::offset(&geometry::offset(&copper, -half), half);
+        let opened = geometry::offset(&geometry::offset(&copper, -half), half);
+        // An opening only takes copper away; the offsets' rounding can bulge it out
+        // past where it was, into another net's clearance.
+        copper = geometry::intersection(&opened, &copper);
         // Keep only islands that join copper of the net.
         let net_copper: Shapes = layout
             .pads

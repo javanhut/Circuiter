@@ -1,0 +1,4 @@
+(
+    package: "qfp",
+    params: {"body": "7", "pins": "48", "pitch": "0.5"},
+)

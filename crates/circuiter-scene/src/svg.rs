@@ -1,6 +1,6 @@
 //! SVG export. Coordinates are millimetres, so the output prints at true scale.
 
-use crate::{HAlign, LINE_WIDTH, Role, Scene, Shape, Theme, VAlign};
+use crate::{DASH, GAP, HAlign, LINE_WIDTH, Scene, Shape, Theme, VAlign, dashed, line_width};
 use std::fmt::Write;
 
 /// Renders a scene as a standalone SVG document.
@@ -38,10 +38,15 @@ pub fn to_svg(scene: &Scene, theme: &Theme) -> String {
                     points.iter().map(|p| format!("{:.4},{:.4}", p.x, p.y)).collect();
                 let tag = if *closed { "polygon" } else { "polyline" };
                 let fill = if *filled { color.as_str() } else { "none" };
-                let width = if e.role == Role::Wire { LINE_WIDTH * 1.2 } else { LINE_WIDTH };
+                let width = line_width(e.role);
+                let dash = if dashed(e.role) {
+                    format!(r#" stroke-dasharray="{DASH} {GAP}""#)
+                } else {
+                    String::new()
+                };
                 let _ = writeln!(
                     out,
-                    r#"<{tag} points="{}" fill="{fill}" stroke="{color}" stroke-width="{width:.4}"/>"#,
+                    r#"<{tag} points="{}" fill="{fill}" stroke="{color}" stroke-width="{width:.4}"{dash}/>"#,
                     pts.join(" ")
                 );
             }

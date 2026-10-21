@@ -371,7 +371,7 @@ impl CircuiterApp {
                 egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
                     egui::Frame::new()
                         .inner_margin(egui::Margin::symmetric(12, 8))
-                        .show(ui, |ui| memory_view(ui, ws, &p));
+                        .show(ui, |ui| memory_view(ui, ws, p));
                 });
             }
             3 => {

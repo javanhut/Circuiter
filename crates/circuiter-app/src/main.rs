@@ -35,8 +35,8 @@ pub struct Args {
     /// Colour theme: `paper` or `bench`.
     #[arg(long)]
     pub theme: Option<String>,
-    /// View to show: `schematic`, `symbol`, `pcb`, `3d`, or `board3d` (the laid-out
-    /// board in 3D).
+    /// View to show: `schematic`, `symbol`, `diagram` (the sheet laid out
+    /// automatically), `pcb`, `3d`, or `board3d` (the laid-out board in 3D).
     #[arg(long)]
     pub view: Option<String>,
     /// Select an instance (or, in the symbol view, a pin; in the 3D view, a feature of

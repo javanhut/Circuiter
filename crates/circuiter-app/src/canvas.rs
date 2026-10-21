@@ -442,8 +442,7 @@ fn draw_scene(
         } else {
             (color(theme.color(e.role)), 1.0)
         };
-        let width = if e.role == Role::Wire { LINE_WIDTH * 1.2 } else { LINE_WIDTH };
-        let stroke = Stroke::new(px(width) * boost, c);
+        let stroke = Stroke::new(px(circuiter_scene::line_width(e.role)) * boost, c);
 
         if in_net {
             if let Shape::Polyline { points, .. } = &e.shape {
@@ -485,7 +484,16 @@ fn draw_element(
 ) {
     match &e.shape {
         Shape::Polyline { points, closed, filled } => {
-            let pts: Vec<Pos2> = points.iter().map(|&p| cam.to_screen(view, p)).collect();
+            let mut pts: Vec<Pos2> = points.iter().map(|&p| cam.to_screen(view, p)).collect();
+            if circuiter_scene::dashed(e.role) && !filled {
+                if *closed {
+                    pts.extend(pts.first().copied());
+                }
+                let (dash, gap) = (circuiter_scene::DASH as f32, circuiter_scene::GAP as f32);
+                let s = cam.scale.max(0.5);
+                painter.extend(egui::Shape::dashed_line(&pts, stroke, dash * s, gap * s));
+                return;
+            }
             let shape = match (closed, filled) {
                 (true, true) => egui::Shape::convex_polygon(pts, c, stroke),
                 (true, false) => egui::Shape::closed_line(pts, stroke),

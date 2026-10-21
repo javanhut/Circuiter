@@ -21,6 +21,7 @@ circuiter-riscv = { path = "crates/circuiter-riscv" }
 circuiter-hdl = { path = "crates/circuiter-hdl" }
 circuiter-3d = { path = "crates/circuiter-3d" }
 circuiter-pcb = { path = "crates/circuiter-pcb" }
+circuiter-diagram = { path = "crates/circuiter-diagram" }
 
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

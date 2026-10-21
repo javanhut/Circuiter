@@ -1306,3 +1306,159 @@ fn new_tracks_shove_others_aside() {
     // Straight across `mid`: nothing to shove it to.
     assert!(shove(&layout, "vin", &[[20.0, 12.0], [20.0, 18.0]], 0.25, Layer::FCu).is_none());
 }
+
+/// A quad flat pack's body stands on its lands: a foot on every pad and none off them,
+/// pin 1's corner where the footprint's pad 1 is.
+#[test]
+fn a_qfp_body_sits_on_its_lands() {
+    use circuiter_pcb::board3d::footprint_point;
+    for (pins, pitch, body) in [("48", "0.5", "7"), ("44", "0.8", "10"), ("64", "0.5", "10")] {
+        let p: std::collections::BTreeMap<&str, &str> =
+            [("pins", pins), ("pitch", pitch), ("body", body)].into();
+        let param = |k: &str| p.get(k).map(|v| v.to_string());
+        let (pads, _) = circuiter_pcb::footprints::generate("qfp", &param).unwrap();
+        let mesh = circuiter_3d::packages::generate("qfp", &param).unwrap();
+        let tin = circuiter_3d::color("tin");
+        let feet: Vec<[f64; 2]> = mesh
+            .vertices
+            .iter()
+            .filter(|v| v.pos[2] < 0.01 && v.color == tin)
+            .map(|v| footprint_point(v.pos))
+            .collect();
+        let on = |pad: &circuiter_model::board::Pad, q: [f64; 2]| {
+            (q[0] - pad.at.x.mm()).abs() <= pad.size.0.mm() / 2.0 + 0.05
+                && (q[1] - pad.at.y.mm()).abs() <= pad.size.1.mm() / 2.0 + 0.05
+        };
+        for q in &feet {
+            assert!(pads.iter().any(|pad| on(pad, *q)), "QFP-{pins}: a foot at {q:?} is off");
+        }
+        for pad in &pads {
+            assert!(feet.iter().any(|q| on(pad, *q)), "QFP-{pins}: nothing on pad {}", pad.number);
+        }
+        assert_eq!(pads.len(), pins.parse::<usize>().unwrap());
+    }
+}
+
+/// Pours round a fine-pitch part: a ground pin's thermal spokes stop short of the
+/// neighbours 0.2 mm away (they once ran through them), and in 3D no pour covers a
+/// drilled hole, not even its own net's.
+#[test]
+fn pours_keep_clear_of_fine_pitch_neighbours_and_holes() {
+    use circuiter_model::board::FootprintView;
+    let mut d = Design::new();
+    d.add_library(circuiter_stdlib::library()).unwrap();
+    d.add_library(Library::new(LIB)).unwrap();
+    let ports: Vec<String> = (1..=8).map(|k| format!("p{k}")).collect();
+    let mut cell = Cell::default();
+    for p in &ports {
+        let port: circuiter_model::cell::Port = ron::from_str(&format!("(name: \"{p}\")")).unwrap();
+        cell.ports.push(port);
+    }
+    let params = [("pins", "8"), ("pitch", "0.5"), ("body", "3")];
+    d.library_mut(LIB).unwrap().insert(CellDef {
+        name: "chip".into(),
+        symbol: Some(circuiter_model::builder::generate("chip", &cell)),
+        cell,
+        footprint: Some(FootprintView {
+            package: "qfp".into(),
+            params: params.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            ..FootprintView::default()
+        }),
+        ..CellDef::default()
+    });
+    let mut sh = Sheet::new(&d, LIB);
+    let u = sh.part("chip", "U1", 0, 0, &[]);
+    let j = sh.part("std:header_2", "J1", 20, 0, &[]);
+    let nets: Vec<(String, String)> = ports
+        .iter()
+        .enumerate()
+        .map(|(k, p)| (p.clone(), if k == 0 { "GND".into() } else { format!("s{k}") }))
+        .collect();
+    let pairs: Vec<(&str, &str)> = nets.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+    sh.nets(u, &pairs);
+    sh.nets(j, &[("p1", "GND"), ("p2", "s1")]);
+    let s = sh.s;
+    d.library_mut(LIB).unwrap().insert(CellDef {
+        name: "fine".into(),
+        cell: Cell::default(),
+        schematic: Some(s),
+        ..CellDef::default()
+    });
+    let top = CellId::new(LIB, "fine");
+    let mut b = Board::new(20.0, 20.0);
+    place(&mut b, "U1", 10.0, 8.0, 0.0);
+    place(&mut b, "J1", 10.0, 15.0, 0.0);
+    let o = b.outline.clone();
+    b.zones.push(Zone::new(Layer::FCu, "GND", o.clone()));
+    let mut solid = Zone::new(Layer::BCu, "GND", o);
+    solid.pads = circuiter_model::board::PadConnection::Solid;
+    b.zones.push(solid);
+    let layout = Layout::new(&d, &top, &b).unwrap();
+    assert!(layout.errors.is_empty(), "{:?}", layout.errors);
+    let checked = drc::check(&layout);
+    let broken: Vec<_> = checked
+        .violations
+        .iter()
+        .filter(|v| matches!(v.rule, Rule::Short | Rule::Clearance))
+        .collect();
+    assert!(broken.is_empty(), "{broken:#?}");
+    // Pad 1 is joined to the pour by its spokes, so ground needs no routing.
+    assert!(
+        !checked.connectivity.ratsnest.iter().any(|(n, ..)| n == "GND"),
+        "{:?}",
+        checked.connectivity.ratsnest
+    );
+    for f in &checked.fills {
+        assert!(!f.shapes.is_empty(), "{:?} poured", f.layer);
+    }
+    // J1's ground pin is plated and on the pours' net; in 3D its hole is still open
+    // through both pours (a drill takes their copper out).
+    let hole = layout.pads.iter().find(|p| p.net.as_deref() == Some("GND") && p.drill().is_some());
+    let c = hole.unwrap().center;
+    let built = circuiter_pcb::board3d::build(&d, &layout, &checked.fills);
+    let down = built.board.ray_hit([c[0] as f32, -c[1] as f32, 5.0], [0.0, 0.0, -1.0]);
+    assert!(down.is_none(), "something covers the hole: {down:?}");
+}
+
+/// The development board example: four layers, every connection routed (the USB
+/// pair as a pair), ground pours and planes, and nothing the rules check or the 3D
+/// body check objects to.
+#[test]
+fn the_devboard_example_is_routed_and_clean() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/devboard");
+    let project = circuiter_model::Project::load(&dir).unwrap();
+    let design = Design::for_project(&project, circuiter_stdlib::library()).unwrap();
+    let top = CellId::new("devboard", "devboard");
+    // The schematic passes the electrical rules check without a word.
+    let erc = circuiter_netlist::erc::check(&design, &top);
+    assert!(erc.is_empty(), "{erc:#?}");
+    let b = design.cell(&top).and_then(|d| d.board.clone()).expect("a board");
+    assert_eq!(b.copper_layers, 4);
+    let layout = Layout::new(&design, &top, &b).unwrap();
+    assert!(layout.errors.is_empty(), "{:?}", layout.errors);
+    assert!(layout.unplaced.is_empty() && layout.orphans.is_empty());
+    assert!(layout.parts.len() >= 40, "{} parts", layout.parts.len());
+    let checked = drc::check(&layout);
+    assert!(checked.violations.is_empty(), "{:#?}", checked.violations);
+    assert_eq!(checked.connectivity.unrouted(), 0);
+    // Tracks on both outer layers, vias between them, ground and 3.3 V planes inside.
+    for l in [Layer::FCu, Layer::BCu] {
+        assert!(b.tracks.iter().filter(|t| t.layer == l).count() > 50, "{l:?}");
+    }
+    assert!(b.vias.len() > 50);
+    for (l, net) in [(Layer::In(1), "GND"), (Layer::In(2), "+3V3"), (Layer::FCu, "GND")] {
+        let fill = checked.fills.iter().find(|f| f.layer == l && f.net == net).expect("a pour");
+        assert!(circuiter_pcb::geometry::area(&fill.shapes) > 1000.0, "{l:?} {net}");
+    }
+    // USB D+ and D− side by side.
+    let pair = &b.pairs[0];
+    let skew = (circuiter_pcb::nets::routed_length(&b, &pair.positive)
+        - circuiter_pcb::nets::routed_length(&b, &pair.negative))
+    .abs();
+    assert!(skew < 0.5, "{skew}");
+    // Every part but the mounting holes has a body, and none collide.
+    let built = circuiter_pcb::board3d::build(&design, &layout, &checked.fills);
+    assert!(built.errors.is_empty(), "{:?}", built.errors);
+    assert!(built.without.iter().all(|p| p.starts_with('H')), "{:?}", built.without);
+    assert!(drc::bodies(&design, &layout).is_empty(), "{:?}", drc::bodies(&design, &layout));
+}

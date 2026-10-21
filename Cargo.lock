@@ -654,6 +654,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "circuiter-3d",
+ "circuiter-diagram",
  "circuiter-hdl",
  "circuiter-logic",
  "circuiter-model",
@@ -673,6 +674,16 @@ dependencies = [
  "ron",
  "serde",
  "tempfile",
+]
+
+[[package]]
+name = "circuiter-diagram"
+version = "0.1.0"
+dependencies = [
+ "circuiter-hdl",
+ "circuiter-model",
+ "circuiter-scene",
+ "circuiter-stdlib",
 ]
 
 [[package]]

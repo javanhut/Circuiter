@@ -12,12 +12,13 @@ pub use svg::to_svg;
 pub use theme::{Rgba, Theme};
 
 use circuiter_model::cell::{Cell, ParamKind, PortKind};
-use circuiter_model::connectivity::Connectivity;
+use circuiter_model::connectivity::{Connectivity, Item};
 use circuiter_model::geom::{Length, Point, Transform};
-use circuiter_model::schematic::{Instance, Schematic};
+use circuiter_model::schematic::{FRAME_MARGIN, Frame, Instance, Note, Schematic, TITLE_BLOCK};
 use circuiter_model::symbol::{Anchor, Graphic, PinDirection, Symbol};
 use circuiter_model::units::{format_quantity, parse_quantity};
 use circuiter_model::{CellDef, CellId, Design};
+use std::collections::BTreeMap;
 
 /// Standard line width: 6 mil, as on a printed schematic.
 pub const LINE_WIDTH: f64 = 0.1524;
@@ -26,6 +27,24 @@ pub const JUNCTION_RADIUS: f64 = 0.4572;
 /// Approximate advance width of a character, as a fraction of text size (monospace).
 pub const CHAR_WIDTH: f64 = 0.6;
 
+/// How wide renderers stroke lines of a role, in millimetres: wires a little heavier
+/// than drawings, buses three times as heavy.
+pub fn line_width(role: Role) -> f64 {
+    match role {
+        Role::Wire => LINE_WIDTH * 1.2,
+        Role::Bus => LINE_WIDTH * 3.0,
+        _ => LINE_WIDTH,
+    }
+}
+
+/// Whether lines of a role are drawn dashed (`DASH` on, `GAP` off, in millimetres).
+pub fn dashed(role: Role) -> bool {
+    role == Role::Note
+}
+
+pub const DASH: f64 = 1.27;
+pub const GAP: f64 = 0.762;
+
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Pt {
     pub x: f64,
@@ -33,6 +52,10 @@ pub struct Pt {
 }
 
 impl Pt {
+    pub fn dist(self, other: Pt) -> f64 {
+        (self.x - other.x).hypot(self.y - other.y)
+    }
+
     pub const fn new(x: f64, y: f64) -> Self {
         Pt { x, y }
     }
@@ -112,6 +135,8 @@ pub enum Role {
     /// Symbol pin lines.
     Pin,
     PinName,
+    /// The pad a pin lands on, printed over the pin line.
+    PinNumber,
     /// Reference designator (`R1`).
     Reference,
     /// Parameter values (`4.7kΩ`).
@@ -121,6 +146,12 @@ pub enum Role {
     Port,
     /// Unconnected pins and wire ends.
     Unconnected,
+    /// A wire carrying several bits, and the slash and count that give its width.
+    Bus,
+    /// Notes: dashed group boxes and free text.
+    Note,
+    /// The sheet's border, grid references and title block.
+    Frame,
     /// Editing aids that are not part of the design, such as the symbol origin.
     Guide,
 }
@@ -136,6 +167,8 @@ pub enum Owner {
     Graphic(usize),
     /// A pin of the symbol being edited.
     Pin(usize),
+    /// Index into [`Schematic::notes`].
+    Note(usize),
     /// Junction dots and markers: derived from connectivity, not selectable themselves.
     Derived,
 }
@@ -340,13 +373,34 @@ impl Scene {
             instance_bodies.push(body);
         }
 
+        let widths = net_widths(design, &id.library, cell, schematic, &connectivity);
+        // Each bus is marked with its width once, on its longest straight run.
+        let mut longest: BTreeMap<usize, (f64, usize, [Pt; 2])> = BTreeMap::new();
         for (i, wire) in schematic.wires.iter().enumerate() {
-            let points = wire.points.iter().map(|&p| p.into()).collect();
-            b.push(
-                Role::Wire,
-                Owner::Wire(i),
-                Shape::Polyline { points, closed: false, filled: false },
-            );
+            let points: Vec<Pt> = wire.points.iter().map(|&p| p.into()).collect();
+            let net = connectivity.net_of(Item::Wire(i));
+            let width = net.map_or(1, |n| widths[n]);
+            let role = if width > 1 { Role::Bus } else { Role::Wire };
+            if let Some(n) = net.filter(|_| width > 1) {
+                for seg in points.windows(2) {
+                    let len = seg[0].dist(seg[1]);
+                    if longest.get(&n).is_none_or(|l| len > l.0) {
+                        longest.insert(n, (len, i, [seg[0], seg[1]]));
+                    }
+                }
+            }
+            b.push(role, Owner::Wire(i), Shape::Polyline { points, closed: false, filled: false });
+        }
+        for (n, (len, wire, seg)) in longest {
+            if len >= 2.54 {
+                b.bus_width(wire, seg, widths[n]);
+            }
+        }
+        for (i, note) in schematic.notes.iter().enumerate() {
+            b.note(i, note);
+        }
+        if let Some(frame) = &schematic.frame {
+            b.frame(frame, id);
         }
         for (i, label) in schematic.labels.iter().enumerate() {
             let at = Pt::from(label.at);
@@ -363,15 +417,25 @@ impl Scene {
                 );
                 continue;
             }
+            // The text sits above its wire, running away from a wire that ends here.
+            let (text_at, halign, valign) = match wire_away(schematic, label.at) {
+                Some(d) if d.x < -0.5 => {
+                    (Pt::new(at.x - 0.254, at.y - 0.254), HAlign::Right, VAlign::Bottom)
+                }
+                Some(d) if d.y > 0.5 => {
+                    (Pt::new(at.x + 0.254, at.y + 0.254), HAlign::Left, VAlign::Top)
+                }
+                _ => (Pt::new(at.x + 0.254, at.y - 0.254), HAlign::Left, VAlign::Bottom),
+            };
             b.push(
                 Role::NetLabel,
                 Owner::Label(i),
                 Shape::Text {
-                    at: Pt::new(at.x + 0.254, at.y - 0.254),
+                    at: text_at,
                     text: label.net.clone(),
                     size: 1.27,
-                    halign: HAlign::Left,
-                    valign: VAlign::Bottom,
+                    halign,
+                    valign,
                     vertical: false,
                 },
             );
@@ -461,6 +525,7 @@ impl Scene {
                     | Owner::Port(_)
                     | Owner::Graphic(_)
                     | Owner::Pin(_)
+                    | Owner::Note(_)
             ) {
                 let b = e.shape.bounds();
                 if rect.contains(b.min) && rect.contains(b.max) && !out.contains(&e.owner) {
@@ -501,7 +566,7 @@ impl Scene {
                 }
                 // Pins win ties with the graphics they overlap.
                 (Owner::Pin(_), shape) => shape_distance(shape, p) - tolerance / 2.0,
-                (Owner::Graphic(_), shape) => shape_distance(shape, p),
+                (Owner::Graphic(_) | Owner::Note(_), shape) => shape_distance(shape, p),
                 _ => continue,
             };
             if d <= tolerance && best_wire.is_none_or(|(bd, _)| d < bd) {
@@ -533,6 +598,11 @@ pub fn instance_elements(design: &Design, library: &str, inst: &Instance) -> Vec
 
 /// The direction a port flag should extend: away from the wire attached at `at`.
 fn port_direction(schematic: &Schematic, at: Point) -> Pt {
+    wire_away(schematic, at).unwrap_or(Pt::new(-1.0, 0.0))
+}
+
+/// The direction away from a wire that ends at `at`, if one does.
+fn wire_away(schematic: &Schematic, at: Point) -> Option<Pt> {
     for wire in &schematic.wires {
         for seg in wire.points.windows(2) {
             let other = if seg[0] == at {
@@ -545,11 +615,11 @@ fn port_direction(schematic: &Schematic, at: Point) -> Pt {
             let (dx, dy) = ((at.x - other.x).mm(), (at.y - other.y).mm());
             let len = dx.hypot(dy);
             if len > 0.0 {
-                return Pt::new(dx / len, dy / len);
+                return Some(Pt::new(dx / len, dy / len));
             }
         }
     }
-    Pt::new(-1.0, 0.0)
+    None
 }
 
 /// Distance from `p` to the drawn outline of a shape, or zero inside a filled shape or
@@ -691,6 +761,9 @@ impl Builder {
         }
         let t = &inst.placement;
         let map = |p: Point| Pt::from(t.apply(p));
+        // Pins named on the drawing are numbered too, when the part has pads to number.
+        let ports: Vec<&str> = def.cell.ports.iter().map(|p| p.name.as_str()).collect();
+        let number = |port: &str| def.footprint.as_ref()?.pin_number(&ports, port, &param);
         for (i, pin) in symbol.pins.iter().enumerate() {
             let owner = index.map_or(Owner::Pin(i), Owner::Instance);
             let (dx, dy) = match pin.direction {
@@ -715,6 +788,30 @@ impl Builder {
                     Role::Pin,
                     owner,
                     Shape::Circle { center: map(pin.at), radius: 0.254, filled: false },
+                );
+            }
+            if let Some(n) = number(&pin.port).filter(|_| pin.show_name) {
+                let mid = map(Point::new(
+                    Length((pin.at.x.nm() + inner.x.nm()) / 2),
+                    Length((pin.at.y.nm() + inner.y.nm()) / 2),
+                ));
+                let vertical = transform_dir(t, dx, dy).0 == 0;
+                let off = 0.254;
+                self.push(
+                    Role::PinNumber,
+                    owner,
+                    Shape::Text {
+                        at: if vertical {
+                            Pt::new(mid.x - off, mid.y)
+                        } else {
+                            Pt::new(mid.x, mid.y - off)
+                        },
+                        text: n,
+                        size: 0.889,
+                        halign: HAlign::Center,
+                        valign: VAlign::Bottom,
+                        vertical,
+                    },
                 );
             }
             if pin.show_name {
@@ -838,6 +935,225 @@ impl Builder {
     }
 }
 
+impl Builder {
+    /// A slash across a straight run `seg` of a bus wire, with the number of bits.
+    fn bus_width(&mut self, wire: usize, seg: [Pt; 2], width: u32) {
+        let mid = Pt::new((seg[0].x + seg[1].x) / 2.0, (seg[0].y + seg[1].y) / 2.0);
+        let h = 0.635;
+        let horizontal = (seg[1].x - seg[0].x).abs() >= (seg[1].y - seg[0].y).abs();
+        self.push(
+            Role::Bus,
+            Owner::Wire(wire),
+            Shape::Polyline {
+                points: vec![Pt::new(mid.x - h, mid.y + h), Pt::new(mid.x + h, mid.y - h)],
+                closed: false,
+                filled: false,
+            },
+        );
+        let (at, halign, valign) = if horizontal {
+            (Pt::new(mid.x, mid.y - h - 0.254), HAlign::Center, VAlign::Bottom)
+        } else {
+            (Pt::new(mid.x + h + 0.254, mid.y), HAlign::Left, VAlign::Center)
+        };
+        self.push(
+            Role::Bus,
+            Owner::Wire(wire),
+            Shape::Text {
+                at,
+                text: width.to_string(),
+                size: 1.016,
+                halign,
+                valign,
+                vertical: false,
+            },
+        );
+    }
+
+    fn note(&mut self, index: usize, note: &Note) {
+        let owner = Owner::Note(index);
+        match note {
+            Note::Box { a, b, title } => {
+                let (a, b) = (Pt::from(*a), Pt::from(*b));
+                let (min, max) =
+                    (Pt::new(a.x.min(b.x), a.y.min(b.y)), Pt::new(a.x.max(b.x), a.y.max(b.y)));
+                let points = vec![min, Pt::new(max.x, min.y), max, Pt::new(min.x, max.y)];
+                self.push(
+                    Role::Note,
+                    owner,
+                    Shape::Polyline { points, closed: true, filled: false },
+                );
+                if !title.is_empty() {
+                    self.push(
+                        Role::Note,
+                        owner,
+                        Shape::Text {
+                            at: Pt::new(min.x + 1.27, min.y + 1.27),
+                            text: title.clone(),
+                            size: 1.524,
+                            halign: HAlign::Left,
+                            valign: VAlign::Top,
+                            vertical: false,
+                        },
+                    );
+                }
+            }
+            Note::Text { at, text } => {
+                let at = Pt::from(*at);
+                for (k, line) in text.lines().enumerate() {
+                    self.push(
+                        Role::Note,
+                        owner,
+                        Shape::Text {
+                            at: Pt::new(at.x, at.y + k as f64 * NOTE_TEXT * 1.5),
+                            text: line.to_owned(),
+                            size: NOTE_TEXT,
+                            halign: HAlign::Left,
+                            valign: VAlign::Top,
+                            vertical: false,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    fn frame_line(&mut self, points: Vec<Pt>, closed: bool) {
+        self.push(Role::Frame, Owner::Derived, Shape::Polyline { points, closed, filled: false });
+    }
+
+    fn frame_text(&mut self, at: Pt, text: &str, size: f64, halign: HAlign) {
+        self.push(
+            Role::Frame,
+            Owner::Derived,
+            Shape::Text {
+                at,
+                text: text.to_owned(),
+                size,
+                halign,
+                valign: VAlign::Center,
+                vertical: false,
+            },
+        );
+    }
+
+    /// The paper's border with grid references, and the title block, as KiCad prints them.
+    fn frame(&mut self, frame: &Frame, id: &CellId) {
+        let o = Pt::from(frame.origin);
+        let (w, h) = frame.size();
+        let rect = |x0: f64, y0: f64, x1: f64, y1: f64| {
+            vec![Pt::new(x0, y0), Pt::new(x1, y0), Pt::new(x1, y1), Pt::new(x0, y1)]
+        };
+        let m = FRAME_MARGIN;
+        let band = 2.0;
+        let (ox0, oy0, ox1, oy1) = (o.x + m, o.y + m, o.x + w - m, o.y + h - m);
+        let (ix0, iy0, ix1, iy1) = (ox0 + band, oy0 + band, ox1 - band, oy1 - band);
+        self.frame_line(rect(ox0, oy0, ox1, oy1), true);
+        self.frame_line(rect(ix0, iy0, ix1, iy1), true);
+        // Grid references: numbered columns, lettered rows, about 50 mm apart.
+        let cols = ((ix1 - ix0) / 50.0).round().max(1.0) as usize;
+        let rows = ((iy1 - iy0) / 50.0).round().max(1.0) as usize;
+        let (cw, rh) = ((ix1 - ix0) / cols as f64, (iy1 - iy0) / rows as f64);
+        for k in 0..cols {
+            let x = ix0 + k as f64 * cw;
+            if k > 0 {
+                self.frame_line(vec![Pt::new(x, oy0), Pt::new(x, iy0)], false);
+                self.frame_line(vec![Pt::new(x, iy1), Pt::new(x, oy1)], false);
+            }
+            let label = (k + 1).to_string();
+            let cx = x + cw / 2.0;
+            self.frame_text(Pt::new(cx, oy0 + band / 2.0), &label, 1.27, HAlign::Center);
+            self.frame_text(Pt::new(cx, iy1 + band / 2.0), &label, 1.27, HAlign::Center);
+        }
+        for k in 0..rows {
+            let y = iy0 + k as f64 * rh;
+            if k > 0 {
+                self.frame_line(vec![Pt::new(ox0, y), Pt::new(ix0, y)], false);
+                self.frame_line(vec![Pt::new(ix1, y), Pt::new(ox1, y)], false);
+            }
+            let label = ((b'A' + (k % 26) as u8) as char).to_string();
+            let cy = y + rh / 2.0;
+            self.frame_text(Pt::new(ox0 + band / 2.0, cy), &label, 1.27, HAlign::Center);
+            self.frame_text(Pt::new(ix1 + band / 2.0, cy), &label, 1.27, HAlign::Center);
+        }
+
+        // The title block, in four rows: company and comment, title, size, date and
+        // revision, and the sheet and the program.
+        let (bw, bh) = TITLE_BLOCK;
+        let (bx0, by0) = (ix1 - bw, iy1 - bh);
+        self.frame_line(rect(bx0, by0, ix1, iy1), true);
+        let row = bh / 4.0;
+        for k in 1..4 {
+            let y = by0 + k as f64 * row;
+            self.frame_line(vec![Pt::new(bx0, y), Pt::new(ix1, y)], false);
+        }
+        let pad = 1.5;
+        let mid = |k: usize| by0 + (k as f64 + 0.5) * row;
+        let small = 1.27;
+        if !frame.company.is_empty() {
+            self.frame_text(Pt::new(bx0 + pad, mid(0)), &frame.company, 1.524, HAlign::Left);
+        }
+        if !frame.comment.is_empty() {
+            self.frame_text(Pt::new(ix1 - pad, mid(0)), &frame.comment, small, HAlign::Right);
+        }
+        let title = if frame.title.is_empty() { &id.cell } else { &frame.title };
+        self.frame_text(Pt::new(bx0 + pad, mid(1)), "Title:", small, HAlign::Left);
+        self.frame_text(Pt::new(bx0 + pad + 10.0, mid(1)), title, 2.54, HAlign::Left);
+        // Size, date and revision share the third row.
+        let (c1, c2) = (bx0 + 28.0, ix1 - 26.0);
+        for x in [c1, c2] {
+            self.frame_line(
+                vec![Pt::new(x, mid(2) - row / 2.0), Pt::new(x, mid(2) + row / 2.0)],
+                false,
+            );
+        }
+        let paper = format!("Size: {}", frame.paper.name());
+        self.frame_text(Pt::new(bx0 + pad, mid(2)), &paper, small, HAlign::Left);
+        self.frame_text(
+            Pt::new(c1 + pad, mid(2)),
+            &format!("Date: {}", frame.date),
+            small,
+            HAlign::Left,
+        );
+        self.frame_text(
+            Pt::new(c2 + pad, mid(2)),
+            &format!("Rev: {}", frame.revision),
+            small,
+            HAlign::Left,
+        );
+        self.frame_text(Pt::new(bx0 + pad, mid(3)), &format!("Sheet: {id}"), small, HAlign::Left);
+        self.frame_text(Pt::new(ix1 - pad, mid(3)), "Circuiter", small, HAlign::Right);
+    }
+}
+
+/// Size of note text, in millimetres (60 mil).
+const NOTE_TEXT: f64 = 1.524;
+
+/// The number of bits each net carries: the widest pin or port on it, at the widths
+/// its instances' parameters give.
+fn net_widths(
+    design: &Design,
+    library: &str,
+    cell: &Cell,
+    schematic: &Schematic,
+    conn: &Connectivity,
+) -> Vec<u32> {
+    let mut widths = vec![1; conn.nets.len()];
+    for (k, pin) in conn.pins.iter().enumerate() {
+        let Some(net) = conn.net_of(Item::Pin(k)) else { continue };
+        let inst = &schematic.instances[pin.instance];
+        let Some((_, def)) = design.resolve(&inst.cell, library) else { continue };
+        let Some(port) = def.cell.port(&pin.port) else { continue };
+        widths[net] = widths[net].max(def.cell.port_width(port, &inst.params).unwrap_or(1));
+    }
+    for (k, p) in schematic.ports.iter().enumerate() {
+        let Some(net) = conn.net_of(Item::Port(k)) else { continue };
+        if let Some(port) = cell.port(&p.port) {
+            widths[net] = widths[net].max(port.width);
+        }
+    }
+    widths
+}
+
 fn transform_dir(t: &Transform, dx: i64, dy: i64) -> (i64, i64) {
     let rotated_only = Transform { position: Point::ORIGIN, ..*t };
     let p = rotated_only.apply(Point::new(Length(dx), Length(dy)));
@@ -939,6 +1255,69 @@ mod tests {
         assert!(svg.starts_with("<svg") || svg.starts_with("<?xml"), "{svg}");
         assert!(svg.contains(">M?<"), "reference text is drawn");
         assert!(svg.contains(&Theme::PAPER.body.css()), "drawn in theme colours");
+    }
+
+    fn texts(scene: &Scene, role: Role) -> Vec<&str> {
+        scene
+            .elements
+            .iter()
+            .filter(|e| e.role == role)
+            .filter_map(|e| match &e.shape {
+                Shape::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn named_pins_of_parts_with_pads_are_numbered() {
+        let d = design();
+        let timer = Scene::symbol_preview(&d, &CellId::new("std", "ne555")).unwrap();
+        let mut numbers = texts(&timer, Role::PinNumber);
+        numbers.sort();
+        assert_eq!(numbers, ["1", "2", "3", "4", "5", "6", "7", "8"]);
+        // A resistor's leads aren't named, so they aren't numbered either.
+        let r = Scene::symbol_preview(&d, &CellId::new("std", "resistor")).unwrap();
+        assert!(texts(&r, Role::PinNumber).is_empty());
+    }
+
+    #[test]
+    fn a_frame_borders_the_paper_with_its_title_block() {
+        use circuiter_model::schematic::{Frame, Paper};
+        let d = design();
+        let mut frame = Frame::new(Paper::A4);
+        frame.title = "Blinker".into();
+        frame.revision = "B".into();
+        frame.origin = Point::mm(-50.8, -25.4);
+        let schematic = Schematic {
+            instances: vec![instance("std:resistor", &[])],
+            notes: vec![
+                Note::Box {
+                    a: Point::mm(-10.16, -10.16),
+                    b: Point::mm(10.16, 10.16),
+                    title: "Load".into(),
+                },
+                Note::Text { at: Point::mm(0.0, 20.32), text: "one\ntwo".into() },
+            ],
+            frame: Some(frame),
+            ..Schematic::default()
+        };
+        let id = CellId::new("std", "top");
+        let scene = Scene::build_from(&d, &id, &Cell::default(), &schematic);
+        let framed = texts(&scene, Role::Frame);
+        for want in ["Blinker", "Rev: B", "Size: A4", "Sheet: std:top", "1", "5", "A", "D"] {
+            assert!(framed.contains(&want), "{want} in {framed:?}");
+        }
+        assert!(!framed.contains(&""), "no empty fields");
+        // The border sits 10 mm inside the paper.
+        assert!((scene.bounds.min.x - (-50.8 + 10.0)).abs() < 0.01, "{:?}", scene.bounds);
+        assert!((scene.bounds.max.y - (-25.4 + 210.0 - 10.0)).abs() < 0.01, "{:?}", scene.bounds);
+        assert_eq!(texts(&scene, Role::Note), ["Load", "one", "two"]);
+        // Notes are picked by their outline, and drawn dashed.
+        assert_eq!(scene.hit_test(Pt::new(-10.16, 5.0), 0.5), Some(Owner::Note(0)));
+        let svg = to_svg(&scene, &Theme::PAPER);
+        assert!(svg.contains("stroke-dasharray"));
+        assert!(svg.contains(&Theme::PAPER.frame.css()));
     }
 
     #[test]

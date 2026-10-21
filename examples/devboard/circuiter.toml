@@ -1,0 +1,4 @@
+[project]
+name = "devboard"
+top = "devboard"
+description = "A microcontroller development board laid out on four layers: USB, a regulator, a crystal, buttons, LEDs and GPIO headers, every connection routed, ready to see in 3D"
