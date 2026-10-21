@@ -464,15 +464,7 @@ fn a_program_runs_on_the_cpu_from_its_editor() {
     }
     h.run_steps(2);
     h.get_by_label_contains("Run on cpu").click();
-    for _ in 0..2000 {
-        h.step();
-        let busy = h.state().workspace().unwrap().sim.as_ref().is_some_and(|s| s.job.is_some());
-        if !busy {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(2));
-    }
-    h.run_steps(2);
+    finish_run(&mut h);
     let saved = std::fs::read_to_string(tmp.path().join("programs/fib.s")).unwrap();
     assert!(saved.contains("li   t3, 10"), "saved before running");
     let ws = h.state().workspace().unwrap();
@@ -483,6 +475,68 @@ fn a_program_runs_on_the_cpu_from_its_editor() {
     };
     assert!(run.halted);
     assert_eq!(run.memories["RF"][10].known(), Some(34));
+    // What it left shows under the program, with the registers.
+    h.get_by_label_contains("Program ended: a0 = 34");
+    h.get_by_label_contains("RF · registers");
+}
+
+/// Steps the app until the simulation it started has finished.
+fn finish_run(h: &mut Harness<'_, CircuiterApp>) {
+    for _ in 0..2000 {
+        h.step();
+        let busy = h.state().workspace().unwrap().sim.as_ref().is_some_and(|s| s.job.is_some());
+        if !busy {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    h.run_steps(2);
+}
+
+/// After a digital run, right-clicking a wire offers its net for the plot.
+#[test]
+fn right_clicking_a_wire_adds_its_net_to_the_plot() {
+    use circuiter_scene::Owner;
+    let tmp = example_copy("riscv");
+    let mut h = open(tmp.path().to_path_buf());
+    {
+        let ws = h.state_mut().workspace_mut().unwrap();
+        ws.simulate(ws.run_analysis());
+    }
+    finish_run(&mut h);
+    // A wire not plotted yet, picked where nothing else is in the way.
+    let (at, flat) = {
+        let ws = h.state().workspace().unwrap();
+        let sim = ws.fresh_sim().expect("ran");
+        let wires = &ws.schematic().unwrap().wires;
+        (0..wires.len())
+            .find_map(|i| {
+                let flat = ws.flat_net(ws.net_of(Owner::Wire(i))?)?;
+                let (a, b) = (Pt::from(wires[i].points[0]), Pt::from(wires[i].points[1]));
+                let mid = Pt::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
+                let clear = ws.scene.hit_test(mid, ws.pick_tolerance) == Some(Owner::Wire(i));
+                (clear && !sim.probes.contains(&flat) && sim.logic(flat).is_some())
+                    .then_some((mid, flat))
+            })
+            .expect("an unplotted wire")
+    };
+    let at = screen(&h, at);
+    h.hover_at(at);
+    h.step();
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.step();
+    }
+    h.run_steps(2);
+    h.get_by_label("Add to Plot").click();
+    h.run_steps(2);
+    let sim = h.state().workspace().unwrap().sim.as_ref().unwrap();
+    assert!(sim.probes.contains(&flat), "plotted");
 }
 
 /// Running live, a click on a switch flips it (and doesn't select it).

@@ -128,6 +128,8 @@ pub struct CanvasOutput {
     pub hovered: Option<Owner>,
     /// How close, in millimetres, counts as "on" an object at the current zoom.
     pub tolerance: f64,
+    /// The sheet's own response, for menus on it.
+    pub response: Option<egui::Response>,
 }
 
 pub fn color(c: Rgba) -> Color32 {
@@ -240,6 +242,7 @@ pub fn show(
     }
     draw_scene(&painter, view, cam, scene, theme, highlight, out.hovered);
     draw_overlay(&painter, view, cam, theme, overlay);
+    out.response = Some(response);
     out
 }
 

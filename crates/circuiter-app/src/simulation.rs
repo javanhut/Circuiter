@@ -233,15 +233,37 @@ impl Simulation {
         m.read(&volts, &amps)
     }
 
-    /// The digital history of flat net `net`, after a digital or mixed run.
-    #[cfg(test)]
-    pub fn logic(&self, net: usize) -> Option<&[(circuiter_logic::Time, circuiter_logic::Value)]> {
+    /// The digital side of a digital or mixed run.
+    pub fn logic_run(&self) -> Option<&LogicRun> {
         match &self.results {
-            Some(Results::Logic(run) | Results::Mixed { logic: run, .. }) => {
-                run.history.get(net).map(Vec::as_slice)
-            }
+            Some(Results::Logic(run) | Results::Mixed { logic: run, .. }) => Some(run),
             _ => None,
         }
+    }
+
+    /// The digital history of flat net `net`, after a digital or mixed run.
+    pub fn logic(&self, net: usize) -> Option<&[(circuiter_logic::Time, circuiter_logic::Value)]> {
+        self.logic_run()?.history.get(net).map(Vec::as_slice)
+    }
+
+    /// The simulator's part at instance path `path` (`regfile`, `rom`…).
+    pub fn model(&self, path: &str) -> Option<&str> {
+        self.netlist.digital.iter().find(|e| e.path == path).map(|e| e.model.as_str())
+    }
+
+    /// The design has memories or register files whose contents a run leaves behind.
+    pub fn has_memories(&self) -> bool {
+        self.netlist.digital.iter().any(|e| matches!(e.model.as_str(), "regfile" | "rom" | "dmem"))
+    }
+
+    /// What a program left in a0 (x10), the register main's return value goes to: from
+    /// the first 32-register file, after a digital or mixed run.
+    pub fn program_result(&self) -> Option<circuiter_logic::Value> {
+        let run = self.logic_run()?;
+        run.memories
+            .iter()
+            .find(|(path, regs)| regs.len() == 32 && self.model(path) == Some("regfile"))
+            .map(|(_, regs)| regs[10])
     }
 
     pub fn has_errors(&self) -> bool {

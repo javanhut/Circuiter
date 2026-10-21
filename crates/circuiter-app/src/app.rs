@@ -97,6 +97,8 @@ pub struct CircuiterApp {
     spaces: [Panels; 4],
     /// A simulation or live run was going last frame.
     was_running: bool,
+    /// The net whose menu is open, from a right-click on one of its wires.
+    net_menu: Option<usize>,
 }
 
 /// The workspaces: places of their own for each part of the job, swapped between at
@@ -531,6 +533,7 @@ impl CircuiterApp {
             space: Space::Schematic,
             spaces: Space::ALL.map(Panels::first),
             was_running: false,
+            net_menu: None,
             pcb: pcb::PcbView::default(),
             viewer3d: viewer3d::Viewer3d::default(),
             netlist: None,
@@ -2998,6 +3001,31 @@ fn instance_panel(ui: &mut egui::Ui, ws: &mut Workspace, index: usize, field: &m
     }
 }
 
+/// The right-click menu of a net on the sheet.
+fn net_menu(ui: &mut egui::Ui, ws: &mut Workspace, net: usize) {
+    let Some(name) = ws.scene.connectivity.nets.get(net).map(|n| n.name.clone()) else { return };
+    ui.label(RichText::new(&name).monospace().weak());
+    ui.separator();
+    match ws.plotted(net) {
+        Some(plotted) => {
+            if ui.button(if plotted { "Remove from Plot" } else { "Add to Plot" }).clicked() {
+                ws.toggle_plot(net);
+            }
+        }
+        None => {
+            let why = if ws.sim.is_some() {
+                "The results are out of date or didn't trace this net: run again (Ctrl+R)"
+            } else {
+                "Run the simulation first (Ctrl+R)"
+            };
+            ui.add_enabled(false, egui::Button::new("Add to Plot")).on_disabled_hover_text(why);
+        }
+    }
+    if ui.button("Copy Net Name").clicked() {
+        ui.ctx().copy_text(name);
+    }
+}
+
 fn net_panel(ui: &mut egui::Ui, ws: &mut Workspace, net: usize) {
     if ws.schematic().is_none() {
         return;
@@ -3045,7 +3073,8 @@ fn net_panel(ui: &mut egui::Ui, ws: &mut Workspace, net: usize) {
         if let Some(v) = sim.voltage(flat) {
             ui.label(RichText::new(show(v, "V")).size(18.0).monospace().color(ACCENT));
         }
-        if sim.waveform(flat).is_some() || sim.response(flat).is_some() {
+        if sim.waveform(flat).is_some() || sim.response(flat).is_some() || sim.logic(flat).is_some()
+        {
             let plotted = sim.probes.contains(&flat);
             let label = if plotted { "Remove from Plot" } else { "Add to Plot" };
             toggle = ui.button(label).clicked();
@@ -3825,6 +3854,20 @@ impl eframe::App for CircuiterApp {
                     for g in gestures {
                         if let Some(err) = ws.gesture(g, tolerance) {
                             self.error = Some(err);
+                        }
+                    }
+                    // Right-click a wire, label or port for what can be done with its net.
+                    if let Some(response) = &out.response {
+                        if response.secondary_clicked() {
+                            self.net_menu = self.hovered.and_then(|o| ws.net_of(o));
+                            if self.net_menu.is_some() {
+                                ws.select_only(self.hovered);
+                            }
+                        }
+                        if let Some(net) = self.net_menu {
+                            if response.context_menu(|ui| net_menu(ui, ws, net)).is_none() {
+                                self.net_menu = None;
+                            }
                         }
                     }
                     self.error_toast(&ctx, canvas_rect);

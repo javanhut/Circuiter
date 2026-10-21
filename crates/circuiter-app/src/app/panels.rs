@@ -316,7 +316,18 @@ impl CircuiterApp {
         let mut hide = false;
         // The schematic has its problems; the simulation its results too.
         let tabs: Vec<(usize, &str)> = if self.current_space() == Space::Simulation {
-            vec![(0, "Waveforms"), (1, "Thermal"), (2, &problems_tab), (3, "Oscilloscope")]
+            let mut tabs =
+                vec![(0, "Waveforms"), (1, "Thermal"), (2, &problems_tab), (3, "Oscilloscope")];
+            // What a program left in the registers and memories.
+            if self
+                .workspace
+                .as_ref()
+                .and_then(|ws| ws.sim.as_ref())
+                .is_some_and(|s| s.has_memories())
+            {
+                tabs.push((4, "Memory"));
+            }
+            tabs
         } else {
             vec![(2, &problems_tab)]
         };
@@ -356,6 +367,13 @@ impl CircuiterApp {
         });
         let live = ws.live.is_some();
         match self.bottom_tab {
+            4 => {
+                egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
+                    egui::Frame::new()
+                        .inner_margin(egui::Margin::symmetric(12, 8))
+                        .show(ui, |ui| memory_view(ui, ws, &p));
+                });
+            }
             3 => {
                 egui::Frame::new().inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
                     ui.set_min_size(ui.available_size());
@@ -573,7 +591,12 @@ pub(super) fn sim_status(
             (format!("Transient · {} points", result.time.len()), p.go)
         }
         (Some(Results::Logic(run)), None, false) if run.halted => {
-            (format!("Digital · halted at {} (the program ended)", show(run.end, "s")), p.go)
+            let result =
+                sim.program_result().map(|v| format!(" · a0 = {}", word(v))).unwrap_or_default();
+            (
+                format!("Digital · halted at {} (the program ended){result}", show(run.end, "s")),
+                p.go,
+            )
         }
         (Some(Results::Logic(run)), None, false) => {
             (format!("Digital · {} simulated", show(run.end, "s")), p.go)
@@ -582,5 +605,125 @@ pub(super) fn sim_status(
             (format!("Mixed analog + digital · {} points", result.time.len()), p.go)
         }
         (None, None, _) => (String::new(), p.weak),
+    }
+}
+
+/// A word as a number and in hex: `285 (0x0000011d)`, or its X/Z bits when unknown.
+fn word(v: circuiter_logic::Value) -> String {
+    match v.known() {
+        Some(n) => format!("{n} ({})", v.hex()),
+        None => v.hex(),
+    }
+}
+
+/// RISC-V's names for the 32 integer registers.
+const ABI: [&str; 32] = [
+    "zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2", "s0", "s1", "a0", "a1", "a2", "a3", "a4",
+    "a5", "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "t3", "t4",
+    "t5", "t6",
+];
+
+/// The registers and memories as the last run left them, with the program's result.
+fn memory_view(ui: &mut egui::Ui, ws: &Workspace, p: &style::Palette) {
+    let Some(sim) = &ws.sim else { return };
+    if sim.job.is_some() {
+        ui.label(RichText::new(format!("{}  Running…", icon::HOURGLASS)).color(p.weak));
+        return;
+    }
+    let Some(run) = sim.logic_run() else {
+        ui.label(
+            RichText::new("Run the design (Ctrl+R): its registers and memories show here.")
+                .color(p.weak),
+        );
+        return;
+    };
+    if sim.stale {
+        ui.colored_label(p.warning, "Out of date: run the simulation again");
+    }
+    if let Some(a0) = sim.program_result() {
+        let (text, color) = if run.halted {
+            (format!("{}  Program ended: a0 = {}", icon::CHECK_CIRCLE, word(a0)), p.go)
+        } else {
+            let at = show(run.end, "s");
+            (
+                format!(
+                    "{}  Still running at {at} (no ECALL yet): a0 = {}",
+                    icon::WARNING,
+                    word(a0)
+                ),
+                p.warning,
+            )
+        };
+        ui.label(RichText::new(text).size(16.0).monospace().color(color));
+        ui.add_space(6.0);
+    }
+    for (path, words) in &run.memories {
+        let model = sim.model(path).unwrap_or("");
+        let title = match model {
+            "regfile" => format!("{path} · registers"),
+            "rom" => format!("{path} · program"),
+            _ => format!("{path} · data"),
+        };
+        egui::CollapsingHeader::new(RichText::new(title).monospace())
+            .id_salt(("memory", path))
+            .default_open(model != "rom")
+            .show(ui, |ui| {
+                if model == "regfile" {
+                    registers(ui, path, words, p);
+                } else {
+                    memory_words(ui, path, words, p);
+                }
+            });
+    }
+}
+
+/// A register file, four registers to a row; RISC-V's names when it has 32.
+fn registers(ui: &mut egui::Ui, path: &str, regs: &[circuiter_logic::Value], p: &style::Palette) {
+    egui::Grid::new(("regs", path)).striped(true).spacing([18.0, 3.0]).show(ui, |ui| {
+        for (k, v) in regs.iter().enumerate() {
+            let name = match ABI.get(k).filter(|_| regs.len() == 32) {
+                Some(abi) => format!("x{k:<2} {abi:<4}"),
+                None => format!("r{k:<3}"),
+            };
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(name).monospace().color(p.weak));
+                let color = if v.known().is_some() { p.text } else { p.weak };
+                ui.label(RichText::new(word(*v)).monospace().color(color));
+            });
+            if k % 4 == 3 {
+                ui.end_row();
+            }
+        }
+    });
+}
+
+/// A memory's words, eight to a row, up to the last one that isn't zero.
+fn memory_words(
+    ui: &mut egui::Ui,
+    path: &str,
+    words: &[circuiter_logic::Value],
+    p: &style::Palette,
+) {
+    const MOST: usize = 512;
+    let used = words.iter().rposition(|v| v.known() != Some(0)).map_or(0, |k| k + 1);
+    let shown = used.clamp(8.min(words.len()), MOST.min(words.len()));
+    egui::Grid::new(("words", path)).striped(true).spacing([10.0, 3.0]).show(ui, |ui| {
+        for (row, chunk) in words[..shown].chunks(8).enumerate() {
+            ui.label(RichText::new(format!("{:#06x}", row * 8 * 4)).monospace().color(p.weak));
+            for v in chunk {
+                let color = if v.known() == Some(0) { p.weak } else { p.text };
+                ui.label(RichText::new(v.hex()).monospace().color(color));
+            }
+            ui.end_row();
+        }
+    });
+    if shown < words.len() {
+        let rest = words.len() - shown;
+        let note = if used > shown {
+            format!("… {rest} more words")
+        } else {
+            format!("… {rest} more words, all zero")
+        };
+        ui.label(RichText::new(note).small().color(p.weak));
     }
 }

@@ -729,14 +729,22 @@ impl Workspace {
     }
 
     fn update_net(&mut self) {
-        let conn = &self.scene.connectivity;
         let mut it = self.selection.iter();
         self.net = match (it.next(), it.next()) {
-            (Some(Owner::Wire(i)), None) => conn.net_of(Item::Wire(*i)),
-            (Some(Owner::Label(i)), None) => conn.net_of(Item::Label(*i)),
-            (Some(Owner::Port(i)), None) => conn.net_of(Item::Port(*i)),
+            (Some(o), None) => self.net_of(*o),
             _ => None,
         };
+    }
+
+    /// The net that wire, label or port `owner` is on.
+    pub fn net_of(&self, owner: Owner) -> Option<usize> {
+        let conn = &self.scene.connectivity;
+        match owner {
+            Owner::Wire(i) => conn.net_of(Item::Wire(i)),
+            Owner::Label(i) => conn.net_of(Item::Label(i)),
+            Owner::Port(i) => conn.net_of(Item::Port(i)),
+            _ => None,
+        }
     }
 
     /// Applies an edit to the current cell as one undoable step. A generated symbol is
@@ -2344,6 +2352,29 @@ impl Workspace {
         });
         *self.plan_cache.borrow_mut() = Some((self.revision, top, plan));
         plan
+    }
+
+    /// Whether local net `net` is on the plot of the run in front, live or finished;
+    /// `None` when there is no run that traced it.
+    pub fn plotted(&self, net: usize) -> Option<bool> {
+        if self.live.is_some() {
+            let flat = self.live_nets().get(net).copied().flatten()?;
+            return Some(self.live_watch.contains(&flat));
+        }
+        let (sim, flat) = (self.fresh_sim()?, self.flat_net(net)?);
+        let traced = sim.waveform(flat).is_some()
+            || sim.response(flat).is_some()
+            || sim.logic(flat).is_some();
+        traced.then(|| sim.probes.contains(&flat))
+    }
+
+    /// Adds or removes local net `net` from the plot of the run in front.
+    pub fn toggle_plot(&mut self, net: usize) {
+        if self.live.is_some() {
+            self.toggle_live_watch(net);
+        } else {
+            self.toggle_probe(net);
+        }
     }
 
     /// Adds or removes the net of local net `net` from the waveform plot.

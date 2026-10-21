@@ -412,8 +412,13 @@ impl CircuiterApp {
                     Ok(_) => {
                         let analysis = self.workspace.as_ref().map(|ws| ws.run_analysis());
                         if let Some(a) = analysis {
-                            self.show_bottom = true;
                             self.simulate(a);
+                            // The Simulation workspace's panels, with what the program left
+                            // in the registers and memory below it.
+                            self.simulating = true;
+                            self.sync_space();
+                            self.show_bottom = true;
+                            self.bottom_tab = 4;
                         }
                     }
                     Err(e) => self.error = Some(e),
