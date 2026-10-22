@@ -242,6 +242,7 @@ pub fn show(
     }
     draw_scene(&painter, view, cam, scene, theme, highlight, out.hovered);
     draw_overlay(&painter, view, cam, theme, overlay);
+    crate::style::canvas_scale(&painter, view, cam.scale, crate::style::palette_for(theme.dark));
     out.response = Some(response);
     out
 }
@@ -375,13 +376,13 @@ fn draw_grid(painter: &Painter, view: egui::Rect, cam: &Camera, theme: &Theme) {
         return;
     }
     let base = color(theme.grid);
-    let minor = base.gamma_multiply(0.8);
+    let minor = base.gamma_multiply(0.55);
     let major_every = (25.4 / spacing).round() as i64;
     for gx in x0..=x1 {
         for gy in y0..=y1 {
             let p = cam.to_screen(view, Pt::new(gx as f64 * spacing, gy as f64 * spacing));
             let major = major_every > 1 && gx % major_every == 0 && gy % major_every == 0;
-            let (r, c) = if major { (1.4, base) } else { (0.9, minor) };
+            let (r, c) = if major { (1.2, base) } else { (0.7, minor) };
             painter.circle_filled(p, r, c);
         }
     }

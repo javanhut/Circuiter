@@ -4127,6 +4127,16 @@ impl eframe::App for CircuiterApp {
                         &overlay,
                         show_grid,
                     );
+                    if canvas_rect.width() > 340.0 && canvas_rect.height() > 160.0 {
+                        style::canvas_badge(
+                            &ui.painter_at(canvas_rect),
+                            canvas_rect.left_top() + egui::vec2(14.0, 14.0),
+                            egui::Align2::LEFT_TOP,
+                            &format!("{}  ·  {}", ws.current().cell.cell, ws.tool.name()),
+                            style::palette_for(theme.dark),
+                            p.accent,
+                        );
+                    }
                     self.cursor = out.cursor;
                     self.hovered = out.hovered;
                     ws.pick_tolerance = out.tolerance;

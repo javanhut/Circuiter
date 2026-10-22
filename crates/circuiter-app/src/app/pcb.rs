@@ -20,13 +20,13 @@ use eframe::egui::{self, Color32, Pos2, RichText, Sense, Stroke};
 /// Grid steps on offer, in millimetres.
 pub const GRIDS: &[f64] = &[0.1, 0.25, 0.5, 0.635, 1.0, 1.27, 2.54];
 
-const BACKGROUND: Color32 = Color32::from_rgb(0, 16, 35);
-const BOARD_FILL: Color32 = Color32::from_rgb(10, 34, 40);
-const EDGE: Color32 = Color32::from_rgb(208, 210, 205);
-const SILK_FRONT: Color32 = Color32::from_rgb(242, 237, 161);
+const BACKGROUND: Color32 = Color32::from_rgb(11, 17, 26);
+const BOARD_FILL: Color32 = Color32::from_rgb(23, 43, 46);
+const EDGE: Color32 = Color32::from_rgb(149, 185, 176);
+const SILK_FRONT: Color32 = Color32::from_rgb(222, 230, 213);
 const SILK_BACK: Color32 = Color32::from_rgb(232, 178, 167);
-const RATSNEST: Color32 = Color32::from_rgb(230, 230, 230);
-const HOLE: Color32 = Color32::from_rgb(0, 16, 35);
+const RATSNEST: Color32 = Color32::from_rgb(140, 166, 185);
+const HOLE: Color32 = Color32::from_rgb(11, 17, 26);
 const VIA: Color32 = Color32::from_rgb(194, 194, 194);
 const SELECTED: Color32 = Color32::WHITE;
 /// The realistic view's colours: green solder mask, copper seen through it, gold
@@ -39,8 +39,8 @@ const LEGEND: Color32 = Color32::from_rgb(240, 240, 232);
 /// A copper layer's colour, as KiCad shows it.
 pub fn layer_colour(layer: Layer) -> Color32 {
     match layer {
-        Layer::FCu => Color32::from_rgb(200, 52, 52),
-        Layer::BCu => Color32::from_rgb(77, 127, 196),
+        Layer::FCu => Color32::from_rgb(239, 113, 103),
+        Layer::BCu => Color32::from_rgb(101, 165, 235),
         Layer::In(1) => Color32::from_rgb(127, 200, 127),
         Layer::In(2) => Color32::from_rgb(206, 125, 44),
         Layer::In(3) => Color32::from_rgb(180, 110, 220),
@@ -970,7 +970,7 @@ impl CircuiterApp {
         if has_board && self.pcb.show_layers {
             egui::Panel::left("pcb-layers")
                 .resizable(true)
-                .default_size(200.0)
+                .default_size(220.0)
                 .frame(egui::Frame::new().fill(p.panel).inner_margin(egui::Margin::same(8)))
                 .show(ui, |ui| {
                     egui::ScrollArea::vertical()
@@ -981,6 +981,7 @@ impl CircuiterApp {
         let rect = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
         if !has_board {
+            let p = &style::DARK;
             ui.painter().rect_filled(rect, 0.0, BACKGROUND);
             let reason = self
                 .pcb
@@ -990,14 +991,20 @@ impl CircuiterApp {
                 .unwrap_or_default();
             let mut child = ui.new_child(
                 egui::UiBuilder::new()
-                    .max_rect(rect.shrink(40.0))
+                    .max_rect(egui::Rect::from_center_size(
+                        rect.center(),
+                        egui::vec2((rect.width() - 48.0).clamp(0.0, 480.0), rect.height()),
+                    ))
                     .layout(egui::Layout::top_down(egui::Align::Center)),
             );
-            child.add_space(rect.height() * 0.3);
+            child.add_space((rect.height() * 0.25).max(12.0));
+            child.label(RichText::new(icon::CPU).size(42.0).color(p.accent));
+            child.add_space(12.0);
             if reason == "no board yet" {
                 child.label(
                     RichText::new(format!("{} has no board yet", cell.cell))
-                        .size(18.0)
+                        .size(22.0)
+                        .strong()
                         .color(p.text),
                 );
                 child.add_space(6.0);
@@ -1006,8 +1013,12 @@ impl CircuiterApp {
                     child.add_space(10.0);
                     let make = egui::Button::new(
                         RichText::new(format!("{}  Create Board from Schematic", icon::SPARKLE))
-                            .strong(),
-                    );
+                            .strong()
+                            .color(Color32::WHITE),
+                    )
+                    .fill(p.accent)
+                    .corner_radius(7)
+                    .min_size(egui::vec2(0.0, 36.0));
                     if child.add_enabled(editable, make).clicked() {
                         self.pcb_create_board();
                     }
@@ -1826,7 +1837,7 @@ impl CircuiterApp {
             self.pcb.layout().map(|l| l.nets.iter().cloned().collect()).unwrap_or_default();
         let copper: Vec<Layer> = self.pcb.layout().map(|l| l.board.copper()).unwrap_or_default();
         let has_selection = self.pcb_selected_nets().is_some();
-        egui::Frame::new().fill(p.panel).inner_margin(egui::Margin::symmetric(10, 4)).show(ui, |ui| {
+        egui::Frame::new().fill(p.raised).inner_margin(egui::Margin::symmetric(10, 7)).show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 let view = &mut self.pcb;
                 if ui.button(format!("{}  Fit", icon::CORNERS_OUT)).on_hover_text("Home, or double-click").clicked() {
@@ -2851,6 +2862,9 @@ impl CircuiterApp {
         // Realistic: the side being worked on, front unless it's the back.
         let front = view.layer != Layer::BCu;
         let outer = if front { Layer::FCu } else { Layer::BCu };
+        // A slight lift separates the board edge from the surrounding workspace.
+        let shadow = Draw { painter: &painter, cam, view: rect.translate(egui::vec2(0.0, 5.0)) };
+        shadow.mesh(&analysis.face.0, &analysis.face.1, Color32::from_black_alpha(75));
         d.mesh(&analysis.face.0, &analysis.face.1, if real { MASK } else { BOARD_FILL });
         // Grid dots, when they're far enough apart to see.
         let step_px = view.grid as f32 * cam.scale;
@@ -2858,12 +2872,22 @@ impl CircuiterApp {
             let lo = cam.to_world(rect, rect.left_top());
             let hi = cam.to_world(rect, rect.right_bottom());
             let g = view.grid;
-            let dot = Color32::from_rgba_unmultiplied(160, 170, 190, 50);
+            let dot = Color32::from_rgba_unmultiplied(139, 166, 185, 35);
             let mut y = (lo.y / g).floor() * g;
             while y <= hi.y {
                 let mut x = (lo.x / g).floor() * g;
                 while x <= hi.x {
-                    painter.circle_filled(d.at([x, y]), 0.8, dot);
+                    let major =
+                        ((x / g).round() as i64) % 5 == 0 && ((y / g).round() as i64) % 5 == 0;
+                    painter.circle_filled(
+                        d.at([x, y]),
+                        if major { 1.1 } else { 0.65 },
+                        if major {
+                            Color32::from_rgba_unmultiplied(139, 166, 185, 65)
+                        } else {
+                            dot
+                        },
+                    );
                     x += g;
                 }
                 y += g;
@@ -3217,13 +3241,48 @@ impl CircuiterApp {
         if let Some(n) = &view.note {
             status.push_str(&format!("   {n}"));
         }
-        painter.text(
-            rect.left_bottom() + egui::vec2(10.0, -8.0),
-            egui::Align2::LEFT_BOTTOM,
-            status,
-            egui::FontId::monospace(11.0),
-            Color32::from_gray(170),
-        );
+        // PCB rendering uses a dark work surface in either application theme.
+        let pal = &style::DARK;
+        if rect.width() > 340.0 && rect.height() > 160.0 {
+            style::canvas_badge(
+                &painter,
+                rect.left_top() + egui::vec2(14.0, 14.0),
+                egui::Align2::LEFT_TOP,
+                &format!(
+                    "{}  ·  {}  ·  {} mm grid",
+                    view.tool.name(),
+                    view.layer.name(),
+                    view.grid
+                ),
+                pal,
+                layer_colour(view.layer),
+            );
+            // Leave room for the scale at the right and clip long cursor / route notes.
+            let status_painter = painter.with_clip_rect(egui::Rect::from_min_max(
+                rect.min,
+                rect.right_bottom() - egui::vec2(138.0, 0.0),
+            ));
+            let health = if analysis.checked.as_ref().is_some_and(|c| c.errors() > 0) {
+                pal.error
+            } else if analysis
+                .checked
+                .as_ref()
+                .is_some_and(|c| c.warnings() > 0 || c.connectivity.unrouted() > 0)
+            {
+                pal.warning
+            } else {
+                pal.go
+            };
+            style::canvas_badge(
+                &status_painter,
+                rect.left_bottom() + egui::vec2(14.0, -14.0),
+                egui::Align2::LEFT_BOTTOM,
+                &status,
+                pal,
+                health,
+            );
+        }
+        style::canvas_scale(&painter, rect, cam.scale, pal);
     }
 }
 

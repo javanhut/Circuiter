@@ -390,3 +390,53 @@ pub fn segmented(ui: &mut egui::Ui, labels: &[(&str, bool)], active: usize) -> O
     });
     clicked
 }
+
+/// A compact canvas readout. It is painted only, so it never steals editing gestures.
+pub fn canvas_badge(
+    painter: &egui::Painter,
+    at: egui::Pos2,
+    anchor: egui::Align2,
+    text: &str,
+    p: &Palette,
+    accent: Color32,
+) {
+    let galley = painter.layout_no_wrap(text.to_owned(), FontId::proportional(12.0), p.text);
+    let rect =
+        anchor.anchor_rect(egui::Rect::from_min_size(at, galley.size() + Vec2::new(28.0, 16.0)));
+    painter.rect(rect, 7.0, p.panel, Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
+    painter.circle_filled(rect.left_center() + Vec2::new(10.0, 0.0), 2.5, accent);
+    painter.galley(rect.min + Vec2::new(18.0, 8.0), galley, p.text);
+}
+
+/// A scale in world millimetres, with a readable 1 / 2 / 5 step at every zoom.
+pub fn canvas_scale(painter: &egui::Painter, view: egui::Rect, scale: f32, p: &Palette) {
+    if view.width() < 300.0 || view.height() < 160.0 || !scale.is_finite() || scale <= 0.0 {
+        return;
+    }
+    let target = 80.0 / scale;
+    let decade = 10.0_f32.powf(target.log10().floor());
+    let step = [5.0, 2.0, 1.0].into_iter().find(|n| n * decade <= target).unwrap_or(1.0);
+    let mm = step * decade;
+    let rect = egui::Rect::from_min_size(
+        view.right_bottom() - Vec2::new(124.0, 56.0),
+        Vec2::new(110.0, 42.0),
+    );
+    painter.rect(rect, 7.0, p.panel, Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
+    let left = egui::pos2(rect.center().x - mm * scale / 2.0, rect.bottom() - 10.0);
+    let right = left + Vec2::new(mm * scale, 0.0);
+    painter.line_segment([left, right], Stroke::new(1.0, p.weak));
+    for at in [left, right] {
+        painter.line_segment(
+            [at - Vec2::new(0.0, 3.0), at + Vec2::new(0.0, 3.0)],
+            Stroke::new(1.0, p.weak),
+        );
+    }
+    let label = format!("{mm:.4}").trim_end_matches('0').trim_end_matches('.').to_owned();
+    painter.text(
+        rect.center_top() + Vec2::new(0.0, 8.0),
+        egui::Align2::CENTER_TOP,
+        format!("{label} mm"),
+        FontId::monospace(11.0),
+        p.text,
+    );
+}
