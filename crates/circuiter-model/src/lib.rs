@@ -29,6 +29,7 @@ pub use cell::{
 };
 pub use design::{CellId, Design, HierNode, STD_LIBRARY};
 pub use error::{ModelError, Result};
+pub use format::{from_ron, to_ron};
 pub use geom::{Length, Point, Rotation, Transform};
 pub use library::Library;
 pub use project::Project;

@@ -303,7 +303,6 @@ impl Simulation {
     }
 
     /// Runs `analysis` to completion on this thread.
-    #[cfg(test)]
     pub fn run(&mut self, analysis: Analysis) {
         self.results = None;
         self.error = None;

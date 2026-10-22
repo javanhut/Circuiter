@@ -638,6 +638,34 @@ The left panel browses libraries (click a part to see its symbol). The right pan
 inspects the selection: parameters, pin-to-net connections, and the problems on the
 current sheet, such as unconnected pins.
 
+**AI assistants (MCP)**
+
+`circuiter mcp [PROJECT]` serves the Model Context Protocol on stdin and stdout, so an
+assistant can design with you: make components, place and wire parts, simulate, and
+lay out boards. Register it once, for Claude Code:
+
+```sh
+claude mcp add circuiter -- circuiter mcp /path/to/project
+```
+
+Leave the project out to have the assistant open or create one (`open_project`,
+`create_project`). Its tools:
+
+| Tools | What they do |
+|---|---|
+| `project_info`, `search_parts`, `get_cell` | The project's cells; parts to use, with their ports and parameters; any cell's views as the RON its files hold |
+| `create_component`, `update_component`, `delete_cell`, `import_spice`, `set_top` | Components from ports and parameters, with a symbol drawn from them and any view given as RON (SPICE model, footprint, 3D body); manufacturer SPICE models |
+| `place_parts`, `connect`, `disconnect`, `edit_parts`, `delete_parts`, `draw` | Parts on a sheet; pins joined into named nets (`GND` and supply names go global); wires, labels, ports and notes drawn directly |
+| `arrange_sheet`, `set_frame`, `describe_schematic` | The sheet laid out as the Diagram view does, with wires and power symbols; a frame and title block; the sheet as parts and nets |
+| `check`, `simulate` | Cell checks and ERC; operating point, transient (logic runs for digital designs) and AC sweeps |
+| `pcb_new_board`, `pcb_update`, `pcb_place`, `pcb_autoroute`, `pcb_pour`, `pcb_check` | A board placed from the schematic, routed, poured and checked |
+| `list_files`, `read_file`, `write_file` | Programs and HDL sources in the project; design files are checked and put back if they would break it |
+
+Every change is saved at once. An open Circuiter window watches the project's files
+and takes in what changes, cell by cell: the status bar says what came in, and
+`Ctrl+Z` puts a cell back. A cell you have also changed and not saved keeps your
+version, which Save writes over the file.
+
 ## Project layout
 
 | Path | Contents |
@@ -653,7 +681,7 @@ current sheet, such as unconnected pins.
 | `crates/circuiter-hdl` | Verilog/SystemVerilog parser and interpreter |
 | `crates/circuiter-3d` | Meshes, solid booleans, part bodies from parameters, modelled features, inside tests, DXF/SVG import, STL |
 | `crates/circuiter-pcb` | Footprints, boards linked to schematics, copper geometry, connectivity and ratsnest, pours, design rule checks, Gerber/Excellon/BOM/placement files, KiCad netlists, the board in 3D, cases made to fit |
-| `crates/circuiter-app` | The `circuiter` desktop app (egui on wgpu), the only binary |
+| `crates/circuiter-app` | The `circuiter` desktop app (egui on wgpu), the only binary; `circuiter mcp` serves the design tools to AI assistants |
 | `examples/` | Example projects |
 | `docs/` | Architecture and design notes |
 

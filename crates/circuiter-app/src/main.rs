@@ -11,12 +11,14 @@ mod gui_tests;
 mod import;
 mod interface;
 mod live;
+mod mcp;
 mod plot;
 mod render3d;
 mod simulation;
 mod style;
 mod symbol_edit;
 mod toolchain;
+mod watch;
 mod workspace;
 
 use clap::Parser;
@@ -25,7 +27,10 @@ use std::path::PathBuf;
 /// Options for opening the app.
 #[derive(Debug, Parser)]
 #[command(name = "circuiter", version, about = "Circuiter: design, simulate and build hardware")]
+#[command(args_conflicts_with_subcommands = true)]
 pub struct Args {
+    #[command(subcommand)]
+    pub command: Option<Command>,
     /// Project directory to open.
     #[arg(value_name = "PROJECT")]
     pub project: Option<PathBuf>,
@@ -64,8 +69,27 @@ pub struct Args {
     pub screenshot: Option<PathBuf>,
 }
 
+/// What to do instead of opening the window.
+#[derive(Debug, clap::Subcommand)]
+pub enum Command {
+    /// Serve the Model Context Protocol on stdin and stdout, so an AI assistant can work
+    /// on a project: make components, draw and wire schematics, simulate, lay out boards.
+    /// Register it with the assistant, for Claude Code:
+    /// `claude mcp add circuiter -- circuiter mcp /path/to/project`.
+    Mcp {
+        /// The project to work on (default: the one the current directory is in, if
+        /// any; the assistant can also open or create one).
+        #[arg(value_name = "PROJECT")]
+        project: Option<PathBuf>,
+    },
+}
+
 fn main() -> anyhow::Result<()> {
-    run_app(Args::parse())
+    let mut args = Args::parse();
+    match args.command.take() {
+        Some(Command::Mcp { project }) => mcp::serve(project),
+        None => run_app(args),
+    }
 }
 
 fn run_app(args: Args) -> anyhow::Result<()> {

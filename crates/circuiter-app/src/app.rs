@@ -68,6 +68,11 @@ pub struct CircuiterApp {
     /// The sheet laid out automatically instead of as drawn.
     show_diagram: bool,
     diagram: diagram::DiagramView,
+    /// Watches the open project's files for changes made by other programs.
+    watch: Option<crate::watch::Watch>,
+    /// Merges of changes on disk that failed in a row: a file caught half written fails
+    /// once, a broken one keeps failing.
+    disk_failures: u32,
     /// Showing the 3D view instead of the sheet.
     show_3d: bool,
     /// Showing the board editor instead of the sheet.
@@ -536,6 +541,8 @@ impl CircuiterApp {
             show_netlist: false,
             show_diagram: false,
             diagram: diagram::DiagramView::default(),
+            watch: None,
+            disk_failures: 0,
             show_3d: false,
             show_pcb: false,
             simulating: false,
@@ -743,6 +750,41 @@ impl CircuiterApp {
             match found {
                 Some(i) => ws.descend(i),
                 None => break,
+            }
+        }
+    }
+
+    /// Takes in changes another program made to the open project's files.
+    fn take_disk_changes(&mut self, ctx: &egui::Context) {
+        let Some(ws) = &mut self.workspace else {
+            self.watch = None;
+            return;
+        };
+        let paths = ws.watched_paths();
+        if !self.watch.as_ref().is_some_and(|w| w.watches(&paths)) {
+            self.watch = Some(crate::watch::Watch::start(paths, ctx.clone()));
+            return;
+        }
+        let Some(watch) = &self.watch else { return };
+        if !watch.take() {
+            return;
+        }
+        match ws.merge_from_disk() {
+            Ok(merged) => {
+                self.disk_failures = 0;
+                if !merged.is_empty() {
+                    let line = merged.describe();
+                    self.pcb.note = Some(line.clone());
+                    ws.notice = Some(line);
+                }
+            }
+            Err(e) => {
+                self.disk_failures += 1;
+                if self.disk_failures >= 3 {
+                    self.error = Some(format!("reading the project's files: {e:#}"));
+                } else {
+                    watch.retry();
+                }
             }
         }
     }
@@ -3938,6 +3980,7 @@ impl eframe::App for CircuiterApp {
         footprint::window(self, &ctx);
         self.live_frame(&ctx);
         self.update_title(&ctx);
+        self.take_disk_changes(&ctx);
         self.sync_space();
         if let Some(ws) = &self.workspace {
             // Project cells' symbols change as they are edited; std's never do.

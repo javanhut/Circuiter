@@ -25,6 +25,7 @@ fn example_copy(name: &str) -> tempfile::TempDir {
 
 fn open(project: PathBuf) -> Harness<'static, CircuiterApp> {
     let args = Args {
+        command: None,
         project: Some(project),
         cell: None,
         theme: None,
@@ -593,6 +594,7 @@ fn clicking_a_switch_while_running_live_flips_it() {
 fn modelling_a_body_adds_undoes_and_hides_features() {
     let tmp = example_copy("analog_lab");
     let args = Args {
+        command: None,
         project: Some(tmp.path().to_owned()),
         cell: Some("case_lid".into()),
         theme: None,
@@ -690,6 +692,7 @@ fn board(h: &Harness<'_, CircuiterApp>) -> circuiter_model::board::Board {
 fn a_board_is_made_routed_and_rearranged() {
     let tmp = example_copy("analog_lab");
     let args = Args {
+        command: None,
         project: Some(tmp.path().to_owned()),
         cell: Some("blinker".into()),
         theme: None,
@@ -821,6 +824,7 @@ fn a_board_is_made_routed_and_rearranged() {
 fn boards_autoroute_and_tracks_rearrange() {
     let tmp = example_copy("analog_lab");
     let args = Args {
+        command: None,
         project: Some(tmp.path().to_owned()),
         cell: Some("blinker".into()),
         theme: None,
@@ -910,6 +914,7 @@ fn boards_autoroute_and_tracks_rearrange() {
 fn board_tools_work_from_the_editor() {
     let tmp = example_copy("analog_lab");
     let args = Args {
+        command: None,
         project: Some(tmp.path().to_owned()),
         cell: Some("blinker".into()),
         theme: None,
@@ -1026,6 +1031,7 @@ fn board_tools_work_from_the_editor() {
 fn power_analysis_uses_the_simulated_currents() {
     let tmp = example_copy("analog_lab");
     let args = Args {
+        command: None,
         project: Some(tmp.path().to_owned()),
         cell: Some("blinker".into()),
         theme: None,
@@ -1071,6 +1077,7 @@ fn power_analysis_uses_the_simulated_currents() {
 fn differential_pairs_are_set_up_in_their_tab() {
     let tmp = example_copy("analog_lab");
     let args = Args {
+        command: None,
         project: Some(tmp.path().to_owned()),
         cell: Some("blinker".into()),
         theme: None,
@@ -1103,6 +1110,7 @@ fn differential_pairs_are_set_up_in_their_tab() {
 fn panels_are_made_and_written() {
     let tmp = example_copy("analog_lab");
     let args = Args {
+        command: None,
         project: Some(tmp.path().to_owned()),
         cell: Some("blinker".into()),
         theme: None,
@@ -1143,6 +1151,7 @@ fn panels_are_made_and_written() {
 fn assembly_variants_from_the_editor() {
     let tmp = example_copy("analog_lab");
     let args = Args {
+        command: None,
         project: Some(tmp.path().to_owned()),
         cell: Some("blinker".into()),
         theme: None,

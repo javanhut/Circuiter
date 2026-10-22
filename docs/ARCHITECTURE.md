@@ -223,7 +223,7 @@ schematic hierarchy ──► netlister ──► flat netlist ──┬─► c
 | `circuiter-model` | Data model, file format, libraries, projects, hierarchy, structural checks | done |
 | `circuiter-stdlib` | Built-in `std` library | done (grows each milestone) |
 | `circuiter-scene` | Schematic → display list (shared by screen, SVG and print), themes, SVG export | done |
-| `circuiter-app` | The one binary, `circuiter`. Desktop GUI (egui on wgpu): headless operations (`edit` for schematics, `symbol_edit`, `interface`), `workspace` (session, tools, undo), `canvas`, `style` (colours, icons, shared widgets), `app` with `chrome` (title bar, toolbar, tabs), `explorer` (trees, components), `panels` (properties, simulation, physics, results), `pcb` (the board editor), `viewer3d` and `body_editor` (3D, the board in its case, modelling) | schematic, symbol, board and body editors done |
+| `circuiter-app` | The one binary, `circuiter`. Desktop GUI (egui on wgpu): headless operations (`edit` for schematics, `symbol_edit`, `interface`), `workspace` (session, tools, undo), `canvas`, `style` (colours, icons, shared widgets), `app` with `chrome` (title bar, toolbar, tabs), `explorer` (trees, components), `panels` (properties, simulation, physics, results), `pcb` (the board editor), `viewer3d` and `body_editor` (3D, the board in its case, modelling); `mcp` (the Model Context Protocol server for AI assistants) and `watch` (taking in changes other programs make to the files) | schematic, symbol, board and body editors done; MCP server done |
 | `circuiter-netlist` | Hierarchy flattening (for the analog and digital simulators, and the physical flattening a board is made from), net naming, SPICE emission with merged model cards, whole-circuit checks, and the electrical rules check (`erc`: KiCad's pin-type rules on the flattened circuit as it will run, sheet checks for labels and no-connect flags) | done |
 | `circuiter-sim` | Pure-Rust SPICE-compatible simulator: deck parser (R, C, L, K, V, I, E, F, G, H incl. `POLY`, S, W switches, D, MOSFET Level 1 with Meyer capacitance, Gummel-Poon BJT; `.subckt` with parameters, `.param`, `{}` expressions with functions; DC, AC, PULSE, SIN, PWL sources; JFETs (Shichman-Hodges); behavioural `B` sources whose expressions of node voltages, branch currents and time are differentiated exactly for Newton), sparse LU (KLU-style: minimum-degree ordering, threshold pivoting, refactorisation), operating point (Newton, dynamic gmin and source stepping), DC sweep, transient (switch event location), AC; progress and cancellation; model-library scanning for import; later the co-simulation scheduler | done for Milestone 1's analyses |
 | `circuiter-physics` | Per-part thermal model (exact RC update each step), instant limits (voltage, current, I²t), failure modes swapped into the running simulation, events with causes, operating-point assessment; an optional case: an air node warmed by every part and cooled through the case to the room, which is then each part's ambient | done (first version) |
@@ -243,6 +243,27 @@ stack-up), 3D (part bodies and the board in 3D) and Simulation (the sheet with t
 analyses, physics, waveforms, thermal results and the oscilloscope). Each shows only
 its own panels and keeps their tabs, visibility and sizes while another is in front
 (`app::Space`); starting a run from the schematic brings Simulation forward.
+
+## AI assistants
+
+`circuiter mcp` is a Model Context Protocol server on stdio (JSON-RPC 2.0, one message a
+line, `mcp.rs`). Its tools (`mcp/tools.rs`) work on the project's files: each call loads
+the project, changes cells through the same headless operations the editor uses
+(`edit`, `interface`, `builder::sync`, the diagram layout, the PCB sync, router and DRC,
+the simulators), and saves before answering, so nothing is held between calls but which
+project is open. Tools speak the user's units (mm on the 2.54 mm grid, quantities like
+`10k`), take views as the RON of the cell files, and report in plain text an assistant
+can read; a failed call is a tool result marked as an error, saying what to do instead.
+
+Wiring by tool joins pins by name, not geometry: each pin gets a one-grid stub and a
+label, which can't short anything by accident; `arrange_sheet` then redraws the sheet
+with wires. A part that moves keeps its connections the same way.
+
+The app watches the files (`watch.rs`: a thread hashing names, sizes and modification
+times twice a second) and merges what changed three ways per cell, against what it last
+read or wrote (`Workspace::merge_from_disk`): a cell changed only on disk is taken in,
+onto its undo history; one changed only here stays; one changed in both keeps the
+version here and is reported.
 
 ## Boards and enclosures
 

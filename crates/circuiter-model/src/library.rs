@@ -176,6 +176,18 @@ impl Library {
         dir
     }
 
+    /// Removes cell `def`'s files from under library directory `root`, and its directory
+    /// when nothing else is left in it. [`Library::save_dir`] keeps the files of cells it
+    /// doesn't have, so a deleted cell's go this way.
+    pub fn remove_cell_files(root: &Path, def: &CellDef) -> Result<()> {
+        let dir = root.join(Library::cell_dir(def));
+        for file in VIEW_FILES {
+            remove_if_present(&dir.join(file))?;
+        }
+        let _ = std::fs::remove_dir(&dir);
+        Ok(())
+    }
+
     /// Writes every cell to `root/cells/<folder>/<cell>/`, and makes every folder. View
     /// files for views a cell no longer has are removed, as are the files a cell left
     /// behind when it moved to another folder, and deleted folders once empty; other

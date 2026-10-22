@@ -15,9 +15,10 @@ use circuiter_model::cell::{Cell, PortKind, validate_name};
 use circuiter_model::check::{Diagnostic, Severity, check_libraries};
 use circuiter_model::connectivity::Item;
 use circuiter_model::geom::{Length, Point, Rotation, Transform};
+use circuiter_model::project::Manifest;
 use circuiter_model::schematic::{Instance, Note, Schematic};
 use circuiter_model::symbol::{Anchor, Graphic, PinDirection, Symbol};
-use circuiter_model::{CellDef, CellId, CellRef, Design, Project, STD_LIBRARY};
+use circuiter_model::{CellDef, CellId, CellRef, Design, Library, Project, STD_LIBRARY};
 use circuiter_scene::{
     Element, HAlign, Owner, Pt, Rect, Role, Scene, Shape, VAlign, instance_elements,
 };
@@ -256,6 +257,56 @@ pub struct Workspace {
     /// Where Back and Forward go: earlier and later views, most recent last.
     back: Vec<View>,
     forward: Vec<View>,
+    /// The editable libraries and the manifest as last read from or written to disk:
+    /// what changes other programs make to the files are measured against.
+    saved: BTreeMap<String, Library>,
+    saved_manifest: Manifest,
+}
+
+/// What came of taking in changes another program made to the project's files.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Merged {
+    /// Cells taken from disk: changed, added or removed there.
+    pub changed: Vec<CellId>,
+    /// Cells changed both on disk and here since the last save. They keep what they
+    /// have here, which the next save writes over the files.
+    pub conflicts: Vec<CellId>,
+    /// The manifest changed (the top cell, the libraries).
+    pub manifest: bool,
+}
+
+impl Merged {
+    pub fn is_empty(&self) -> bool {
+        self.changed.is_empty() && self.conflicts.is_empty() && !self.manifest
+    }
+
+    /// A line for the status bar.
+    pub fn describe(&self) -> String {
+        let names = |ids: &[CellId]| {
+            let mut list: Vec<String> = ids.iter().take(4).map(|id| id.cell.clone()).collect();
+            if ids.len() > 4 {
+                list.push(format!("{} more", ids.len() - 4));
+            }
+            list.join(", ")
+        };
+        let mut parts = Vec::new();
+        if !self.changed.is_empty() {
+            parts.push(format!(
+                "Took in {} changed on disk (Undo puts a cell back)",
+                names(&self.changed)
+            ));
+        } else if self.manifest {
+            parts.push("Took in the project settings changed on disk".to_owned());
+        }
+        if !self.conflicts.is_empty() {
+            parts.push(format!(
+                "{} changed both here and on disk: kept yours, which Save writes over the \
+                 files (Reload takes the disk's)",
+                names(&self.conflicts)
+            ));
+        }
+        parts.join("; ")
+    }
 }
 
 /// A place visited: the hierarchy path, which view of it, and where the camera was.
@@ -307,6 +358,7 @@ impl Workspace {
         let top = CellId::new(project.name(), &project.manifest.project.top);
         design.cell(&top).with_context(|| format!("top cell {top} not found"))?;
         let scene = Scene::symbol_sheet(&design, &top).expect("cell exists");
+        let project_manifest = project.manifest.clone();
         let mut ws = Workspace {
             project,
             design,
@@ -339,7 +391,10 @@ impl Workspace {
             active_tab: 0,
             back: Vec::new(),
             forward: Vec::new(),
+            saved: BTreeMap::new(),
+            saved_manifest: project_manifest,
         };
+        ws.remember_saved();
         ws.mode = ws.default_mode();
         ws.tabs.push(View { levels: ws.levels.clone(), mode: ws.mode });
         ws.rebuild_scene();
@@ -951,7 +1006,139 @@ impl Workspace {
             }
         }
         self.dirty = false;
+        self.remember_saved();
         Ok(())
+    }
+
+    /// Notes the editable libraries and the manifest as they now are on disk.
+    fn remember_saved(&mut self) {
+        self.saved = self
+            .checked_libraries()
+            .iter()
+            .filter_map(|name| Some((name.clone(), self.design.library(name)?.clone())))
+            .collect();
+        self.saved_manifest = self.project.manifest.clone();
+    }
+
+    /// The files whose changes [`Workspace::merge_from_disk`] takes in: the manifest and
+    /// the cell directories of the project and its libraries.
+    pub fn watched_paths(&self) -> Vec<std::path::PathBuf> {
+        let root = &self.project.root;
+        let mut paths =
+            vec![root.join(circuiter_model::project::MANIFEST_FILE), root.join("cells")];
+        for entry in self.project.manifest.libraries.values() {
+            paths.push(root.join(&entry.path).join("cells"));
+        }
+        paths
+    }
+
+    /// Takes in changes another program (an assistant working through `circuiter mcp`,
+    /// a text editor) made to the project's files since they were last read or saved.
+    ///
+    /// A cell changed on disk is taken in unless it was also changed here since; such
+    /// conflicts keep what they have here. Each cell taken in goes on its undo history,
+    /// so Undo puts it back.
+    pub fn merge_from_disk(&mut self) -> Result<Merged> {
+        let project = Project::load(&self.project.root)?;
+        let mut on_disk = vec![project.library.clone()];
+        on_disk.extend(project.load_libraries()?);
+        let mut merged = Merged::default();
+        for disk in on_disk {
+            let name = disk.name.clone();
+            let base = self.saved.get(&name).cloned().unwrap_or_else(|| Library::new(&name));
+            if self.design.library(&name).is_none() {
+                self.design.add_library(Library::new(&name))?;
+            }
+            let current = self.design.library(&name).expect("added").clone();
+            let cells: BTreeSet<&String> =
+                base.cells.keys().chain(disk.cells.keys()).chain(current.cells.keys()).collect();
+            for cell in cells {
+                let (b, d, c) = (base.cell(cell), disk.cell(cell), current.cell(cell));
+                if d == b || d == c {
+                    continue;
+                }
+                let id = CellId::new(&name, cell);
+                if c != b {
+                    merged.conflicts.push(id);
+                    continue;
+                }
+                if let Some(c) = c {
+                    self.record(&id, c.clone());
+                }
+                let lib = self.design.library_mut(&name).expect("exists");
+                match d {
+                    Some(d) => lib.insert(d.clone()),
+                    None => drop(lib.cells.remove(cell)),
+                }
+                merged.changed.push(id);
+            }
+            if current.folders == base.folders && disk.folders != base.folders {
+                self.design.library_mut(&name).expect("exists").folders = disk.folders.clone();
+            }
+            self.saved.insert(name, disk);
+        }
+        if project.manifest != self.saved_manifest {
+            if project.manifest != self.project.manifest {
+                self.project.manifest = project.manifest.clone();
+                merged.manifest = true;
+            }
+            self.saved_manifest = project.manifest;
+        }
+        if !merged.changed.is_empty() || merged.manifest {
+            self.after_outside_change();
+        }
+        Ok(merged)
+    }
+
+    /// Brings every view up to date after cells changed under it: tabs showing cells
+    /// that are gone close, and the rest are drawn again.
+    fn after_outside_change(&mut self) {
+        self.store_tab();
+        let exists = |d: &Design, v: &View| v.levels.iter().all(|l| d.cell(&l.cell).is_some());
+        let keep: Vec<bool> = self.tabs.iter().map(|t| exists(&self.design, t)).collect();
+        let active =
+            keep[self.active_tab].then(|| keep[..self.active_tab].iter().filter(|&&k| k).count());
+        let mut k = 0;
+        self.tabs.retain(|_| {
+            k += 1;
+            keep[k - 1]
+        });
+        self.back.retain(|v| exists(&self.design, v));
+        self.forward.retain(|v| exists(&self.design, v));
+        self.history.retain(|id, _| self.design.cell(id).is_some());
+        match active {
+            Some(i) => {
+                self.active_tab = i;
+                self.load_view(self.tabs[i].clone());
+            }
+            None if !self.tabs.is_empty() => {
+                self.active_tab = 0;
+                self.load_view(self.tabs[0].clone());
+            }
+            None => {
+                let lib = self.project.name().to_owned();
+                let top = CellId::new(&lib, &self.project.manifest.project.top);
+                // The top cell, or failing that any cell of the project.
+                let shown = Some(top).filter(|t| self.design.cell(t).is_some()).or_else(|| {
+                    let first = self.design.library(&lib)?.cells.keys().next()?;
+                    Some(CellId::new(&lib, first))
+                });
+                if let Some(id) = shown {
+                    let sheet = self.design.cell(&id).is_some_and(|d| d.schematic.is_some());
+                    let mode = if sheet { Mode::Schematic } else { Mode::Symbol };
+                    let view =
+                        View { levels: vec![Level { cell: id, via: None, camera: None }], mode };
+                    self.tabs.push(view.clone());
+                    self.active_tab = 0;
+                    self.load_view(view);
+                }
+            }
+        }
+        self.mark_stale();
+        self.selection.clear();
+        self.drag = None;
+        self.refresh();
+        self.recheck();
     }
 
     /// Creates an empty schematic cell in the project library, in `folder` (empty for
@@ -3583,5 +3770,99 @@ mod tests {
         ws.select_only(Some(Owner::Pin(0)));
         ws.delete_selection();
         assert_eq!(ws.symbol().unwrap().pins.len(), 2);
+    }
+
+    /// Changes the project's files as another program would: reads them, changes the
+    /// cells, writes them back.
+    fn change_on_disk(root: &Path, f: impl FnOnce(&mut Library)) {
+        let mut project = Project::load(root).unwrap();
+        f(&mut project.library);
+        project.save().unwrap();
+    }
+
+    fn describe(ws: &Workspace, cell: &str) -> String {
+        let id = CellId::new("cmos_inverter", cell);
+        ws.design.cell(&id).unwrap().cell.description.clone()
+    }
+
+    #[test]
+    fn changes_made_on_disk_are_taken_in_and_can_be_undone() {
+        let (tmp, mut ws) = example_copy();
+        let before = describe(&ws, "inverter");
+        assert!(ws.merge_from_disk().unwrap().is_empty(), "nothing changed yet");
+        change_on_disk(tmp.path(), |lib| {
+            lib.cells.get_mut("inverter").unwrap().cell.description = "from the assistant".into();
+            let mut extra = lib.cells["inverter"].clone();
+            extra.name = "extra".into();
+            lib.insert(extra);
+        });
+        let merged = ws.merge_from_disk().unwrap();
+        let ids = |names: &[&str]| -> Vec<CellId> {
+            names.iter().map(|n| CellId::new("cmos_inverter", n)).collect()
+        };
+        assert_eq!(merged.changed, ids(&["extra", "inverter"]));
+        assert!(merged.conflicts.is_empty());
+        assert!(merged.describe().contains("extra, inverter"), "{}", merged.describe());
+        assert_eq!(describe(&ws, "inverter"), "from the assistant");
+        assert!(!ws.dirty, "what is on disk is saved");
+        assert!(ws.merge_from_disk().unwrap().is_empty(), "taken in once");
+        // Undo puts the cell back as it was here, to be saved over the files.
+        ws.open_cell(CellId::new("cmos_inverter", "inverter"));
+        ws.undo();
+        assert_eq!(describe(&ws, "inverter"), before);
+        assert!(ws.dirty);
+    }
+
+    #[test]
+    fn a_cell_changed_both_here_and_on_disk_keeps_the_edit_here() {
+        let (tmp, mut ws) = example_copy();
+        ws.edit(|_, _, def| {
+            def.cell.description = "mine".into();
+            Ok(())
+        })
+        .unwrap();
+        change_on_disk(tmp.path(), |lib| {
+            lib.cells.get_mut("testbench").unwrap().cell.description = "theirs".into();
+            lib.cells.get_mut("inverter").unwrap().cell.description = "only theirs".into();
+        });
+        let merged = ws.merge_from_disk().unwrap();
+        assert_eq!(merged.conflicts, [CellId::new("cmos_inverter", "testbench")]);
+        assert_eq!(merged.changed, [CellId::new("cmos_inverter", "inverter")]);
+        assert!(merged.describe().contains("kept yours"), "{}", merged.describe());
+        assert_eq!(describe(&ws, "testbench"), "mine");
+        assert_eq!(describe(&ws, "inverter"), "only theirs");
+        assert!(ws.dirty);
+        ws.save().unwrap();
+        let on_disk = Project::load(tmp.path()).unwrap();
+        assert_eq!(on_disk.library.cells["testbench"].cell.description, "mine");
+        assert!(ws.merge_from_disk().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_cell_deleted_on_disk_closes_its_tab() {
+        let (tmp, mut ws) = example_copy();
+        let inverter = CellId::new("cmos_inverter", "inverter");
+        ws.open_cell(inverter.clone());
+        assert_eq!(ws.current().cell, inverter);
+        let mut project = Project::load(tmp.path()).unwrap();
+        let def = project.library.cells.remove("inverter").unwrap();
+        project.save().unwrap();
+        Library::remove_cell_files(tmp.path(), &def).unwrap();
+        let merged = ws.merge_from_disk().unwrap();
+        assert_eq!(merged.changed, std::slice::from_ref(&inverter));
+        assert!(ws.design.cell(&inverter).is_none());
+        assert_eq!(ws.current().cell, CellId::new("cmos_inverter", "testbench"));
+        assert!(!ws.tabs().contains(&inverter), "{:?}", ws.tabs());
+    }
+
+    #[test]
+    fn a_new_top_cell_on_disk_is_taken_in() {
+        let (tmp, mut ws) = example_copy();
+        let mut project = Project::load(tmp.path()).unwrap();
+        project.manifest.project.top = "inverter".into();
+        project.save().unwrap();
+        let merged = ws.merge_from_disk().unwrap();
+        assert!(merged.manifest && merged.changed.is_empty());
+        assert_eq!(ws.project.manifest.project.top, "inverter");
     }
 }

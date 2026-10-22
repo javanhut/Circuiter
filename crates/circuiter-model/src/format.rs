@@ -20,12 +20,14 @@ fn options() -> ron::Options {
 const WIDTH: usize = 100;
 const INDENT: usize = 4;
 
-pub(crate) fn to_ron<T: Serialize>(path: &Path, value: &T) -> Result<String> {
+/// `value` in the canonical layout the design files use; `path` names it in errors.
+pub fn to_ron<T: Serialize>(path: &Path, value: &T) -> Result<String> {
     let compact = options().to_string(value).map_err(|e| ModelError::parse(path, e))?;
     Ok(layout(&compact))
 }
 
-pub(crate) fn from_ron<T: DeserializeOwned>(path: &Path, text: &str) -> Result<T> {
+/// Reads RON as the design files are read; `path` names the text in errors.
+pub fn from_ron<T: DeserializeOwned>(path: &Path, text: &str) -> Result<T> {
     options().from_str(text).map_err(|e| ModelError::parse(path, e))
 }
 
